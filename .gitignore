@@ -1,0 +1,27 @@
+node_modules/
+**/node_modules/
+web/dist/
+web/.vite/
+functions/.env
+*.local
+.env
+.env.*
+!.env.example
+firebase-debug.log
+firebase-debug.*.log
+firestore-debug.log
+ui-debug.log
+.firebase/
+legacy/
+coverage/
+test-results/
+playwright-report/
+.last-run.json
+
+# Large reference images / generated assets at repo root (not part of the app build)
+/Gemini_Generated_Images_rc_f5d7f0c0cbcf9178_3/
+/Gemini_Generated_Images_rc_f5d7f0c0cbcf9178_3.zip
+/day 1.jpeg
+/day 2.png
+/homeschooling overview.png
+/mindset.png

@@ -1,0 +1,139 @@
+rules_version = '2';
+
+// Tenancy + role model (Phase 1).
+//
+// Roles on families/{id}/members/{uid}.data.role: 'owner' | 'parent' | 'viewer'.
+//   - owner  : full control incl. managing members + family settings
+//   - parent : read + write family content (profiles, children, activities…)
+//   - viewer : read-only
+//
+// IMPORTANT: Firestore evaluates every matching rule and allows if ANY grants
+// access (OR semantics). A broad `/{document=**}` write rule would therefore
+// override a stricter rule on a nested path. To keep "only the owner mutates
+// members" we DO NOT use a tenant-wide catch-all; each collection group gets a
+// distinct, non-overlapping match.
+//
+// Invariants:
+//   * A user can only touch a family they are a member of (or superadmin).
+//   * Family + member docs are created server-side (createFamily callable using
+//     the Admin SDK), never directly by clients.
+//   * Platform config is superadmin-only; the global skill registry is readable
+//     by any signed-in user.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isSuperAdmin() {
+      return signedIn() && request.auth.token.platformRole == 'superadmin';
+    }
+    function memberPath(familyId) {
+      return /databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid);
+    }
+    function isMember(familyId) {
+      return signedIn() && exists(memberPath(familyId));
+    }
+    function memberRole(familyId) {
+      return get(memberPath(familyId)).data.role;
+    }
+    function canManage(familyId) {
+      return isMember(familyId) && memberRole(familyId) == 'owner';
+    }
+    function canWrite(familyId) {
+      return isMember(familyId) && memberRole(familyId) in ['owner', 'parent'];
+    }
+    function canRead(familyId) {
+      return isMember(familyId) || isSuperAdmin();
+    }
+    function writable(familyId) {
+      return canWrite(familyId) || isSuperAdmin();
+    }
+
+    // A user reads/writes only their own user doc. The familyId pointer here is
+    // not trusted for access decisions — membership is proven by the members
+    // doc — so a self-edited pointer grants nothing.
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    // Platform config: superadmin only.
+    match /platform/{doc=**} {
+      allow read, write: if isSuperAdmin();
+    }
+
+    // Global skill registry (top-level collection): readable by any signed-in
+    // user so families can pick from it. Writes are server-side only — when a
+    // family manager adds a skill it is mirrored here by a Cloud Function
+    // (Admin SDK), so clients never write arbitrary global data directly.
+    match /skillRegistry/{skillId} {
+      allow read: if signedIn();
+      allow write: if isSuperAdmin();
+    }
+
+    match /families/{familyId} {
+      // Family creation/deletion is server-side only (callables w/ Admin SDK).
+      allow read: if canRead(familyId);
+      allow create, delete: if isSuperAdmin();
+      allow update: if canManage(familyId) || isSuperAdmin();
+
+      // Members: readable by any member; only the owner (or superadmin) mutates.
+      match /members/{memberUid} {
+        allow read: if canRead(familyId);
+        allow write: if canManage(familyId) || isSuperAdmin();
+      }
+
+      // Observations are bound to their author: a parent writes only their own
+      // and cannot rewrite another parent's observation.
+      match /observations/{obsId} {
+        allow read: if canRead(familyId);
+        allow create: if writable(familyId) &&
+          request.resource.data.authorUid == request.auth.uid;
+        allow update, delete: if isSuperAdmin() ||
+          (writable(familyId) && resource.data.authorUid == request.auth.uid);
+      }
+
+      // Server-maintained: the agent DB index and agent run records are written
+      // by Cloud Functions (Admin SDK). Clients read; only superadmin writes.
+      match /_agent_index/{path=**} {
+        allow read: if canRead(familyId);
+        allow write: if isSuperAdmin();
+      }
+      match /agentRuns/{path=**} {
+        allow read: if canRead(familyId);
+        allow write: if isSuperAdmin();
+      }
+
+      // Member-read / parent-write content (each match also covers the group's
+      // nested subcollections via {path=**}).
+      match /profile/{path=**}      { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /meta/{path=**}         { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /guardians/{path=**}    { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /children/{path=**}     { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /skills/{path=**}       { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /curriculum/{path=**}   { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /activities/{path=**}   { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /calendarDays/{path=**}        { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /scheduleTemplates/{path=**}  { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      // Player tokens are publicly readable — the token ID is an unguessable UUID
+      // that functions as a capability credential for the child's unauthenticated device.
+      match /playerTokens/{tokenId}        { allow read: if true; allow write: if writable(familyId); }
+      match /scores/{path=**}       { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /exposures/{path=**}    { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /contentStats/{path=**} { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      match /intercom/{path=**}     { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      // Invites: any signed-in user can read by knowing the UUID path (token = capability).
+      // Only the owner creates invites; status updates happen via Cloud Function (Admin SDK).
+      match /invites/{inviteId} {
+        allow read: if signedIn();
+        allow create: if canManage(familyId) || isSuperAdmin();
+        allow update, delete: if isSuperAdmin();
+      }
+    }
+
+    // Default deny.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

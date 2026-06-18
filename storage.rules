@@ -1,0 +1,17 @@
+rules_version = '2';
+
+// Storage holds generated story images, speech audio, and the Arabic qira'at
+// library. Phase 0 baseline: signed-in users read; writes happen server-side
+// via Cloud Functions (Admin SDK bypasses these rules). Tightened in Phase 7.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /public/{allPaths=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+  }
+}

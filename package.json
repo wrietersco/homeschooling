@@ -1,0 +1,23 @@
+{
+  "name": "dar-al-hikmah-os",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dar-al-Hikmah OS — homeschooling operations platform (Vue 3 + Firebase + GCP). Test/orchestration root.",
+  "scripts": {
+    "test:unit": "npm --prefix web run test:unit && npm --prefix functions run test:unit",
+    "test:rules": "firebase emulators:exec --only firestore \"node --test tests/rules/*.test.js\"",
+    "test:agents": "firebase emulators:exec --only firestore,functions \"node --test --test-concurrency 1 tests/agents/*.e2e.mjs\"",
+    "test:e2e": "firebase emulators:exec --only auth,firestore,functions \"playwright test\"",
+    "test:e2e:only": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:report": "playwright show-report",
+    "test": "npm run test:unit && npm run test:rules && npm run test:agents && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.1",
+    "@playwright/test": "^1.50.0",
+    "firebase": "^12.0.0",
+    "firebase-admin": "^13.0.0"
+  }
+}
