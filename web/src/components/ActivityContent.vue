@@ -15,12 +15,13 @@
 import { ref, computed } from "vue";
 import SpeakButton from "@/components/SpeakButton.vue";
 import { useSpeech } from "@/composables/useSpeech";
+import { buildTipsSections, tipsLangFor, tipLineId, tipSequence } from "@/lib/activityTips";
 
 const props = defineProps({
   content: { type: Object, required: true },
 });
 
-const { speak, speakSequence, sequenceIndex, playAudio, loadingId, ttsLogs } = useSpeech();
+const { speak, speakSequence, sequenceIndex, speakingId, playAudio, loadingId, ttsLogs } = useSpeech();
 
 const kind = computed(() => props.content?.kind || "steps");
 const primaryLang = computed(() => props.content?.primaryLang || "en");
@@ -144,6 +145,15 @@ const storyParagraphs = computed(() => {
     translation: translations[i] || null,
   }));
 });
+
+// ─── Tips (parent facilitation) ──────────────────────────────────────────────
+// The Tips / Watch for / Encourage guidance is written in the family's native
+// language (Urdu) — rendered in proper Nastaliq, and readable aloud line-by-line
+// or a whole section at a time so parents can listen instead of read.
+const tipsLang = computed(() => tipsLangFor(props.content?.tips));
+const tipsSections = computed(() => buildTipsSections(props.content?.tips));
+function lineId(text) { return tipLineId(tipsLang.value, text); }
+function playSection(items) { speakSequence(tipSequence(tipsLang.value, items)); }
 </script>
 
 <template>
@@ -424,18 +434,28 @@ const storyParagraphs = computed(() => {
 
     <!-- ─── TIPS (parent facilitation) ─────────────────────────────── -->
     <div v-else-if="kind === 'tips' && content.tips" class="tips">
-      <p class="ac-hint">This activity is parent-led — here's how to guide it well.</p>
-      <div v-if="content.tips.tips?.length" class="tips-block">
-        <h4 class="sub-h">💡 Tips</h4>
-        <ul class="tips-list"><li v-for="(t, i) in content.tips.tips" :key="i">{{ t }}</li></ul>
-      </div>
-      <div v-if="content.tips.watchFor?.length" class="tips-block">
-        <h4 class="sub-h">👀 Watch for</h4>
-        <ul class="tips-list"><li v-for="(t, i) in content.tips.watchFor" :key="i">{{ t }}</li></ul>
-      </div>
-      <div v-if="content.tips.encourage?.length" class="tips-block">
-        <h4 class="sub-h">🌟 Encourage</h4>
-        <ul class="tips-list"><li v-for="(t, i) in content.tips.encourage" :key="i">{{ t }}</li></ul>
+      <p class="ac-hint">This activity is parent-led — here's how to guide it well. Tap 🔊 to hear any line, or play a whole section.</p>
+      <div v-for="section in tipsSections" :key="section.key" class="tips-block">
+        <div class="tips-block-head">
+          <h4 class="sub-h">{{ section.icon }} {{ section.title }}</h4>
+          <button
+            type="button"
+            class="section-play"
+            :aria-label="`Play whole section: ${section.title}`"
+            @click="playSection(section.items)"
+          >🔊 Play section</button>
+        </div>
+        <ul class="tips-list" :class="[fontClassFor(tipsLang), { rtl: isRtlLang(tipsLang) }]">
+          <li
+            v-for="(t, i) in section.items"
+            :key="i"
+            class="tip-line"
+            :class="{ speaking: speakingId === lineId(t) }"
+          >
+            <SpeakButton :text="t" :lang="tipsLang" size="sm" class="tip-speak" />
+            <span class="tip-text">{{ t }}</span>
+          </li>
+        </ul>
       </div>
     </div>
 
@@ -461,10 +481,22 @@ const storyParagraphs = computed(() => {
 .ac-hint { font-size: 0.8rem; color: #64748b; margin: 0 0 0.75rem; }
 .ac-empty { font-size: 0.9rem; color: #94a3b8; }
 
-/* Tips (parent facilitation) */
+/* Tips (parent facilitation) — line-by-line + whole-section audio */
 .tips-block { background: rgba(255,255,255,0.7); border: 1px solid #e2e8f0; border-radius: 12px; padding: 0.75rem 0.95rem; margin-bottom: 0.75rem; }
-.tips-list { margin: 0; padding-left: 1.2rem; color: #1e293b; line-height: 1.7; }
-.tips-list li { margin-bottom: 0.25rem; }
+.tips-block-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.5rem; }
+.tips-block-head .sub-h { margin: 0; }
+.section-play { border: 1px solid #14532d; background: #14532d; color: #fff; border-radius: 999px; padding: 0.22rem 0.7rem; font-size: 0.78rem; font-weight: 600; cursor: pointer; white-space: nowrap; flex-shrink: 0; transition: background 0.12s; }
+.section-play:hover { background: #1a6b3a; }
+.section-play:active { transform: scale(0.96); }
+.tips-list { list-style: none; margin: 0; padding: 0; color: #1e293b; display: flex; flex-direction: column; gap: 0.35rem; }
+.tips-list li { margin: 0; }
+.tip-line { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.3rem 0.4rem; border-radius: 8px; transition: background 0.15s; }
+.tip-line.speaking { background: #dcfce7; }
+.tip-speak { margin-top: 0.15rem; flex-shrink: 0; }
+.tip-text { flex: 1; line-height: 1.8; }
+.tips-list.rtl .tip-text { text-align: right; }
+/* Nastaliq needs more size + vertical room to read beautifully. */
+.tips-list.font-urdu .tip-text { font-size: 1.3rem; line-height: 2.6; }
 
 /* Audio status + diagnostics */
 .audio-status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: #475569; margin: 0.75rem 0 0; }
