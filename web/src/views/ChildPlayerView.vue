@@ -18,7 +18,11 @@ const error = ref("");
 const TYPE_CONFIG = {
   quran:        { icon: "📖", label: "Quran Recitation",   bg: "#f0fdf4", color: "#14532d" },
   noorani_qaida:{ icon: "🔤", label: "Qaida Practice",     bg: "#eff6ff", color: "#1e3a5f" },
+  arabic_reading:{ icon: "📗", label: "Arabic Reading",    bg: "#ecfdf5", color: "#065f46" },
+  urdu_reading: { icon: "📙", label: "Urdu Reading",       bg: "#fff7ed", color: "#7c2d12" },
+  english_reading:{ icon: "📘", label: "English Reading",  bg: "#eff6ff", color: "#1e3a8f" },
   story_reading:{ icon: "📚", label: "Story Time",         bg: "#fefce8", color: "#713f12" },
+  conversation: { icon: "💬", label: "Conversation",       bg: "#eef2ff", color: "#3730a3" },
   mathematics:  { icon: "🔢", label: "Mathematics",        bg: "#faf5ff", color: "#4a1d96" },
   computer:     { icon: "💻", label: "Computer Activity",  bg: "#f0f9ff", color: "#0c4a6e" },
   ai_robotics:  { icon: "🤖", label: "AI & Robotics",      bg: "#fff7ed", color: "#7c2d12" },

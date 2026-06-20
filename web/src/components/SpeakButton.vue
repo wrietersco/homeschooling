@@ -14,13 +14,18 @@ const props = defineProps({
   size: { type: String, default: "md" },
   label: { type: String, default: "" },
   rate: { type: Number, default: 0.85 },
+  // Optional Gemini voice name (used to give dialogue characters distinct voices).
+  voiceName: { type: String, default: "" },
 });
 
-const { supported, speakingId, speak, playAudio, stop } = useSpeech();
+const { supported, speakingId, loadingId, speak, playAudio, stop } = useSpeech();
 
-// Unique-ish id per text+lang so the active chunk highlights while playing.
-const speakId = computed(() => `${props.lang}:${props.audioUrl || props.text}`);
+// Unique-ish id per text+lang+voice so the active chunk highlights while playing
+// (different-voice buttons for the same line must not collide).
+const speakId = computed(() => `${props.lang}:${props.voiceName}:${props.audioUrl || props.text}`);
 const active = computed(() => speakingId.value === speakId.value);
+// True while the Gemini audio for THIS button is being fetched.
+const loading = computed(() => loadingId.value === speakId.value);
 
 // Usable whenever there's recorded audio, server TTS (signed-in), or a browser
 // voice. Since text is always present and Gemini TTS covers it, show the button.
@@ -31,10 +36,10 @@ function onClick() {
   if (props.audioUrl) {
     playAudio(props.audioUrl, {
       id: speakId.value,
-      onError: () => speak(props.text, props.lang, { id: speakId.value, rate: props.rate }),
+      onError: () => speak(props.text, props.lang, { id: speakId.value, rate: props.rate, voiceName: props.voiceName }),
     });
   } else {
-    speak(props.text, props.lang, { id: speakId.value, rate: props.rate });
+    speak(props.text, props.lang, { id: speakId.value, rate: props.rate, voiceName: props.voiceName });
   }
 }
 </script>
@@ -44,13 +49,15 @@ function onClick() {
     v-if="usable"
     type="button"
     class="speak-btn"
-    :class="[`size-${size}`, { active }]"
+    :class="[`size-${size}`, { active, loading }]"
     :aria-label="label || `Listen: ${text}`"
-    :title="label || 'Listen'"
+    :title="loading ? 'Preparing audio…' : (label || 'Listen')"
+    :aria-busy="loading"
     @click.stop="onClick"
   >
-    <span class="ico">{{ active ? "⏸" : "🔊" }}</span>
-    <span v-if="label" class="lbl">{{ label }}</span>
+    <span v-if="loading" class="spin" aria-hidden="true"></span>
+    <span v-else class="ico">{{ active ? "⏸" : "🔊" }}</span>
+    <span v-if="label" class="lbl">{{ loading ? "Preparing…" : label }}</span>
   </button>
 </template>
 
@@ -72,4 +79,12 @@ function onClick() {
 
 .ico { line-height: 1; }
 .lbl { font-weight: 600; white-space: nowrap; }
+
+.speak-btn.loading { opacity: 0.85; cursor: progress; }
+.spin {
+  display: inline-block; width: 0.8em; height: 0.8em; border-radius: 50%;
+  border: 2px solid currentColor; border-top-color: transparent;
+  animation: speak-spin 0.7s linear infinite; vertical-align: middle;
+}
+@keyframes speak-spin { to { transform: rotate(360deg); } }
 </style>

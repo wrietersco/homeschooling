@@ -3,7 +3,6 @@
 // rewrite (/api/agent) wire up end to end. Real agent endpoints, scheduled
 // jobs, and media functions are added in their respective phases.
 import { initializeApp } from "firebase-admin/app";
-import { onRequest } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2";
 
 // Default Storage bucket for AI-generated activity images. Firebase's modern
@@ -29,16 +28,28 @@ export { askGuide } from "./agents/guide.js";
 export { askCurriculum } from "./agents/curriculum.js";
 
 // Phase 5 — Syllabus builder.
-export { generateSyllabus } from "./agents/syllabus.js";
+export { generateSyllabus, stopSyllabus, syllabusWorker } from "./agents/syllabus.js";
 
 // Activity content — type-specific content (verses / problems / story / steps).
-export { generateActivityContent, backfillActivityContent } from "./agents/activityContent.js";
+// Backfill runs server-side via a scheduled worker (like the syllabus builder):
+// the client enqueues via requestContentBackfill and watches progress.
+export { generateActivityContent, deleteActivityContent, backfillActivityContent, requestContentBackfill, stopContentBackfill, contentBackfillWorker, requestContentSample, regenerateFailedContent } from "./agents/activityContent.js";
+
+// Content planning agent — the "plan-first" layer. Designs a coherent per-subject
+// learning arc (stored at subjectPlans/{subjectId}) that every content worker
+// reads as its canvas, so activities interlink instead of being generated in
+// isolation. Button-triggered from the Syllabus screen.
+export { requestContentPlanning } from "./agents/contentPlan.js";
 
 // Text-to-speech — click-to-hear any word/phrase/paragraph (Gemini voices).
 export { synthesizeSpeech } from "./agents/tts.js";
 
 // Planner auto-scheduler — lays the syllabus onto a week's calendar.
 export { autoSchedule } from "./agents/scheduler.js";
+
+// Skill mapping agent — links children ↔ skills ↔ activities (time + extent) and
+// repairs activity→child bindings. Button-triggered from the Skills screen.
+export { requestSkillMap } from "./agents/skillMap.js";
 // Agent DB-index maintenance triggers (one per tracked collection).
 import { buildIndexTriggers } from "./agents/agentIndex.js";
 const __indexTriggers = buildIndexTriggers();
@@ -49,6 +60,15 @@ export const idx_curriculum = __indexTriggers.idx_curriculum;
 export const idx_activities = __indexTriggers.idx_activities;
 export const idx_observations = __indexTriggers.idx_observations;
 export const idx_scores = __indexTriggers.idx_scores;
+
+// Knowledge-brief grounding — triggers flag the brief stale; callables rebuild
+// it and serve the per-activity parent "journey".
+import { buildBriefTriggers } from "./agents/knowledgeBrief.js";
+const __briefTriggers = buildBriefTriggers();
+export const brief_activities = __briefTriggers.brief_activities;
+export const brief_curriculum = __briefTriggers.brief_curriculum;
+export const brief_blocks = __briefTriggers.brief_blocks;
+export { rebuildKnowledgeBrief, getActivityJourney } from "./agents/knowledgeBrief.js";
 
 // Phase 8 — Super Admin callables.
 export { listFamilies, setFamilyStatus, listFamilyMembers, setMemberRole, removeMember, deleteFamily, getLlmConfig, setLlmConfig } from "./platform/admin.js";
@@ -62,30 +82,12 @@ export { createInvite, acceptInvite } from "./platform/invites.js";
 // Lifecycle deletes — family admins + superadmin remove curriculum / syllabus.
 export { deleteCurriculum, deleteSyllabus } from "./platform/lifecycle.js";
 
-// TEMPORARY verification endpoint for the AI image storage path. Remove after.
-export const testImageGen = onRequest({ cors: true, secrets: ["GEMINI_API_KEY"] }, async (req, res) => {
-  if (req.query.k !== "verify-7a2f") { res.status(403).send("forbidden"); return; }
-  try {
-    const { generateActivityImage } = await import("./agents/imageGen.js");
-    const result = await generateActivityImage({
-      scene: "a friendly camel resting by date palms in a desert",
-      apiKey: process.env.GEMINI_API_KEY,
-      pathHint: "verify/test",
-    });
-    res.json({ ok: true, result });
-  } catch (e) {
-    res.json({ ok: false, error: String(e?.message || e) });
-  }
-});
+// Full-Quran import (superadmin) — populates the shared quran/* collection.
+export { importQuran, getQuranStatus } from "./platform/quranImport.js";
 
-// Reachable at /api/agent via the hosting rewrite. Returns a small JSON payload
-// confirming the function tier is alive. Replaced by the real agent runtime in
-// Phase 3.
-export const agent = onRequest({ cors: true }, (req, res) => {
-  res.json({
-    ok: true,
-    service: "dar-al-hikmah-functions",
-    phase: 0,
-    message: "agent runtime placeholder — implemented in Phase 3",
-  });
-});
+// Superadmin model tooling — catalog, live preview, and a test-all health check.
+export { getModelCatalog, previewModel, testAllModels } from "./platform/modelTools.js";
+
+// Scheduled maintenance — reap stale queue claims, delete expired player tokens,
+// and reconcile agent-index counts. (audit #6, #15)
+export { maintenanceWorker } from "./platform/maintenance.js";

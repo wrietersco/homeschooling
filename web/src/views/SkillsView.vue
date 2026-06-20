@@ -1,16 +1,79 @@
 <script setup>
-import { ref, computed } from "vue";
+import { ref, computed, watch, onUnmounted } from "vue";
+import { doc, collection, query, orderBy, limit, onSnapshot } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 import { useAuthStore } from "@/stores/auth";
 import { useProfilesStore } from "@/stores/profiles";
 import { useSkillsStore } from "@/stores/skills";
 import {
   createGlobalSkill, adoptRegistrySkill, removeFamilySkill,
-  bindSkillToChild, unbindSkillFromChild,
+  bindSkillToChild, unbindSkillFromChild, requestSkillMap,
 } from "@/services/skills";
 
 const auth = useAuthStore();
 const profiles = useProfilesStore();
 const skills = useSkillsStore();
+
+// ─── Skill development map (server-side agent) ───────────────────────────────
+const skillMap = ref(null);   // families/{id}/meta/skillMap — the rendered board
+const mapRun = ref(null);     // latest skillmap agentRuns doc — live progress
+const mapping = ref(false);
+const mapError = ref("");
+let stopMap = null;
+let stopRun = null;
+
+const canBuild = computed(() => ["owner", "parent"].includes(auth.role));
+const mapRunning = computed(() => mapping.value || mapRun.value?.status === "running");
+const mapChildren = computed(() =>
+  Object.entries(skillMap.value?.children || {}).map(([id, v]) => ({ id, name: v.name || id, skills: v.skills || [] }))
+);
+const mapRunChildren = computed(() =>
+  Object.entries(mapRun.value?.children || {}).map(([id, v]) => ({ id, ...v }))
+);
+
+const EXTENT_LABELS = { 1: "Introduced", 2: "Basic", 3: "Competent", 4: "Advanced", 5: "Mastered" };
+const statusIcon = (s) => ({ pending: "⏳", running: "⟳", done: "✓", error: "✗" }[s] || "⏳");
+function fmtMinutes(m) {
+  m = Number(m) || 0;
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60), r = m % 60;
+  return r ? `${h}h ${r}m` : `${h}h`;
+}
+
+function subscribe(familyId) {
+  teardown();
+  if (!familyId) return;
+  stopMap = onSnapshot(doc(db, "families", familyId, "meta", "skillMap"),
+    (s) => { skillMap.value = s.exists() ? s.data() : null; }, () => {});
+  // Newest skillmap run (single orderBy → no composite index needed).
+  stopRun = onSnapshot(
+    query(collection(db, "families", familyId, "agentRuns"), orderBy("createdAt", "desc"), limit(8)),
+    (snap) => {
+      const r = snap.docs.map((d) => ({ id: d.id, ...d.data() })).find((d) => d.type === "skillmap");
+      if (r) mapRun.value = r;
+    }, () => {});
+}
+function teardown() {
+  if (stopMap) { stopMap(); stopMap = null; }
+  if (stopRun) { stopRun(); stopRun = null; }
+}
+
+async function buildMap() {
+  if (!canBuild.value || mapping.value) return;
+  mapping.value = true;
+  mapError.value = "";
+  try {
+    const res = await requestSkillMap();
+    if (res?.configured === false) mapError.value = res.text || "The skill-mapping agent isn't configured.";
+  } catch (e) {
+    mapError.value = e?.message || "Failed to build the skill map.";
+  } finally {
+    mapping.value = false;
+  }
+}
+
+watch(() => auth.familyId, (id) => subscribe(id), { immediate: true });
+onUnmounted(teardown);
 
 const newName = ref("");
 const newCategory = ref("");
@@ -70,6 +133,59 @@ async function toggleChild(childId, skill) {
       Choose the skills you want your children to develop. Skills you add become
       available to the whole system, but are tracked individually per child.
     </p>
+
+    <!-- Skill development map (server-side agent) -->
+    <div class="card skillmap-card">
+      <div class="sm-head">
+        <h2>Skill development map</h2>
+        <button class="btn primary" :disabled="mapRunning || !canBuild" @click="buildMap">
+          {{ mapRunning ? "Building…" : (mapChildren.length ? "Refresh skill map" : "Build skill map") }}
+        </button>
+      </div>
+      <p class="sm-lede">
+        An agent reviews your children, activities and guiding light, then maps which child
+        develops which skill — through which activities, over how much time and to what extent.
+        It also repairs which child each activity is for. Re-run any time your plan changes.
+      </p>
+      <p v-if="mapError" class="error" role="alert">{{ mapError }}</p>
+
+      <!-- Live progress while the agent works, child by child -->
+      <div v-if="mapRunning && mapRunChildren.length" class="sm-progress">
+        <div class="sm-prog-head">
+          Building map… {{ mapRun?.completedChildren || 0 }} / {{ mapRun?.totalChildren || mapRunChildren.length }} children
+        </div>
+        <div v-for="c in mapRunChildren" :key="c.id" class="sm-prog-row" :class="c.status">
+          <span class="sm-prog-ico">{{ statusIcon(c.status) }}</span>
+          <span class="sm-prog-name">{{ c.name }}</span>
+          <span v-if="c.status === 'done'" class="sm-prog-meta">{{ c.skillCount }} skills · {{ c.activityCount }} activities</span>
+          <span v-else-if="c.status === 'error'" class="sm-prog-err">{{ c.error }}</span>
+          <span v-else class="sm-prog-meta">{{ c.status }}…</span>
+        </div>
+      </div>
+
+      <!-- Rendered board -->
+      <div v-if="mapChildren.length" class="sm-board">
+        <div v-for="child in mapChildren" :key="child.id" class="sm-child">
+          <h3 class="sm-child-name">{{ child.name }} <span class="muted">· {{ child.skills.length }} skill{{ child.skills.length === 1 ? "" : "s" }}</span></h3>
+          <p v-if="!child.skills.length" class="muted">No skills mapped for this child.</p>
+          <div v-for="s in child.skills" :key="s.skillId" class="sm-skill">
+            <div class="sm-skill-head">
+              <strong>{{ s.name }}</strong>
+              <span v-if="s.category" class="sm-cat">{{ s.category }}</span>
+              <span class="sm-ext" :class="`ext-${s.extent}`">{{ EXTENT_LABELS[s.extent] || s.extent }}</span>
+              <span class="sm-time">⏱ {{ fmtMinutes(s.totalMinutes) }}</span>
+            </div>
+            <div class="sm-ext-bar"><div class="sm-ext-fill" :style="{ width: (s.extent * 20) + '%' }"></div></div>
+            <div v-if="s.activities?.length" class="sm-acts">
+              <span v-for="a in s.activities" :key="a.id" class="sm-act" :title="`${a.minutes} min`">{{ a.title }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p v-else-if="!mapRunning" class="muted sm-empty">
+        No skill map yet — click <strong>Build skill map</strong> to generate it from your activities.
+      </p>
+    </div>
 
     <div v-if="canEdit()" class="card">
       <h2>Add a new skill</h2>
@@ -151,4 +267,40 @@ async function toggleChild(childId, skill) {
 .linkish { background: none; border: none; color: #2563eb; cursor: pointer; font: inherit; padding: 0; }
 .linkish.danger { color: #b91c1c; }
 .error { color: #b91c1c; }
+
+/* ─── Skill development map ─────────────────────────────────────────────────── */
+.skillmap-card { border-color: #c7d2fe; }
+.sm-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.5rem; }
+.sm-head h2 { margin: 0; }
+.sm-lede { color: #475569; font-size: 0.88rem; margin: 0 0 0.75rem; }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.sm-progress { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.75rem; margin-bottom: 1rem; }
+.sm-prog-head { font-size: 0.82rem; font-weight: 600; color: #334155; margin-bottom: 0.5rem; }
+.sm-prog-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.4rem; border-radius: 6px; font-size: 0.85rem; }
+.sm-prog-row.running { background: #fffbeb; }
+.sm-prog-row.done { background: #f0fdf4; }
+.sm-prog-row.error { background: #fff1f2; }
+.sm-prog-ico { width: 1.1rem; text-align: center; }
+.sm-prog-name { flex: 1; font-weight: 500; color: #1e293b; }
+.sm-prog-meta { font-size: 0.75rem; color: #64748b; }
+.sm-prog-err { font-size: 0.75rem; color: #b91c1c; }
+
+.sm-board { display: flex; flex-direction: column; gap: 1.25rem; }
+.sm-child { border-top: 1px solid #eef2f7; padding-top: 0.85rem; }
+.sm-child-name { font-size: 1rem; margin: 0 0 0.6rem; color: #0f172a; }
+.sm-skill { background: #fbfcfe; border: 1px solid #eef2f7; border-radius: 10px; padding: 0.6rem 0.75rem; margin-bottom: 0.5rem; }
+.sm-skill-head { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+.sm-skill-head strong { color: #1e293b; }
+.sm-cat { font-size: 0.68rem; font-weight: 600; padding: 0.08rem 0.45rem; border-radius: 999px; background: #eef2ff; color: #3730a3; }
+.sm-ext { font-size: 0.68rem; font-weight: 700; padding: 0.08rem 0.5rem; border-radius: 999px; background: #e2e8f0; color: #475569; }
+.sm-ext.ext-1 { background: #dcfce7; color: #166534; } .sm-ext.ext-2 { background: #dbeafe; color: #1e40af; }
+.sm-ext.ext-3 { background: #fef9c3; color: #854d0e; } .sm-ext.ext-4 { background: #fed7aa; color: #9a3412; }
+.sm-ext.ext-5 { background: #f3e8ff; color: #6b21a8; }
+.sm-time { font-size: 0.72rem; color: #64748b; margin-left: auto; }
+.sm-ext-bar { height: 5px; border-radius: 999px; background: #eef2f7; overflow: hidden; margin: 0.4rem 0; }
+.sm-ext-fill { height: 100%; border-radius: 999px; background: #6366f1; }
+.sm-acts { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.sm-act { font-size: 0.72rem; padding: 0.1rem 0.5rem; border-radius: 999px; background: #f1f5f9; color: #475569; }
+.sm-empty { padding: 0.5rem 0; }
 </style>

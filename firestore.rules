@@ -71,6 +71,13 @@ service cloud.firestore {
       allow write: if isSuperAdmin();
     }
 
+    // Shared Quran corpus (top-level): readable by any signed-in user; imported
+    // and maintained only by the superadmin via the importQuran callable.
+    match /quran/{doc=**} {
+      allow read: if signedIn();
+      allow write: if isSuperAdmin();
+    }
+
     match /families/{familyId} {
       // Family creation/deletion is server-side only (callables w/ Admin SDK).
       allow read: if canRead(familyId);
@@ -113,11 +120,22 @@ service cloud.firestore {
       match /skills/{path=**}       { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /curriculum/{path=**}   { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /activities/{path=**}   { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      // Per-subject content plans (the "canvas"): written server-side by the
+      // planning agent (Admin SDK); members read to review the arc before/after
+      // generating content.
+      match /subjectPlans/{path=**} { allow read: if canRead(familyId); allow write: if isSuperAdmin(); }
       match /calendarDays/{path=**}        { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /scheduleTemplates/{path=**}  { allow read: if canRead(familyId); allow write: if writable(familyId); }
       // Player tokens are publicly readable — the token ID is an unguessable UUID
-      // that functions as a capability credential for the child's unauthenticated device.
-      match /playerTokens/{tokenId}        { allow read: if true; allow write: if writable(familyId); }
+      // that functions as a capability credential for the child's unauthenticated
+      // device. Expiry is enforced server-side here (audit #6): a token with an
+      // expiresAtMs in the past is no longer readable. Tokens written before this
+      // field existed (no expiresAtMs) remain readable for backward compatibility.
+      match /playerTokens/{tokenId} {
+        allow read: if !('expiresAtMs' in resource.data) ||
+          resource.data.expiresAtMs > request.time.toMillis();
+        allow write: if writable(familyId);
+      }
       match /scores/{path=**}       { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /exposures/{path=**}    { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /contentStats/{path=**} { allow read: if canRead(familyId); allow write: if writable(familyId); }

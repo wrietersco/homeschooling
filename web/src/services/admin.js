@@ -16,3 +16,12 @@ export const setLlmConfig = (config) => call("setLlmConfig")(config);
 // (pass familyId to target a specific family).
 export const deleteCurriculum = (curriculumId, familyId) => call("deleteCurriculum")({ curriculumId, familyId });
 export const deleteSyllabus = (curriculumId, familyId) => call("deleteSyllabus")({ curriculumId, familyId });
+
+// Full-Quran import (superadmin).
+export const getQuranStatus = () => call("getQuranStatus")({});
+export const importQuran = (opts) => call("importQuran")(opts || {});
+
+// Model tooling (superadmin).
+export const getModelCatalog = () => call("getModelCatalog")({});
+export const previewModel = (data) => call("previewModel")(data);
+export const testAllModels = () => call("testAllModels")({});

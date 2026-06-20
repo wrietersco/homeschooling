@@ -46,7 +46,7 @@ export function sampleRateFromMime(mime) {
 }
 
 // ─── Gemini TTS call ──────────────────────────────────────────────────────────
-async function synthesizePcm({ text, voiceName, model, apiKey, fetchImpl = globalThis.fetch }) {
+export async function synthesizePcm({ text, voiceName, model, apiKey, fetchImpl = globalThis.fetch }) {
   const res = await fetchImpl(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
@@ -137,13 +137,24 @@ export const synthesizeSpeech = onCall(
           },
         });
         return { configured: true, cached: false, url: downloadUrl(bucket.name, filePath, token) };
-      } catch {
-        // fall through to data URL
+      } catch (e) {
+        console.warn(`[tts] storage save failed, considering inline fallback: ${e?.message || e}`);
       }
     }
-    return { configured: true, cached: false, url: `data:audio/wav;base64,${wav.toString("base64")}` };
+    // Storage unavailable: only inline SMALL clips as a base64 data URL. Large WAVs
+    // would bloat the callable response + the client cache (audit #17), so for those
+    // we signal unavailable and let the client fall back to the browser voice.
+    if (wav.length <= MAX_INLINE_WAV_BYTES) {
+      return { configured: true, cached: false, url: `data:audio/wav;base64,${wav.toString("base64")}` };
+    }
+    console.warn(`[tts] clip too large to inline (${wav.length} bytes) and storage unavailable`);
+    return { configured: true, cached: false, url: null, tooLarge: true };
   }
 );
+
+// ~1.5MB of WAV — comfortably covers a single word/sentence/short paragraph at
+// 24kHz mono 16-bit (~32s) without returning multi-MB JSON payloads.
+const MAX_INLINE_WAV_BYTES = 1_500_000;
 
 function downloadUrl(bucketName, filePath, token) {
   return `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(filePath)}?alt=media&token=${token}`;

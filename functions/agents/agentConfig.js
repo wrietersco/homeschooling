@@ -13,7 +13,7 @@ import { platformLlmConfig } from "../lib/paths.js";
 import { createGeminiClient } from "./llm.js";
 
 // Agents that can be configured independently. Keep in sync with the Platform UI.
-export const AGENT_KEYS = ["guide", "curriculum", "syllabus", "content", "scheduler", "image", "tts"];
+export const AGENT_KEYS = ["guide", "curriculum", "syllabus", "content", "scheduler", "brief", "image", "tts"];
 
 const BASE_MODEL = "gemini-2.5-flash";
 
@@ -23,8 +23,9 @@ export const AGENT_DEFAULTS = {
   guide: { model: BASE_MODEL, temperature: 0.4, maxOutputTokens: 2048, thinkingBudget: 0, systemInstructions: "" },
   curriculum: { model: BASE_MODEL, temperature: 0.4, maxOutputTokens: 8192, thinkingBudget: 0, systemInstructions: "" },
   syllabus: { model: BASE_MODEL, temperature: 0.4, maxOutputTokens: 2048, thinkingBudget: 0, systemInstructions: "" },
-  content: { model: BASE_MODEL, temperature: 0.5, maxOutputTokens: 4096, thinkingBudget: 0, systemInstructions: "" },
+  content: { model: BASE_MODEL, temperature: 0.5, maxOutputTokens: 8192, thinkingBudget: 0, systemInstructions: "" },
   scheduler: { model: BASE_MODEL, temperature: 0.3, maxOutputTokens: 4096, thinkingBudget: 0, systemInstructions: "" },
+  brief: { model: BASE_MODEL, temperature: 0.4, maxOutputTokens: 2048, thinkingBudget: 0, systemInstructions: "" },
   image: { model: "gemini-2.5-flash-image", systemInstructions: "" },
   tts: { model: "gemini-2.5-flash-preview-tts", voiceName: "Kore", systemInstructions: "" },
 };

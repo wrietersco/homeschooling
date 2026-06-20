@@ -8,13 +8,16 @@ import { collection, query, orderBy, getDocs, doc, getDoc } from "firebase/fires
 import { db } from "@/lib/firebase";
 import { useAuthStore } from "@/stores/auth";
 import { submitScore, addObservation, updateBlockStatus } from "@/services/player";
+import { getActivityJourney } from "@/services/brief";
 import ActivityContent from "@/components/ActivityContent.vue";
+import SpeakButton from "@/components/SpeakButton.vue";
 
 const auth = useAuthStore();
 
 const TYPE_ICONS = {
-  quran: "📖", noorani_qaida: "🔤", story_reading: "📚", mathematics: "🔢",
-  computer: "💻", ai_robotics: "🤖", physical: "🏃", teaching: "📝",
+  quran: "📖", noorani_qaida: "🔤",
+  arabic_reading: "📗", urdu_reading: "📙", english_reading: "📘", story_reading: "📚", conversation: "💬",
+  mathematics: "🔢", computer: "💻", ai_robotics: "🤖", physical: "🏃", teaching: "📝",
 };
 const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Advanced", 5: "Mastery" };
 
@@ -47,12 +50,16 @@ const currentActivity = computed(() => {
 });
 const dayHasBlocks = computed(() => blocks.value.length > 0);
 
+// Resolve the children this activity is for. The stored targetChildren may be
+// empty OR contain stale/garbage ids that don't match any current child — in
+// either case we fall back to ALL children so the parent can always record who
+// took part (and always sees a name), never a dead-end "No children assigned".
 const targetChildren = computed(() => {
   const a = currentActivity.value;
   if (!a && !currentBlock.value) return [];
   const ids = (a?.targetChildren?.length ? a.targetChildren : currentBlock.value?.targetChildren) || [];
-  const list = ids.length ? children.value.filter((c) => ids.includes(c.id)) : children.value;
-  return list;
+  const matched = ids.length ? children.value.filter((c) => ids.includes(c.id)) : [];
+  return matched.length ? matched : children.value;
 });
 
 async function loadChildren() {
@@ -92,15 +99,47 @@ async function ensureActivity(block) {
     const snap = await getDoc(doc(db, "families", auth.familyId, "activities", block.activityId));
     const activity = snap.exists() ? { id: snap.id, ...snap.data() } : null;
     activityCache.value[block.id] = { activity, loading: false };
-
-    const ids = (activity?.targetChildren?.length ? activity.targetChildren : block.targetChildren) || children.value.map((c) => c.id);
-    if (!scores.value[block.id]) {
-      scores.value[block.id] = {};
-      for (const cid of ids) scores.value[block.id][cid] = { completed: false, isDriving: false };
-    }
-    if (!obsChild.value[block.id] && ids.length) obsChild.value[block.id] = ids[0];
   } catch {
     activityCache.value[block.id] = { activity: null, loading: false };
+  }
+}
+
+// Initialise per-child score rows from the RESOLVED target children (real ids),
+// not whatever raw ids the activity stored. Runs whenever the active block or its
+// resolved children change, so the scoring checkboxes always bind to a real child.
+function ensureScores() {
+  const b = currentBlock.value;
+  if (!b) return;
+  const kids = targetChildren.value;
+  if (!kids.length) return;
+  const existing = scores.value[b.id] || {};
+  const next = {};
+  for (const c of kids) next[c.id] = existing[c.id] || { completed: false, isDriving: false };
+  scores.value[b.id] = next;
+  if (!obsChild.value[b.id]) obsChild.value[b.id] = kids[0].id;
+}
+watch([currentBlock, targetChildren], ensureScores, { immediate: true });
+
+// Parent "where this fits" journey — single state, reset on navigation.
+const journeyOpen = ref(false);
+const journeyLoading = ref(false);
+const journeyText = ref("");
+const journeyError = ref("");
+async function toggleJourney() {
+  journeyOpen.value = !journeyOpen.value;
+  const b = currentBlock.value;
+  if (journeyOpen.value && b && !journeyText.value && !journeyLoading.value) {
+    journeyLoading.value = true;
+    journeyError.value = "";
+    try {
+      const res = await getActivityJourney(b.activityId);
+      if (res?.configured === false) journeyError.value = "The plan brief isn't available yet.";
+      else journeyText.value = res?.text || "No journey information yet.";
+    } catch (e) {
+      journeyError.value = e?.message || "Could not load the plan context.";
+    } finally {
+      journeyLoading.value = false;
+    }
   }
 }
 
@@ -108,6 +147,7 @@ function go(to) {
   if (to < 0 || to >= blocks.value.length) return;
   index.value = to;
   saveError.value = "";
+  journeyOpen.value = false; journeyText.value = ""; journeyError.value = "";
   ensureActivity(blocks.value[to]);
 }
 
@@ -151,6 +191,23 @@ async function saveScores() {
     if (next !== -1) go(next);
   } catch (e) {
     saveError.value = e?.message || "Failed to save.";
+  } finally {
+    saving.value = false;
+  }
+}
+
+// Explicitly un-mark an activity the parent had marked done (e.g. ticked by
+// mistake, or the child didn't finish after all).
+async function reopenBlock() {
+  const b = currentBlock.value;
+  if (!b) return;
+  saving.value = true;
+  saveError.value = "";
+  try {
+    await updateBlockStatus(auth.familyId, dateKey.value, b.id, "planned");
+    blockDone.value[b.id] = false;
+  } catch (e) {
+    saveError.value = e?.message || "Failed to reopen.";
   } finally {
     saving.value = false;
   }
@@ -243,6 +300,12 @@ watch(dateKey, () => loadDay());
               <span class="meta-chip">{{ currentBlock.scheduledTime }} · {{ currentBlock.durationMinutes }} min</span>
               <span v-if="blockDone[currentBlock.id]" class="meta-chip done-chip">Done ✓</span>
             </div>
+            <div v-if="targetChildren.length" class="play-children">
+              <span class="for-label">For</span>
+              <span v-for="c in targetChildren" :key="c.id" class="child-chip">{{ c.name || c.id }}</span>
+              <span v-if="coopMode" class="child-chip coop">Co-op (together)</span>
+              <span v-else-if="targetChildren.length > 1" class="child-chip both">Combined</span>
+            </div>
           </div>
         </div>
 
@@ -250,6 +313,17 @@ watch(dateKey, () => loadDay());
         <details v-if="currentActivity?.parentInstructions" class="collapse">
           <summary>Parent instructions</summary>
           <p class="collapse-body">{{ currentActivity.parentInstructions }}</p>
+          <div v-if="currentActivity.parentInstructionsTranslit" class="mt-instructions">
+            <div class="mt-head">
+              <span class="mt-label">In your language</span>
+              <SpeakButton
+                :text="currentActivity.parentInstructionsNative || currentActivity.parentInstructionsTranslit"
+                size="sm"
+                label="Listen"
+              />
+            </div>
+            <p class="mt-translit">{{ currentActivity.parentInstructionsTranslit }}</p>
+          </div>
         </details>
 
         <!-- Ready-to-do content -->
@@ -261,17 +335,36 @@ watch(dateKey, () => loadDay());
           No interactive content for this activity yet — follow the instructions above.
         </p>
 
-        <!-- Scoring -->
+        <!-- Where this fits in the plan -->
         <section class="record">
-          <h3>Record completion</h3>
-          <div v-if="!targetChildren.length" class="muted">No children assigned.</div>
-          <template v-else>
+          <button class="journey-toggle" @click="toggleJourney" :aria-expanded="journeyOpen">
+            <span>🧭 Where this fits in the plan</span>
+            <span class="chev">{{ journeyOpen ? "▲" : "▼" }}</span>
+          </button>
+          <div v-if="journeyOpen" class="journey-body">
+            <p v-if="journeyLoading" class="muted">Reading the plan…</p>
+            <p v-else-if="journeyError" class="field-error">{{ journeyError }}</p>
+            <p v-else class="journey-text">{{ journeyText }}</p>
+          </div>
+        </section>
+
+        <!-- Completion -->
+        <section class="record">
+          <h3>Mark completion</h3>
+          <p v-if="blockDone[currentBlock.id]" class="done-banner">
+            ✓ This activity is marked <strong>done</strong> for {{ dateKey }}.
+          </p>
+          <p v-else class="record-hint">Tick each child who completed this activity, then save to mark it done.</p>
+          <template v-if="scores[currentBlock.id]">
             <div v-if="coopMode" class="coop-note">Co-op activity — optionally mark the driving child.</div>
             <div class="score-rows">
               <div v-for="child in targetChildren" :key="child.id" class="score-row">
                 <label class="score-check">
                   <input type="checkbox" v-model="scores[currentBlock.id][child.id].completed" />
                   <span>{{ child.name || child.id }}</span>
+                  <span class="score-state" :class="{ on: scores[currentBlock.id][child.id]?.completed }">
+                    {{ scores[currentBlock.id][child.id]?.completed ? "Completed" : "Not done" }}
+                  </span>
                 </label>
                 <button v-if="coopMode" class="driver-btn" :class="{ active: scores[currentBlock.id][child.id]?.isDriving }" @click="toggleDriver(currentBlock.id, child.id)">
                   {{ scores[currentBlock.id][child.id]?.isDriving ? "★ Driver" : "Driver?" }}
@@ -279,9 +372,14 @@ watch(dateKey, () => loadDay());
               </div>
             </div>
             <p v-if="saveError" class="field-error">{{ saveError }}</p>
-            <button class="btn primary" :disabled="saving" @click="saveScores">
-              {{ saving ? "Saving…" : (blockDone[currentBlock.id] ? "Update & continue" : "Save & mark done") }}
-            </button>
+            <div class="record-actions">
+              <button class="btn primary" :disabled="saving" @click="saveScores">
+                {{ saving ? "Saving…" : (blockDone[currentBlock.id] ? "Update & continue" : "Save & mark done") }}
+              </button>
+              <button v-if="blockDone[currentBlock.id]" class="btn secondary" :disabled="saving" @click="reopenBlock">
+                Mark not done
+              </button>
+            </div>
           </template>
         </section>
 
@@ -344,13 +442,32 @@ watch(dateKey, () => loadDay());
 .rank-3 { background: #fef9c3; color: #854d0e; } .rank-4 { background: #fed7aa; color: #9a3412; }
 .rank-5 { background: #f3e8ff; color: #6b21a8; }
 
+.play-children { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-top: 0.5rem; }
+.for-label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-right: 0.1rem; }
+.child-chip { font-size: 0.72rem; font-weight: 600; padding: 0.12rem 0.55rem; border-radius: 999px; background: #e0e7ff; color: #3730a3; }
+.child-chip.coop { background: #e0f2fe; color: #0369a1; }
+.child-chip.both { background: #dcfce7; color: #166534; }
+
 .collapse { background: #f8fafc; border-radius: 10px; padding: 0.6rem 0.8rem; }
 .collapse summary { cursor: pointer; font-size: 0.85rem; color: #475569; }
 .collapse-body { margin: 0.5rem 0 0; white-space: pre-wrap; color: #1e293b; line-height: 1.6; }
+.mt-instructions { margin-top: 0.6rem; padding-top: 0.5rem; border-top: 1px dashed #e2e8f0; }
+.mt-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.3rem; }
+.mt-label { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
+.mt-translit { white-space: pre-wrap; color: #334155; line-height: 1.6; margin: 0; }
 .content-box { background: #fbfdff; border: 1px solid #eef2f7; border-radius: 12px; padding: 1rem; }
 
 .record { border-top: 1px solid #f1f5f9; padding-top: 0.9rem; }
 .record h3 { margin: 0 0 0.6rem; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
+.journey-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; background: none; border: none; cursor: pointer; font: inherit; font-size: 0.92rem; font-weight: 600; color: #334155; padding: 0; }
+.journey-toggle .chev { color: #94a3b8; font-size: 0.8rem; }
+.journey-body { margin-top: 0.6rem; }
+.journey-text { white-space: pre-wrap; color: #1e293b; line-height: 1.7; margin: 0; }
+.record-hint { font-size: 0.82rem; color: #64748b; margin: 0 0 0.6rem; }
+.done-banner { font-size: 0.85rem; color: #166534; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 0.4rem 0.6rem; margin: 0 0 0.6rem; }
+.record-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.score-state { font-size: 0.7rem; font-weight: 600; padding: 0.08rem 0.45rem; border-radius: 999px; background: #f1f5f9; color: #94a3b8; }
+.score-state.on { background: #dcfce7; color: #166534; }
 .coop-note { background: #f0f9ff; color: #0369a1; padding: 0.35rem 0.6rem; border-radius: 6px; font-size: 0.82rem; margin-bottom: 0.5rem; }
 .score-rows { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.75rem; }
 .score-row { display: flex; align-items: center; gap: 0.75rem; }

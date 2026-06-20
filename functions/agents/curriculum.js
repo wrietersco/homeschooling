@@ -9,6 +9,7 @@ import { buildGroundedSystemPrompt } from "./grounding.js";
 import { createTools, filterDeclarations, READ_ONLY_TOOL_NAMES } from "./tools.js";
 import { runAgent } from "./runtime.js";
 import { resolveLlm } from "./agentConfig.js";
+import { regenerateBriefSafe } from "./knowledgeBrief.js";
 
 const CURRICULUM_BASE_PROMPT = [
   "You are the Dar-al-Hikmah curriculum architect for this family.",
@@ -40,6 +41,10 @@ const CURRICULUM_BASE_PROMPT = [
   "  targetChildren (child IDs from the family data).",
   "- Keep scope realistic: 4-7 subjects for 6 months.",
   "- Note co-op opportunities (siblings learning together) explicitly.",
+  "- Treat each reading LANGUAGE as its own subject/strand (Arabic reading, Urdu reading,",
+  "  English reading) with its own pedagogy — do not merge languages into a single 'Reading'.",
+  "- Keep Qur'an (recitation/memorisation of actual verses) SEPARATE from Arabic literacy",
+  "  (letters/phonics/words). They are different competencies.",
   "",
   "IMPORTANT: Do not call finalize_curriculum until you know: (a) which subjects to cover,",
   "(b) approximate levels for each child, and (c) the family's teaching preferences.",
@@ -173,6 +178,9 @@ export async function runCurriculum({ db, familyId, uid, role, message, history 
     },
     { merge: true }
   );
+
+  // A new curriculum changes the plan → refresh the shared brief.
+  if (curriculumCreated) await regenerateBriefSafe(db, familyId);
 
   return { text: result.text, runId: runRef.id, steps: result.steps, curriculum: curriculumCreated };
 }

@@ -20,10 +20,37 @@ const props = defineProps({
   content: { type: Object, required: true },
 });
 
-const { speak, playAudio } = useSpeech();
+const { speak, speakSequence, sequenceIndex, playAudio, loadingId, ttsLogs } = useSpeech();
 
 const kind = computed(() => props.content?.kind || "steps");
 const primaryLang = computed(() => props.content?.primaryLang || "en");
+
+// The family's native language. Content already in this language needs no
+// translation; content in any OTHER (non-native) language shows its meaning by
+// default so the child can follow it.
+const NATIVE_LANG = "ur";
+function isNativeLang(lang) { return new RegExp(`^${NATIVE_LANG}`).test((lang || "").toLowerCase()); }
+
+function isRtlLang(lang) { return /^(ar|ur|fa|ps)/.test((lang || "").toLowerCase()); }
+
+// The language of the main text the child reads for THIS content kind — drives
+// the auto-translate default below.
+const contentLang = computed(() => {
+  const c = props.content || {};
+  if (kind.value === "dialogue") return c.dialogue?.lang || primaryLang.value;
+  if (kind.value === "story" || kind.value === "reading") return c.story?.lang || primaryLang.value;
+  if (kind.value === "qaida_exercise") return (c.exercises?.[0]?.lang) || primaryLang.value;
+  return primaryLang.value; // quran_reading is always Arabic
+});
+
+// Pick the right joined-script font class for a BCP-47 language so Arabic and
+// Urdu render with proper naskh / nastaliq faces instead of a boxy system font.
+function fontClassFor(lang) {
+  const l = (lang || "").toLowerCase();
+  if (l.startsWith("ur")) return "font-urdu";
+  if (l.startsWith("ar") || l.startsWith("fa") || l.startsWith("ps")) return "font-arabic";
+  return "";
+}
 
 // Recite a single Quran word — real qirat audio if present, else TTS.
 function reciteWord(w) {
@@ -39,10 +66,55 @@ function reciteWord(w) {
 // last-resort offline fallback.
 
 // Reading-text size control (spec: child can enlarge / en-small the text).
+// Available across all Arabic Language & Qur'an content kinds.
+const SCALABLE_KINDS = ["quran_reading", "story", "reading", "qaida_exercise", "dialogue"];
 const fontScale = ref(1);
-const canScale = computed(() => kind.value === "quran_reading" || kind.value === "story");
+const canScale = computed(() => SCALABLE_KINDS.includes(kind.value));
 function bigger() { fontScale.value = Math.min(2.2, +(fontScale.value + 0.15).toFixed(2)); }
 function smaller() { fontScale.value = Math.max(0.7, +(fontScale.value - 0.15).toFixed(2)); }
+
+// Translation / meaning toggle for non-native content. Available across the
+// Arabic Language & Qur'an kinds; defaults ON when the content is in a language
+// other than the family's native one (Urdu), so the meaning shows automatically.
+// Reading passages only expose the toggle when a translation was actually
+// generated (Arabic passages) — Urdu/English passages carry none.
+const hasPassageTranslation = computed(() =>
+  (props.content?.story?.paragraphTranslations || []).some(Boolean)
+);
+const canTranslate = computed(() => {
+  const k = kind.value;
+  if (k === "reading" || k === "story") return hasPassageTranslation.value;
+  return ["quran_reading", "qaida_exercise", "dialogue"].includes(k);
+});
+const showMeaning = ref(canTranslate.value && !isNativeLang(contentLang.value));
+function toggleMeaning() { showMeaning.value = !showMeaning.value; }
+
+// ─── Dialogue (conversation) ─────────────────────────────────────────────────
+// Give each distinct speaker a different Gemini voice so the two sides of the
+// conversation are easy to tell apart. The TTS model is unchanged (superadmin-
+// set); only the voiceName varies per character.
+const VOICE_PALETTE = ["Kore", "Puck", "Charon", "Aoede", "Fenrir", "Leda", "Orus", "Zephyr"];
+const dialogueLang = computed(() => props.content?.dialogue?.lang || primaryLang.value);
+const dialogueVoices = computed(() => {
+  const map = {};
+  let idx = 0;
+  for (const t of props.content?.dialogue?.turns || []) {
+    const who = t.speaker || t.role || "?";
+    if (!(who in map)) { map[who] = VOICE_PALETTE[idx % VOICE_PALETTE.length]; idx += 1; }
+  }
+  return map;
+});
+function voiceForTurn(t) { return dialogueVoices.value[t.speaker || t.role || "?"] || ""; }
+function playScene() {
+  const turns = (props.content?.dialogue?.turns || []).map((t, i) => ({
+    text: t.text,
+    lang: dialogueLang.value,
+    voiceName: voiceForTurn(t),
+    id: `turn-${i}`,
+    rate: 0.95,
+  }));
+  speakSequence(turns);
+}
 
 // ─── Flashcards (legacy) ──────────────────────────────────────────────────────
 const flipped = ref({});
@@ -58,21 +130,43 @@ function splitSentences(text) {
 }
 function splitWords(text) { return text.split(/\s+/).filter(Boolean); }
 
-const storyParagraphs = computed(() =>
-  (props.content?.story?.paragraphs || []).map((p) => ({
+// True when any vocabulary word carries a generated picture (letter-sound /
+// picture-association activities) — switches the vocab list to a card grid.
+const vocabHasPictures = computed(() =>
+  (props.content?.story?.vocab || []).some((v) => v.image && v.image.url)
+);
+
+const storyParagraphs = computed(() => {
+  const translations = props.content?.story?.paragraphTranslations || [];
+  return (props.content?.story?.paragraphs || []).map((p, i) => ({
     text: p,
     sentences: splitSentences(p).map((s) => ({ text: s, words: splitWords(s) })),
-  }))
-);
+    translation: translations[i] || null,
+  }));
+});
 </script>
 
 <template>
   <div class="activity-content">
     <div class="ac-topbar">
-      <p v-if="content.instructions" class="ac-instructions">{{ content.instructions }}</p>
-      <div v-if="canScale" class="font-ctrl" role="group" aria-label="Text size">
-        <button type="button" @click="smaller" aria-label="Smaller text">A−</button>
-        <button type="button" @click="bigger" aria-label="Larger text">A+</button>
+      <p
+        v-if="content.instructions"
+        class="ac-instructions"
+        :class="[fontClassFor(contentLang), { rtl: isRtlLang(contentLang) }]"
+      >{{ content.instructions }}</p>
+      <div class="ac-controls">
+        <button
+          v-if="canTranslate"
+          type="button"
+          class="meaning-toggle"
+          :class="{ on: showMeaning }"
+          :aria-pressed="showMeaning"
+          @click="toggleMeaning"
+        >{{ showMeaning ? "Hide meaning" : "Show meaning" }}</button>
+        <div v-if="canScale" class="font-ctrl" role="group" aria-label="Text size">
+          <button type="button" @click="smaller" aria-label="Smaller text">A−</button>
+          <button type="button" @click="bigger" aria-label="Larger text">A+</button>
+        </div>
       </div>
     </div>
 
@@ -82,9 +176,9 @@ const storyParagraphs = computed(() =>
         <h3 class="quran-surah">{{ content.quran.surahName || "Quran" }}</h3>
         <span v-if="content.quran.reference" class="quran-ref">{{ content.quran.reference }}</span>
         <span
-          v-if="content.quran.textSource === 'quran.foundation' || content.quran.textSource === 'curated'"
+          v-if="['alquran.cloud', 'quran.foundation', 'curated'].includes(content.quran.textSource)"
           class="quran-verified"
-          title="Arabic text verified against Quran Foundation"
+          title="Arabic text verified against a Quran source"
         >✓ Verified text</span>
         <span
           v-else-if="content.quran.textSource"
@@ -99,15 +193,23 @@ const storyParagraphs = computed(() =>
           <span class="ayah-num">{{ vi + 1 }}</span>
           <SpeakButton :text="v.arabic" lang="ar" :audio-url="v.audioUrl" size="md" label="Recite ayah" :rate="0.8" />
         </div>
-        <p class="ayah-arabic" :style="{ fontSize: (2 * fontScale) + 'rem' }">
+        <p class="ayah-arabic font-arabic" :style="{ fontSize: (2 * fontScale) + 'rem' }">
           <template v-if="v.words && v.words.length">
             <span
               v-for="(w, wi) in v.words"
               :key="wi"
               class="ayah-word"
+              :class="{ 'with-gloss': showMeaning }"
               :title="w.transliteration ? `${w.transliteration} — tap to recite` : 'tap to recite'"
               @click="reciteWord(w)"
-            >{{ w.arabic }}</span>
+            >
+              <span class="aw-ar">{{ w.arabic }}</span>
+              <span v-if="showMeaning" class="aw-gloss">
+                <span v-if="w.transliteration" class="aw-tr">{{ w.transliteration }}</span>
+                <span v-if="w.en" class="aw-en">{{ w.en }}</span>
+                <span v-if="w.ur" class="aw-ur font-urdu">{{ w.ur }}</span>
+              </span>
+            </span>
           </template>
           <template v-else>{{ v.arabic }}</template>
         </p>
@@ -130,16 +232,49 @@ const storyParagraphs = computed(() =>
             :title="it.hint || it.transliteration || 'Recite'"
             @click="speak(it.text, ex.lang || primaryLang, { rate: 0.8 })"
           >
-            <span class="glyph-text">{{ it.text }}</span>
+            <img v-if="it.image && it.image.url" :src="it.image.url" :alt="it.image.alt || it.text" class="glyph-pic" loading="lazy" />
+            <span class="glyph-text" :class="fontClassFor(ex.lang || primaryLang)" :style="{ fontSize: (1.8 * fontScale) + 'rem' }">{{ it.text }}</span>
             <span v-if="it.transliteration" class="glyph-translit">{{ it.transliteration }}</span>
+            <span v-if="showMeaning && it.en" class="glyph-en">{{ it.en }}</span>
+            <span v-if="showMeaning && it.ur" class="glyph-ur font-urdu">{{ it.ur }}</span>
             <span class="glyph-ico">🔊</span>
           </button>
         </div>
       </div>
     </div>
 
-    <!-- ─── STORY ──────────────────────────────────────────────────── -->
-    <div v-else-if="kind === 'story' && content.story" class="story">
+    <!-- ─── DIALOGUE / CONVERSATION (listening & speaking) ─────────── -->
+    <div v-else-if="kind === 'dialogue' && content.dialogue" class="dialogue">
+      <div class="dialogue-head">
+        <h3 class="dialogue-title">{{ content.dialogue.title }}</h3>
+        <button type="button" class="scene-btn" @click="playScene">▶ Play whole scene</button>
+      </div>
+      <p v-if="content.dialogue.scenario" class="dialogue-scenario">{{ content.dialogue.scenario }}</p>
+      <p class="ac-hint">Each character has its own voice — tap a line to hear it, or play the whole scene.</p>
+
+      <div class="turns">
+        <div
+          v-for="(t, ti) in content.dialogue.turns"
+          :key="ti"
+          class="turn"
+          :class="[{ speaking: sequenceIndex === ti }, ti % 2 ? 'right' : 'left']"
+        >
+          <div class="turn-speaker">{{ t.speaker }}</div>
+          <div class="turn-bubble">
+            <div class="turn-line" :class="{ rtl: isRtlLang(content.dialogue.lang || primaryLang) }">
+              <p class="turn-text" :class="fontClassFor(content.dialogue.lang || primaryLang)" :style="{ fontSize: (1.1 * fontScale) + 'rem' }">{{ t.text }}</p>
+              <SpeakButton :text="t.text" :lang="content.dialogue.lang || primaryLang" :voice-name="voiceForTurn(t)" size="sm" label="Play" />
+            </div>
+            <p v-if="t.transliteration" class="turn-tr">{{ t.transliteration }}</p>
+            <p v-if="showMeaning && t.en" class="turn-en">{{ t.en }}</p>
+            <p v-if="showMeaning && t.ur" class="turn-ur font-urdu">{{ t.ur }}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── STORY / READING (Arabic·Urdu·English literacy) ─────────── -->
+    <div v-else-if="(kind === 'story' || kind === 'reading') && content.story" class="story">
       <div class="story-head">
         <h3 class="story-title">{{ content.story.title }}</h3>
         <SpeakButton :text="content.story.paragraphs.join(' ')" :lang="content.story.lang || primaryLang" size="md" label="Read whole story" :rate="0.9" />
@@ -155,16 +290,25 @@ const storyParagraphs = computed(() =>
 
       <div v-if="content.story.vocab?.length" class="vocab">
         <h4 class="sub-h">Words to know</h4>
-        <ul class="vocab-list">
-          <li v-for="(v, vi) in content.story.vocab" :key="vi" class="vocab-item">
-            <SpeakButton :text="v.word" :lang="content.story.lang || primaryLang" size="sm" />
-            <strong class="vocab-word">{{ v.word }}</strong>
-            <span class="vocab-meaning">— {{ v.meaning }}</span>
+        <ul class="vocab-list" :class="{ 'has-pics': vocabHasPictures }">
+          <li v-for="(v, vi) in content.story.vocab" :key="vi" class="vocab-item" :class="{ 'with-pic': v.image && v.image.url }">
+            <img
+              v-if="v.image && v.image.url"
+              :src="v.image.url"
+              :alt="v.image.alt || v.word"
+              class="vocab-pic"
+              loading="lazy"
+            />
+            <div class="vocab-text">
+              <SpeakButton :text="v.word" :lang="content.story.lang || primaryLang" size="sm" />
+              <strong class="vocab-word">{{ v.word }}</strong>
+              <span class="vocab-meaning">— {{ v.meaning }}</span>
+            </div>
           </li>
         </ul>
       </div>
 
-      <div class="passage" :class="{ rtl: (content.story.lang || primaryLang).startsWith('ar') }">
+      <div class="passage" :class="[fontClassFor(content.story.lang || primaryLang), { rtl: /^(ar|ur|fa)/.test((content.story.lang || primaryLang).toLowerCase()) }]">
         <div v-for="(para, pi) in storyParagraphs" :key="pi" class="para">
           <div class="para-tools">
             <SpeakButton :text="para.text" :lang="content.story.lang || primaryLang" size="md" label="Paragraph" :rate="0.9" />
@@ -181,6 +325,10 @@ const storyParagraphs = computed(() =>
               >{{ word }}</span>
             </span>
           </p>
+          <div v-if="showMeaning && para.translation" class="para-translation">
+            <p v-if="para.translation.en" class="para-tr-en" :style="{ fontSize: (1 * fontScale) + 'rem' }">{{ para.translation.en }}</p>
+            <p v-if="para.translation.ur" class="para-tr-ur font-urdu" :style="{ fontSize: (1.05 * fontScale) + 'rem' }">{{ para.translation.ur }}</p>
+          </div>
         </div>
       </div>
 
@@ -258,7 +406,7 @@ const storyParagraphs = computed(() =>
               <div class="fc-top-tools" @click.stop>
                 <SpeakButton :text="card.front" :lang="card.frontLang || primaryLang" size="md" label="Listen" />
               </div>
-              <p class="fc-front-text" :class="{ rtl: (card.frontLang || primaryLang).startsWith('ar') }">{{ card.front }}</p>
+              <p class="fc-front-text" :class="[fontClassFor(card.frontLang || primaryLang), { rtl: /^(ar|ur|fa)/.test((card.frontLang || primaryLang).toLowerCase()) }]">{{ card.front }}</p>
               <p v-if="card.transliteration" class="fc-translit">{{ card.transliteration }}</p>
               <span class="fc-flip-hint">tap to flip →</span>
             </div>
@@ -274,8 +422,34 @@ const storyParagraphs = computed(() =>
       </div>
     </div>
 
+    <!-- ─── TIPS (parent facilitation) ─────────────────────────────── -->
+    <div v-else-if="kind === 'tips' && content.tips" class="tips">
+      <p class="ac-hint">This activity is parent-led — here's how to guide it well.</p>
+      <div v-if="content.tips.tips?.length" class="tips-block">
+        <h4 class="sub-h">💡 Tips</h4>
+        <ul class="tips-list"><li v-for="(t, i) in content.tips.tips" :key="i">{{ t }}</li></ul>
+      </div>
+      <div v-if="content.tips.watchFor?.length" class="tips-block">
+        <h4 class="sub-h">👀 Watch for</h4>
+        <ul class="tips-list"><li v-for="(t, i) in content.tips.watchFor" :key="i">{{ t }}</li></ul>
+      </div>
+      <div v-if="content.tips.encourage?.length" class="tips-block">
+        <h4 class="sub-h">🌟 Encourage</h4>
+        <ul class="tips-list"><li v-for="(t, i) in content.tips.encourage" :key="i">{{ t }}</li></ul>
+      </div>
+    </div>
+
     <!-- Fallback when content is malformed/empty -->
     <p v-else class="ac-empty">No interactive content is available for this activity yet.</p>
+
+    <!-- Global audio status + diagnostics-on-request -->
+    <p v-if="loadingId" class="audio-status" role="status">
+      <span class="spin-sm" aria-hidden="true"></span> Preparing audio…
+    </p>
+    <details v-if="ttsLogs.length" class="audio-diag">
+      <summary>Audio diagnostics</summary>
+      <ul class="audio-log"><li v-for="(l, i) in ttsLogs" :key="i">{{ l }}</li></ul>
+    </details>
   </div>
 </template>
 
@@ -286,12 +460,38 @@ const storyParagraphs = computed(() =>
 .ac-instructions { font-size: 1rem; color: #334155; background: rgba(255,255,255,0.6); padding: 0.6rem 0.8rem; border-radius: 8px; margin: 0; line-height: 1.6; flex: 1; }
 .ac-hint { font-size: 0.8rem; color: #64748b; margin: 0 0 0.75rem; }
 .ac-empty { font-size: 0.9rem; color: #94a3b8; }
+
+/* Tips (parent facilitation) */
+.tips-block { background: rgba(255,255,255,0.7); border: 1px solid #e2e8f0; border-radius: 12px; padding: 0.75rem 0.95rem; margin-bottom: 0.75rem; }
+.tips-list { margin: 0; padding-left: 1.2rem; color: #1e293b; line-height: 1.7; }
+.tips-list li { margin-bottom: 0.25rem; }
+
+/* Audio status + diagnostics */
+.audio-status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: #475569; margin: 0.75rem 0 0; }
+.spin-sm { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid #cbd5e1; border-top-color: #0b1f3a; animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.audio-diag { margin-top: 0.5rem; font-size: 0.78rem; color: #64748b; }
+.audio-diag summary { cursor: pointer; }
+.audio-log { margin: 0.4rem 0 0; padding-left: 1rem; line-height: 1.5; }
 .sub-h { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin: 0 0 0.5rem; }
 .rtl { direction: rtl; }
 
+.ac-controls { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
 .font-ctrl { display: flex; gap: 0.3rem; flex-shrink: 0; }
 .font-ctrl button { border: 1px solid #cbd5e1; background: #fff; color: #334155; border-radius: 8px; padding: 0.25rem 0.6rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; }
 .font-ctrl button:hover { background: #f1f5f9; }
+.meaning-toggle { border: 1px solid #cbd5e1; background: #fff; color: #334155; border-radius: 999px; padding: 0.25rem 0.7rem; font-size: 0.8rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.meaning-toggle:hover { background: #f1f5f9; }
+.meaning-toggle.on { background: #14532d; border-color: #14532d; color: #fff; }
+
+/* Word-by-word gloss (English + Urdu) under each Arabic word */
+.ayah-word.with-gloss { display: inline-flex; flex-direction: column; align-items: center; vertical-align: top; margin: 0 0.15rem 0.5rem; }
+.aw-gloss { display: flex; flex-direction: column; align-items: center; gap: 0.05rem; margin-top: 0.15rem; line-height: 1.3; }
+.aw-tr { font-size: 0.7rem; color: #15803d; font-style: italic; direction: ltr; }
+.aw-en { font-size: 0.72rem; color: #475569; direction: ltr; }
+.aw-ur { font-size: 0.8rem; color: #334155; direction: rtl; }
+.glyph-en { font-size: 0.72rem; color: #475569; }
+.glyph-ur { font-size: 0.85rem; color: #334155; direction: rtl; }
 
 /* Quran */
 .quran-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
@@ -316,9 +516,32 @@ const storyParagraphs = computed(() =>
 .glyph { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; min-width: 64px; padding: 0.6rem 0.8rem; border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; cursor: pointer; transition: background 0.12s, transform 0.08s; }
 .glyph:hover { background: #eff6ff; }
 .glyph:active { transform: scale(0.95); }
+.glyph-pic { width: 84px; height: 84px; object-fit: cover; border-radius: 10px; background: #f1f5f9; margin-bottom: 0.15rem; }
 .glyph-text { font-size: 1.8rem; font-weight: 700; color: #0f172a; }
 .glyph-translit { font-size: 0.72rem; color: #64748b; }
 .glyph-ico { font-size: 0.75rem; opacity: 0.6; }
+
+/* Dialogue / conversation */
+.dialogue-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
+.dialogue-title { font-size: 1.2rem; color: #0f172a; margin: 0; }
+.scene-btn { border: 1px solid #0b1f3a; background: #0b1f3a; color: #fff; border-radius: 999px; padding: 0.35rem 0.85rem; font-size: 0.82rem; font-weight: 600; cursor: pointer; }
+.scene-btn:hover { background: #13294d; }
+.dialogue-scenario { font-size: 0.92rem; color: #475569; font-style: italic; margin: 0.4rem 0 0; }
+.turns { display: flex; flex-direction: column; gap: 0.7rem; margin-top: 0.75rem; }
+.turn { max-width: 88%; }
+.turn.left { align-self: flex-start; }
+.turn.right { align-self: flex-end; }
+.turn-speaker { font-size: 0.72rem; font-weight: 700; color: #64748b; margin-bottom: 0.2rem; }
+.turn.right .turn-speaker { text-align: right; }
+.turn-bubble { background: rgba(255,255,255,0.85); border: 1px solid #e2e8f0; border-radius: 14px; padding: 0.6rem 0.8rem; }
+.turn.right .turn-bubble { background: #eef2ff; border-color: #c7d2fe; }
+.turn.speaking .turn-bubble { box-shadow: 0 0 0 2px #6366f1; }
+.turn-line { display: flex; align-items: center; gap: 0.5rem; }
+.turn-line.rtl { flex-direction: row-reverse; }
+.turn-text { margin: 0; color: #0f172a; font-size: 1.1rem; line-height: 1.8; flex: 1; }
+.turn-tr { margin: 0.25rem 0 0; font-size: 0.82rem; color: #15803d; font-style: italic; }
+.turn-en { margin: 0.2rem 0 0; font-size: 0.85rem; color: #475569; }
+.turn-ur { margin: 0.2rem 0 0; font-size: 0.95rem; color: #334155; direction: rtl; }
 
 /* Story */
 .story-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
@@ -329,6 +552,12 @@ const storyParagraphs = computed(() =>
 .vocab-item { display: flex; align-items: center; gap: 0.5rem; font-size: 0.95rem; color: #1e293b; }
 .vocab-word { color: #0f172a; }
 .vocab-meaning { color: #475569; }
+/* Picture-naming layout: when vocab words carry generated pictures, lay them out
+   as picture cards (letter-sound / picture-association activities). */
+.vocab-list.has-pics { flex-direction: row; flex-wrap: wrap; gap: 0.9rem; }
+.vocab-list.has-pics .vocab-item.with-pic { flex-direction: column; align-items: center; gap: 0.4rem; width: 140px; background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 0.6rem; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+.vocab-pic { width: 116px; height: 116px; object-fit: cover; border-radius: 10px; background: #f1f5f9; }
+.vocab-text { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; justify-content: center; }
 .passage { display: flex; flex-direction: column; gap: 1rem; }
 .para { background: rgba(255,255,255,0.55); border-radius: 10px; padding: 0.75rem 0.9rem; }
 .para-tools { margin-bottom: 0.4rem; }
@@ -336,6 +565,10 @@ const storyParagraphs = computed(() =>
 .sentence { margin-right: 0.3rem; }
 .word { display: inline-block; cursor: pointer; margin: 0 0.12rem; padding: 0 0.12rem; border-radius: 4px; transition: background 0.1s; }
 .word:hover { background: #dbeafe; }
+/* Per-paragraph translation for non-native (e.g. Arabic) reading passages. */
+.para-translation { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #cbd5e1; }
+.para-tr-en { margin: 0; color: #475569; line-height: 1.6; direction: ltr; text-align: left; }
+.para-tr-ur { margin: 0.3rem 0 0; color: #334155; line-height: 1.9; direction: rtl; text-align: right; }
 .comprehension { margin-top: 1rem; background: rgba(255,255,255,0.7); border-radius: 10px; padding: 0.75rem 0.9rem; }
 .comp-list { margin: 0; padding-left: 1.2rem; color: #1e293b; font-size: 0.95rem; line-height: 1.7; }
 

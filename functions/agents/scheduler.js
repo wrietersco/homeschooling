@@ -14,6 +14,8 @@ import { familyPaths } from "../lib/paths.js";
 import { buildGroundedSystemPrompt } from "./grounding.js";
 import { runAgent } from "./runtime.js";
 import { resolveLlm } from "./agentConfig.js";
+import { regenerateBriefSafe } from "./knowledgeBrief.js";
+import { enforceDailyLimit } from "../lib/rateLimit.js";
 
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -142,6 +144,9 @@ export async function runAutoSchedule({ db, familyId, uid, weekDateKeys, llm, ge
     { merge: true }
   );
 
+  // The schedule changed — refresh the brief so agents/parents see the new plan.
+  await regenerateBriefSafe(db, familyId);
+
   return { runId: runRef.id, scheduled, text: result.text };
 }
 
@@ -150,6 +155,7 @@ export const autoSchedule = onCall({ secrets: ["GEMINI_API_KEY"], timeoutSeconds
   if (!["owner", "parent"].includes(role)) {
     throw new HttpsError("permission-denied", "Only family owners or parents can auto-schedule.");
   }
+  await enforceDailyLimit(db, familyId, "scheduler"); // audit #12
   const weekDateKeys = Array.isArray(request.data?.weekDateKeys)
     ? request.data.weekDateKeys.filter((k) => /^\d{4}-\d{2}-\d{2}$/.test(k)).slice(0, 7)
     : [];

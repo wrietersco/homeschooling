@@ -77,6 +77,31 @@ test("runAgent flags a truncated (MAX_TOKENS) response instead of passing it off
   assert.equal(result.text, "partial...");
 });
 
+test("runAgent threads toolConfig into the generate config (forced calling)", async () => {
+  const llm = fakeLlm([{ text: "", functionCalls: [{ name: "save", args: {} }] }]);
+  const tools = { save: async () => ({ saved: true }) };
+  const toolConfig = { functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["save"] } };
+  await runAgent({
+    llm, tools, userMessage: "x",
+    generationConfig: { maxOutputTokens: 4096 },
+    toolConfig, stopAfterTool: "save",
+  });
+  assert.deepEqual(llm.calls[0].config, { maxOutputTokens: 4096, toolConfig });
+});
+
+test("runAgent returns immediately after the stopAfterTool tool fires", async () => {
+  // The model would keep calling forever under forced mode; stopAfterTool ends it.
+  const llm = fakeLlm([{ text: "", functionCalls: [{ name: "save", args: { a: 1 } }] }]);
+  let calls = 0;
+  const tools = { save: async () => { calls++; return { saved: true }; } };
+  const result = await runAgent({
+    llm, tools, userMessage: "x", maxSteps: 4, stopAfterTool: "save",
+  });
+  assert.equal(result.stoppedAt, "tool");
+  assert.equal(calls, 1);          // tool ran exactly once
+  assert.equal(llm.calls.length, 1); // and we never asked the model again
+});
+
 test("runAgent stops at the step budget if the model never finalizes", async () => {
   const llm = fakeLlm([{ text: "", functionCalls: [{ name: "loop", args: {} }] }]);
   const tools = { loop: async () => ({ ok: true }) };

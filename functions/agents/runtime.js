@@ -14,17 +14,25 @@ export async function runAgent({
   maxSteps = 8,
   generationConfig,
   onStep,
+  // Optional forced-tool config (Gemini functionCallingConfig). When set, the
+  // model is REQUIRED to call a tool each turn instead of being free to reply
+  // with prose — pair with `stopAfterTool` so the loop ends as soon as the
+  // terminal tool fires (otherwise mode:"ANY" would force a redundant re-call).
+  toolConfig = null,
+  stopAfterTool = null,
 }) {
   const contents = [...history, { role: "user", parts: [{ text: userMessage }] }];
   const steps = [];
+  const config = toolConfig ? { ...generationConfig, toolConfig } : generationConfig;
 
   for (let i = 0; i < maxSteps; i++) {
-    const res = await llm.generate({ system, contents, toolDeclarations, config: generationConfig });
+    const res = await llm.generate({ system, contents, toolDeclarations, config });
 
     if (res.functionCalls && res.functionCalls.length) {
       contents.push({ role: "model", parts: res.functionCalls.map((fc) => ({ functionCall: fc })) });
 
       const responseParts = [];
+      let hitStopTool = false;
       for (const fc of res.functionCalls) {
         const tool = tools[fc.name];
         let result;
@@ -37,10 +45,27 @@ export async function runAgent({
         steps.push(step);
         if (onStep) await onStep(step);
         responseParts.push({ functionResponse: { name: fc.name, response: { result } } });
+        if (stopAfterTool && fc.name === stopAfterTool) hitStopTool = true;
       }
       // Gemini expects function responses in a user turn.
       contents.push({ role: "user", parts: responseParts });
+      // The terminal tool fired — its handler captured what we needed, so end
+      // here rather than letting a forced-mode loop request a redundant call.
+      if (hitStopTool) return { text: "", steps, contents, stoppedAt: "tool" };
       continue;
+    }
+
+    // No function call this turn. If the response was filtered by a safety /
+    // recitation block, surface that explicitly instead of returning an empty
+    // string that looks like the model "chose" to say nothing.
+    if (res.blockReason && !res.text) {
+      return {
+        text: "I couldn't complete that request because the response was filtered. Please rephrase or try a different passage.",
+        steps,
+        contents,
+        stoppedAt: "blocked",
+        blockReason: res.blockReason,
+      };
     }
 
     // No function call this turn. If the model hit the output-token ceiling,

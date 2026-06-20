@@ -8,6 +8,7 @@ import { db } from "@/lib/firebase";
 
 export async function createPlayerToken(familyId, activity, targetChildren, blockId, dateKey, createdBy) {
   const tokenId = crypto.randomUUID();
+  const expiresAtMs = Date.now() + 8 * 60 * 60 * 1000;
   await setDoc(doc(db, "families", familyId, "playerTokens", tokenId), {
     activityId: activity.id,
     activityTitle: activity.title,
@@ -23,7 +24,9 @@ export async function createPlayerToken(familyId, activity, targetChildren, bloc
     blockId: blockId || null,
     dateKey: dateKey || null,
     familyId,
-    expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000),
+    expiresAt: new Date(expiresAtMs),
+    // Numeric mirror so security rules can enforce expiry server-side (audit #6).
+    expiresAtMs,
     createdBy: createdBy || "",
     createdAt: new Date(),
   });

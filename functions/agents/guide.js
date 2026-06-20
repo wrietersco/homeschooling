@@ -3,7 +3,6 @@
 // set). Each run is persisted to agentRuns/{runId} for the audit trail and the
 // exchange is mirrored into the intercom chat log.
 import { HttpsError, onCall } from "firebase-functions/v2/https";
-import { FieldValue } from "firebase-admin/firestore";
 import { resolveCaller } from "../lib/caller.js";
 import { buildGroundedSystemPrompt } from "./grounding.js";
 import { createTools, filterDeclarations, READ_ONLY_TOOL_NAMES } from "./tools.js";
@@ -21,7 +20,7 @@ const GUIDE_BASE_PROMPT = [
 // Core (exported for integration tests that pass their own db/llm).
 export async function runGuide({ db, familyId, uid, role, message, history = [], llm, genConfig }) {
   const system = await buildGroundedSystemPrompt(db, familyId, GUIDE_BASE_PROMPT, "guide");
-  const run = { type: "guide", uid, status: "running", audit: [], createdAt: FieldValue.serverTimestamp() };
+  const run = { type: "guide", uid, status: "running", audit: [], createdAt: new Date() };
   const runRef = db.collection("families").doc(familyId).collection("agentRuns").doc();
   await runRef.set(run);
 
@@ -43,7 +42,7 @@ export async function runGuide({ db, familyId, uid, role, message, history = [],
       stoppedAt: result.stoppedAt,
       steps: result.steps.map((s) => ({ tool: s.tool, args: s.args })),
       answer: result.text,
-      finishedAt: FieldValue.serverTimestamp(),
+      finishedAt: new Date(),
     },
     { merge: true }
   );
@@ -66,10 +65,10 @@ export const askGuide = onCall({ secrets: ["GEMINI_API_KEY"] }, async (request) 
 
   // Persist the user's message to intercom for history continuity.
   const intercom = db.collection("families").doc(familyId).collection("intercom");
-  await intercom.add({ role: "user", uid, text: message, at: FieldValue.serverTimestamp() });
+  await intercom.add({ role: "user", uid, text: message, at: new Date() });
 
   const { text, runId } = await runGuide({ db, familyId, uid, role, message, llm, genConfig });
 
-  await intercom.add({ role: "assistant", text, runId, at: FieldValue.serverTimestamp() });
+  await intercom.add({ role: "assistant", text, runId, at: new Date() });
   return { text, runId, configured: true };
 });

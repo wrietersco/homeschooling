@@ -5,8 +5,10 @@ import { doc, getDoc, collection, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuthStore } from "@/stores/auth";
 import { createPlayerToken, submitScore, addObservation, updateBlockStatus } from "@/services/player";
-import { generateActivityContent } from "@/services/activityContent";
+import { generateActivityContent, deleteActivityContent } from "@/services/activityContent";
+import { getActivityJourney } from "@/services/brief";
 import ActivityContent from "@/components/ActivityContent.vue";
+import SpeakButton from "@/components/SpeakButton.vue";
 
 const route = useRoute();
 const auth = useAuthStore();
@@ -35,17 +37,44 @@ const obsSaved = ref(false);
 
 // Learning content (flashcards / qaida / story)
 const generatingContent = ref(false);
+const deletingContent = ref(false);
 const contentError = ref("");
+
+// Parent "where this fits in the plan" journey — lazy-loaded on expand.
+const journeyOpen = ref(false);
+const journeyLoading = ref(false);
+const journeyText = ref("");
+const journeyError = ref("");
+async function toggleJourney() {
+  journeyOpen.value = !journeyOpen.value;
+  if (journeyOpen.value && !journeyText.value && !journeyLoading.value) {
+    journeyLoading.value = true;
+    journeyError.value = "";
+    try {
+      const res = await getActivityJourney(activityId);
+      if (res?.configured === false) journeyError.value = "The plan brief isn't available yet.";
+      else journeyText.value = res?.text || "No journey information yet.";
+    } catch (e) {
+      journeyError.value = e?.message || "Could not load the plan context.";
+    } finally {
+      journeyLoading.value = false;
+    }
+  }
+}
 
 const CONTENT_KIND_LABEL = {
   quran: "Quran verses",
   noorani_qaida: "Qaida exercises",
+  arabic_reading: "Arabic reading",
+  urdu_reading: "Urdu reading",
+  english_reading: "Reading",
   story_reading: "Story passage",
+  conversation: "Conversation",
   mathematics: "Problem sums",
   computer: "Worksheet",
   ai_robotics: "Worksheet",
   physical: "Worksheet",
-  teaching: "Worksheet",
+  teaching: "Parent tips",
 };
 const contentLabel = computed(() =>
   CONTENT_KIND_LABEL[activity.value?.type] || "Activity content"
@@ -69,6 +98,24 @@ async function handleGenerateContent() {
   }
 }
 
+// Delete the generated content for this activity, returning it to the empty
+// state. We do NOT auto-regenerate afterwards — the parent chose to remove it
+// and can rebuild it with the Generate button when ready.
+async function handleDeleteContent() {
+  if (!activity.value?.content || deletingContent.value) return;
+  if (!window.confirm("Delete the generated content for this activity? You can regenerate it afterwards.")) return;
+  deletingContent.value = true;
+  contentError.value = "";
+  try {
+    await deleteActivityContent(activity.value.id);
+    activity.value.content = null;
+  } catch (e) {
+    contentError.value = e?.message || "Failed to delete content.";
+  } finally {
+    deletingContent.value = false;
+  }
+}
+
 // Child link
 const generatingLink = ref(false);
 const playerLink = ref("");
@@ -76,8 +123,9 @@ const linkError = ref("");
 const linkCopied = ref(false);
 
 const TYPE_ICONS = {
-  quran: "📖", noorani_qaida: "🔤", story_reading: "📚", mathematics: "🔢",
-  computer: "💻", ai_robotics: "🤖", physical: "🏃", teaching: "📝",
+  quran: "📖", noorani_qaida: "🔤",
+  arabic_reading: "📗", urdu_reading: "📙", english_reading: "📘", story_reading: "📚", conversation: "💬",
+  mathematics: "🔢", computer: "💻", ai_robotics: "🤖", physical: "🏃", teaching: "📝",
 };
 const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Advanced", 5: "Mastery" };
 
@@ -248,6 +296,17 @@ async function handleSubmitObservation() {
       <section class="card">
         <h2 class="card-h">Parent Instructions</h2>
         <p class="instructions">{{ activity.parentInstructions || "No instructions provided." }}</p>
+        <div v-if="activity.parentInstructionsTranslit" class="mt-instructions">
+          <div class="mt-head">
+            <span class="mt-label">In your language</span>
+            <SpeakButton
+              :text="activity.parentInstructionsNative || activity.parentInstructionsTranslit"
+              size="sm"
+              label="Listen"
+            />
+          </div>
+          <p class="mt-translit">{{ activity.parentInstructionsTranslit }}</p>
+        </div>
       </section>
 
       <!-- Walkthrough -->
@@ -261,15 +320,24 @@ async function handleSubmitObservation() {
         <div class="content-head">
           <h2 class="card-h">Activity Content — {{ contentLabel }}</h2>
           <!-- Content is generated automatically when the activity is created and
-               on first open; the only manual control is a subtle Regenerate. -->
-          <button
-            v-if="activity.content"
-            class="btn secondary regen-btn"
-            :disabled="generatingContent"
-            @click="handleGenerateContent"
-          >
-            {{ generatingContent ? "Working…" : "Regenerate" }}
-          </button>
+               on first open; manual controls let a parent regenerate or delete it. -->
+          <div class="content-actions">
+            <button
+              v-if="activity.content"
+              class="btn ghost danger del-btn"
+              :disabled="generatingContent || deletingContent"
+              @click="handleDeleteContent"
+            >
+              {{ deletingContent ? "Deleting…" : "Delete" }}
+            </button>
+            <button
+              class="btn secondary regen-btn"
+              :disabled="generatingContent || deletingContent"
+              @click="handleGenerateContent"
+            >
+              {{ generatingContent ? "Working…" : (activity.content ? "Regenerate" : "Generate") }}
+            </button>
+          </div>
         </div>
         <p v-if="contentError" class="field-error" role="alert">{{ contentError }}</p>
 
@@ -281,8 +349,23 @@ async function handleSubmitObservation() {
           Building the {{ contentLabel.toLowerCase() }} automatically…
         </p>
         <p v-else class="card-desc">
-          Preparing the {{ contentLabel.toLowerCase() }} automatically…
+          No {{ contentLabel.toLowerCase() }} yet — use Generate to create it.
         </p>
+      </section>
+
+      <!-- Where this fits in the plan (parent journey) -->
+      <section class="card">
+        <button class="journey-toggle" @click="toggleJourney" :aria-expanded="journeyOpen">
+          <span>🧭 Where this fits in the plan</span>
+          <span class="chev">{{ journeyOpen ? "▲" : "▼" }}</span>
+        </button>
+        <div v-if="journeyOpen" class="journey-body">
+          <p v-if="journeyLoading" class="card-desc generating">
+            <span class="mini-spinner" aria-hidden="true"></span> Reading the plan…
+          </p>
+          <p v-else-if="journeyError" class="field-error">{{ journeyError }}</p>
+          <p v-else class="journey-text">{{ journeyText }}</p>
+        </div>
       </section>
 
       <!-- Child link -->
@@ -404,14 +487,30 @@ async function handleSubmitObservation() {
 
 .content-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem; }
 .content-head .card-h { margin: 0; }
+.content-actions { display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; }
 .regen-btn { font-size: 0.8rem; padding: 0.3rem 0.8rem; flex-shrink: 0; }
+.del-btn { font-size: 0.8rem; padding: 0.3rem 0.8rem; flex-shrink: 0; }
+.btn.ghost { background: transparent; color: #475569; border: 1px solid #cbd5e1; }
+.btn.ghost.danger { color: #b91c1c; border-color: #fca5a5; }
+.btn.ghost.danger:hover:not(:disabled) { background: #fef2f2; border-color: #f87171; }
 .content-preview { margin-top: 0.75rem; }
 .generating { display: flex; align-items: center; gap: 0.5rem; color: #475569; }
 .mini-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #cbd5e1; border-top-color: #0b1f3a; animation: spin 0.7s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.journey-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; background: none; border: none; cursor: pointer; font: inherit; font-size: 0.95rem; font-weight: 600; color: #334155; padding: 0; }
+.journey-toggle .chev { color: #94a3b8; font-size: 0.8rem; }
+.journey-body { margin-top: 0.75rem; }
+.journey-text { white-space: pre-wrap; color: #1e293b; line-height: 1.7; margin: 0; }
+
 .instructions, .walkthrough { white-space: pre-wrap; color: #1e293b; line-height: 1.7; margin: 0; }
 .walkthrough { color: #475569; font-style: italic; }
+
+/* Mother-tongue (transliterated + spoken) parent instructions */
+.mt-instructions { margin-top: 0.85rem; padding-top: 0.75rem; border-top: 1px dashed #e2e8f0; }
+.mt-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }
+.mt-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
+.mt-translit { white-space: pre-wrap; color: #334155; line-height: 1.7; margin: 0; }
 
 /* Child link */
 .link-box { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
