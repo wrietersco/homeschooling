@@ -22,7 +22,7 @@ export { createFamily } from "./auth/onboarding.js";
 export { createGlobalSkill } from "./skills/registry.js";
 
 // Phase 3 — AI agent runtime.
-export { askGuide } from "./agents/guide.js";
+export { askGuide, clearGuideHistory } from "./agents/guide.js";
 
 // Phase 4 — Curriculum agent.
 export { askCurriculum } from "./agents/curriculum.js";
@@ -73,6 +73,9 @@ export { rebuildKnowledgeBrief, getActivityJourney } from "./agents/knowledgeBri
 // Phase 8 — Super Admin callables.
 export { listFamilies, setFamilyStatus, listFamilyMembers, setMemberRole, removeMember, deleteFamily, getLlmConfig, setLlmConfig } from "./platform/admin.js";
 
+// Cost reporting (superadmin) — platform/per-family cost overview + deep event log.
+export { getCostOverview, getFamilyCostDetail } from "./platform/costReport.js";
+
 // Phase 10 — Demo data seeder (superadmin-only).
 export { seedDemoFamily } from "./platform/seeder.js";
 
@@ -91,3 +94,12 @@ export { getModelCatalog, previewModel, testAllModels } from "./platform/modelTo
 // Scheduled maintenance — reap stale queue claims, delete expired player tokens,
 // and reconcile agent-index counts. (audit #6, #15)
 export { maintenanceWorker } from "./platform/maintenance.js";
+
+// Read-only activity differentiation audit — flags skill-paced activities that
+// are clubbed across children of differing levels (e.g. Noorani Qaida). Produces
+// a restructure plan; mutates nothing.
+export { auditActivityDifferentiation } from "./platform/activityAudit.js";
+
+// Differentiation apply — generates per-child content variants (content.byChild)
+// for clubbed skill-paced activities, leveled per child. Pilot: Noorani Qaida.
+export { differentiateActivities } from "./platform/differentiate.js";

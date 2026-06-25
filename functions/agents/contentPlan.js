@@ -251,7 +251,7 @@ export const requestContentPlanning = onCall(
       throw new HttpsError("permission-denied", "Only family owners or parents can plan content.");
     }
     const onlySubjectId = String(request.data?.subjectId || "").trim();
-    const { llm, genConfig } = await resolveLlm(db, "curriculum", process.env.GEMINI_API_KEY);
+    const { llm, genConfig } = await resolveLlm(db, "curriculum", process.env.GEMINI_API_KEY, { familyId, uid, source: "requestContentPlanning" });
     if (!llm) return { configured: false, text: "The planning agent isn't configured — set the GEMINI_API_KEY secret to enable it." };
     const res = await runContentPlanning({ db, familyId, uid, role, llm, genConfig, onlySubjectId });
     return { configured: true, ...res };

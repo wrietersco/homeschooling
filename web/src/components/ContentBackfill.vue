@@ -18,6 +18,7 @@ import { requestContentBackfill, stopContentBackfill } from "@/services/activity
 const auth = useAuthStore();
 
 const status = ref("");      // queued | running | done | error | cancelled (server)
+const mode = ref("fill");    // fill (missing only) | regenerate (overwrite all)
 const processed = ref(0);
 const total = ref(0);
 const remaining = ref(0);
@@ -79,6 +80,7 @@ function watchProgress(familyId) {
       if (!snap.exists()) return;
       const d = snap.data() || {};
       status.value = d.status || "";
+      mode.value = d.mode === "regenerate" ? "regenerate" : "fill";
       processed.value = Number(d.processed || 0);
       total.value = Number(d.total || 0);
       remaining.value = Number(d.remaining || 0);
@@ -158,7 +160,7 @@ onUnmounted(() => {
         <span v-else-if="cancelled" class="check" aria-hidden="true">■</span>
         <span v-else class="check" aria-hidden="true">✓</span>
         <span class="bf-title">
-          <template v-if="running">Preparing activity content</template>
+          <template v-if="running">{{ mode === "regenerate" ? "Regenerating activity content" : "Preparing activity content" }}</template>
           <template v-else-if="cancelled">Content generation stopped</template>
           <template v-else>Activity content ready</template>
         </span>

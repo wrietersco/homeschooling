@@ -25,3 +25,18 @@ export const importQuran = (opts) => call("importQuran")(opts || {});
 export const getModelCatalog = () => call("getModelCatalog")({});
 export const previewModel = (data) => call("previewModel")(data);
 export const testAllModels = () => call("testAllModels")({});
+
+// Cost reporting (superadmin).
+export const getCostOverview = (month) => call("getCostOverview")(month ? { month } : {});
+export const getFamilyCostDetail = (data) => call("getFamilyCostDetail")(data);
+
+// Activity differentiation audit (owner/parent) — read-only; returns the
+// restructure plan for skill-paced activities clubbed across children.
+export const auditActivityDifferentiation = () => call("auditActivityDifferentiation")({});
+
+// Differentiation apply (owner/parent) — generates per-child content variants for
+// clubbed skill-paced activities. Each call is bounded (usually 1 activity × its
+// children) but per-child content + image generation is slow, so override the
+// callable's 70s default timeout. The client re-invokes until remaining = 0.
+export const differentiateActivities = (data) =>
+  httpsCallable(functions, "differentiateActivities", { timeout: 540000 })(data || {}).then((r) => r.data);

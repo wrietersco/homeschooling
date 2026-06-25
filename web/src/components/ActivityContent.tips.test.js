@@ -97,6 +97,45 @@ describe("ActivityContent — tips (audio + Nastaliq)", () => {
     expect(speaking[0].find(".tip-text").text()).toBe("خیال رکھیں");
   });
 
+  it("renders an embedded ready-to-use story + discussion questions, no blank story when absent", async () => {
+    const withStory = {
+      kind: "tips",
+      primaryLang: "ur",
+      tips: {
+        lang: "ur",
+        story: { title: "ابو بکرؓ کی کہانی", paragraphs: ["پہلا حصہ۔", "دوسرا حصہ۔"], moral: "ہمدردی سیکھیں۔" },
+        discussionQuestions: ["بچے نے کیا محسوس کیا؟"],
+        tips: ["آہستہ پڑھیں"],
+      },
+    };
+    const wrapper = mount(ActivityContent, { props: { content: withStory } });
+    const story = wrapper.find(".tips-story");
+    expect(story.exists()).toBe(true);
+    expect(story.find(".story-title").text()).toBe("ابو بکرؓ کی کہانی");
+    expect(story.findAll(".para-body").length).toBe(2);
+    expect(story.find(".tips-moral").text()).toContain("ہمدردی");
+    // The discussion block renders with its own heading.
+    const heads = wrapper.findAll(".tips-block .sub-h").map((h) => h.text());
+    expect(heads).toContain("💬 Talk about it");
+    // The plain tips content (TIPS_CONTENT) carries no story → no story block.
+    expect(mountTips().find(".tips-story").exists()).toBe(false);
+  });
+
+  it("reads the moral aloud as part of the whole story when 'Read aloud' is tapped", async () => {
+    const withStory = {
+      kind: "tips",
+      primaryLang: "ur",
+      tips: {
+        lang: "ur",
+        story: { title: "ابو بکرؓ کی کہانی", paragraphs: ["پہلا حصہ۔", "دوسرا حصہ۔"], moral: "ہمدردی سیکھیں۔" },
+        tips: ["آہستہ پڑھیں"],
+      },
+    };
+    const wrapper = mount(ActivityContent, { props: { content: withStory } });
+    await wrapper.find(".tips-story .story-head .speak-btn").trigger("click");
+    expect(speak).toHaveBeenCalledWith("پہلا حصہ۔ دوسرا حصہ۔ ہمدردی سیکھیں۔", "ur", expect.any(Object));
+  });
+
   it("drops empty sections instead of rendering blank blocks", () => {
     const wrapper = mount(ActivityContent, {
       props: { content: { kind: "tips", primaryLang: "ur", tips: { tips: ["only this"], watchFor: [], encourage: [] } } },

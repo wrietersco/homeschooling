@@ -68,6 +68,62 @@ test("a hollow forced save_content call is retried, then reported as an empty pa
   assert.equal(llm.calls.length, 2); // first attempt + one retry
 });
 
+test("a teaching activity embeds a ready-to-use story in its tips content", async () => {
+  // The core fix: parent-led (teaching → tips) activities that revolve around a
+  // story must carry the FULL story, not tell the parent to go find one.
+  const STORY_ACTIVITY = { id: "t1", title: "Empathy Story: Walking in Their Shoes", type: "teaching" };
+  const TIPS = {
+    kind: "tips",
+    tips: {
+      lang: "ur",
+      story: { title: "ابو بکرؓ کی مہربانی", paragraphs: ["پہلا حصہ۔", "دوسرا حصہ۔", "آخری حصہ۔"], moral: "ہمدردی۔" },
+      discussionQuestions: ["بچے نے کیسا محسوس کیا؟", "ہم کیا سیکھتے ہیں؟"],
+      tips: ["کہانی آہستہ پڑھیں۔"],
+    },
+  };
+  const llm = scriptedLlm([saveCall(TIPS), { text: "done" }]);
+  const { content, reason } = await generateContentForActivity({ activity: STORY_ACTIVITY, llm, genConfig: { maxOutputTokens: 4096 }, ...opts });
+  assert.equal(reason, "");
+  assert.ok(content, "tips content should be produced");
+  assert.equal(content.kind, "tips");
+  assert.equal(content.tips.story.paragraphs.length, 3, "the full story is embedded");
+  assert.equal(content.tips.story.moral, "ہمدردی۔");
+  assert.equal(content.tips.discussionQuestions.length, 2);
+  assert.equal(content.tips.lang, "ur");
+});
+
+test("a story-only tips payload (no facilitation tips) is still valid content", async () => {
+  // isContentEmpty must treat an embedded story as content even when the bare
+  // `tips` list is empty — the story is the deliverable.
+  const STORY_ONLY = {
+    kind: "tips",
+    tips: { story: { paragraphs: ["A complete little story."], moral: "Kindness." } },
+  };
+  const llm = scriptedLlm([saveCall(STORY_ONLY), { text: "done" }]);
+  const { content, reason } = await generateContentForActivity({ activity: { id: "t2", title: "Kindness tale", type: "teaching" }, llm, genConfig: { maxOutputTokens: 4096 }, ...opts });
+  assert.equal(reason, "");
+  assert.ok(content, "a story-only tips payload is not empty");
+  assert.equal(content.tips.story.paragraphs.length, 1);
+});
+
+test("parent guidance is injected into the generation prompt", async () => {
+  const llm = scriptedLlm([saveCall(PROBLEMS), { text: "done" }]);
+  await generateContentForActivity({
+    activity: MATH, llm, genConfig: { maxOutputTokens: 4096 }, ...opts,
+    guidance: "The previous version was far too hard — use numbers under 5 only.",
+  });
+  // The system prompt the LLM received must carry the parent's instructions so
+  // the model knows why it's regenerating and what to change.
+  assert.match(llm.calls[0].system, /PARENT'S INSTRUCTIONS FOR THIS REGENERATION/);
+  assert.match(llm.calls[0].system, /numbers under 5 only/);
+});
+
+test("omitted guidance leaves no guidance block in the prompt", async () => {
+  const llm = scriptedLlm([saveCall(PROBLEMS), { text: "done" }]);
+  await generateContentForActivity({ activity: MATH, llm, genConfig: { maxOutputTokens: 4096 }, ...opts });
+  assert.doesNotMatch(llm.calls[0].system, /PARENT'S INSTRUCTIONS FOR THIS REGENERATION/);
+});
+
 test("describeNoContent maps every stop reason to a clear message", () => {
   assert.match(describeNoContent({ stoppedAt: "truncated" }, "problems"), /output space.*\(problems\)/i);
   assert.match(describeNoContent({ stoppedAt: "blocked", blockReason: "SAFETY" }), /filtered \(SAFETY\)/);

@@ -13,6 +13,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { familyPaths } from "../lib/paths.js";
 import { resolveCaller } from "../lib/caller.js";
 import { resolveLlm } from "./agentConfig.js";
+import { withCurrentDate } from "../lib/dateContext.js";
 
 function briefRef(db, familyId) {
   return db.collection("families").doc(familyId).collection("meta").doc("knowledge_brief");
@@ -85,7 +86,7 @@ export async function regenerateBrief({ db, familyId, llm, genConfig }) {
   if (llm && hasContent) {
     const user = "DATA (JSON):\n" + JSON.stringify(data).slice(0, 14000) + "\n\nWrite the brief now.";
     try {
-      const res = await llm.generate({ system: BRIEF_SYSTEM, contents: [{ role: "user", parts: [{ text: user }] }], config: genConfig });
+      const res = await llm.generate({ system: withCurrentDate(BRIEF_SYSTEM), contents: [{ role: "user", parts: [{ text: user }] }], config: genConfig });
       narrative = (res.text || "").trim();
     } catch (e) { console.warn(`[brief] narrative generation failed for ${familyId}: ${e?.message || e}`); }
   }
@@ -98,7 +99,7 @@ export async function regenerateBrief({ db, familyId, llm, genConfig }) {
 // primary operation.
 export async function regenerateBriefSafe(db, familyId) {
   try {
-    const { llm, genConfig } = await resolveLlm(db, "brief", process.env.GEMINI_API_KEY);
+    const { llm, genConfig } = await resolveLlm(db, "brief", process.env.GEMINI_API_KEY, { familyId, source: "regenerateBriefSafe" });
     await regenerateBrief({ db, familyId, llm, genConfig });
   } catch (e) { console.warn(`[brief] regenerateBriefSafe(${familyId}) failed: ${e?.message || e}`); }
 }
@@ -143,7 +144,7 @@ export function buildBriefTriggers() {
 // ── Manual rebuild callable ───────────────────────────────────────────────────
 export const rebuildKnowledgeBrief = onCall({ secrets: ["GEMINI_API_KEY"], timeoutSeconds: 120 }, async (request) => {
   const { db, familyId } = await resolveCaller(request);
-  const { llm, genConfig } = await resolveLlm(db, "brief", process.env.GEMINI_API_KEY);
+  const { llm, genConfig } = await resolveLlm(db, "brief", process.env.GEMINI_API_KEY, { familyId, source: "rebuildKnowledgeBrief" });
   if (!llm) return { configured: false };
   const { hasNarrative } = await regenerateBrief({ db, familyId, llm, genConfig });
   return { configured: true, hasNarrative };
@@ -176,7 +177,7 @@ export async function runActivityJourney({ db, familyId, activityId, llm, genCon
     JSON.stringify(data).slice(0, 12000),
   ].join("\n");
   try {
-    const res = await llm.generate({ system, contents: [{ role: "user", parts: [{ text: user }] }], config: genConfig });
+    const res = await llm.generate({ system: withCurrentDate(system), contents: [{ role: "user", parts: [{ text: user }] }], config: genConfig });
     return { configured: true, text: (res.text || "").trim() };
   } catch (e) {
     throw new HttpsError("internal", e?.message || "Could not build the activity journey.");
@@ -187,7 +188,7 @@ export const getActivityJourney = onCall({ secrets: ["GEMINI_API_KEY"], timeoutS
   const { db, familyId } = await resolveCaller(request);
   const activityId = String(request.data?.activityId || "").trim();
   if (!activityId) throw new HttpsError("invalid-argument", "activityId is required.");
-  const { llm, genConfig } = await resolveLlm(db, "brief", process.env.GEMINI_API_KEY);
+  const { llm, genConfig } = await resolveLlm(db, "brief", process.env.GEMINI_API_KEY, { familyId, activityId, source: "getActivityJourney" });
   if (!llm) return { configured: false, text: "" };
   return runActivityJourney({ db, familyId, activityId, llm, genConfig });
 });

@@ -27,6 +27,35 @@ test("mergeAgentConfig: stored default overrides built-in, agent override wins o
   assert.equal(syllabus.temperature, 0.9);
 });
 
+test("mergeAgentConfig: global default cannot lower a per-agent token ceiling", () => {
+  // Platform UI seeds the global default at 2048 and persists it on "Save all
+  // agent settings". That must not truncate curriculum/content, whose built-in
+  // is 8192 (large finalize_curriculum / content tool-call payloads).
+  const doc = { default: { maxOutputTokens: 2048 }, agents: {} };
+
+  const curriculum = mergeAgentConfig(doc, "curriculum");
+  assert.ok(curriculum.maxOutputTokens >= 8192, `curriculum kept ${curriculum.maxOutputTokens}`);
+
+  const content = mergeAgentConfig(doc, "content");
+  assert.ok(content.maxOutputTokens >= 8192, `content kept ${content.maxOutputTokens}`);
+
+  // Agents whose built-in is at/below the default still take the default.
+  const guide = mergeAgentConfig(doc, "guide");
+  assert.equal(guide.maxOutputTokens, 2048);
+});
+
+test("mergeAgentConfig: explicit per-agent override may still lower the ceiling", () => {
+  const doc = { default: { maxOutputTokens: 2048 }, agents: { curriculum: { maxOutputTokens: 4096 } } };
+  const curriculum = mergeAgentConfig(doc, "curriculum");
+  assert.equal(curriculum.maxOutputTokens, 4096); // explicit superadmin choice wins
+});
+
+test("mergeAgentConfig: global default may still raise a token ceiling", () => {
+  const doc = { default: { maxOutputTokens: 16384 }, agents: {} };
+  const curriculum = mergeAgentConfig(doc, "curriculum");
+  assert.equal(curriculum.maxOutputTokens, 16384);
+});
+
 test("mergeAgentConfig keeps the tts voiceName", () => {
   const cfg = mergeAgentConfig({ default: {}, agents: { tts: { voiceName: "Puck" } } }, "tts");
   assert.equal(cfg.voiceName, "Puck");

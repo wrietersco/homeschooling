@@ -17,6 +17,8 @@ const STALE_CLAIM_MS = 12 * 60 * 1000; // a "running" claim older than this is s
 const QUEUE_COLLECTIONS = ["syllabusQueue", "contentBackfillQueue"];
 const TOKEN_DELETE_LIMIT = 300;        // bound deletes per pass
 const RECONCILE_FAMILY_LIMIT = 25;     // bound index reconciliation per pass
+const COST_EVENT_TTL_MS = 90 * 24 * 60 * 60 * 1000; // raw cost events kept 90 days
+const COST_EVENT_DELETE_LIMIT = 400;   // bound cost-event deletes per pass
 
 // 1. Requeue queue rows stuck in "running" past the staleness threshold.
 export async function reapStaleQueueClaims(db, nowMs = Date.now()) {
@@ -63,6 +65,31 @@ export async function deleteExpiredTokens(db, nowMs = Date.now()) {
   return { deleted };
 }
 
+// 2b. Delete raw cost events past the retention window (90 days). Rollups are
+// permanent; only the deep per-call log is bounded so heavy backfills can't grow
+// the costEvents collection without limit (Phase C retention).
+export async function deleteExpiredCostEvents(db, nowMs = Date.now()) {
+  let deleted = 0;
+  try {
+    const cutoff = new Date(nowMs - COST_EVENT_TTL_MS);
+    const snap = await db
+      .collectionGroup("costEvents")
+      .where("ts", "<", cutoff)
+      .limit(COST_EVENT_DELETE_LIMIT)
+      .get();
+    const refs = snap.docs.map((d) => d.ref);
+    for (let i = 0; i < refs.length; i += 400) {
+      const batch = db.batch();
+      for (const ref of refs.slice(i, i + 400)) batch.delete(ref);
+      await batch.commit();
+    }
+    deleted = refs.length;
+  } catch (e) {
+    console.warn(`[maintenance] delete expired cost events failed: ${e?.message || e}`);
+  }
+  return { deleted };
+}
+
 // 3. Reconcile agent-index counts for a bounded set of families.
 export async function reconcileIndexes(db, limit = RECONCILE_FAMILY_LIMIT) {
   let families = 0;
@@ -81,8 +108,9 @@ export async function reconcileIndexes(db, limit = RECONCILE_FAMILY_LIMIT) {
 export async function runMaintenancePass(db, nowMs = Date.now()) {
   const reaped = await reapStaleQueueClaims(db, nowMs);
   const tokens = await deleteExpiredTokens(db, nowMs);
+  const costEvents = await deleteExpiredCostEvents(db, nowMs);
   const indexes = await reconcileIndexes(db);
-  return { reaped, tokens, indexes };
+  return { reaped, tokens, costEvents, indexes };
 }
 
 export const maintenanceWorker = onSchedule(

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { useRoute } from "vue-router";
 import { doc, getDoc, collection, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -22,6 +22,18 @@ const children = ref([]);
 const loading = ref(true);
 const notFound = ref(false);
 
+// Parent instructions are shown in the guardian's native language first — their
+// mother tongue in native script (e.g. Urdu Nastaliq), falling back to the roman
+// transliteration when no native script was generated. The English version is
+// kept as a collapsible secondary. When no mother-tongue version exists at all,
+// English is shown plainly as the headline.
+const nativeInstructions = computed(() =>
+  activity.value?.parentInstructionsNative || activity.value?.parentInstructionsTranslit || ""
+);
+const hasNativeInstructions = computed(() => Boolean(nativeInstructions.value));
+// Render in Nastaliq + RTL only when showing actual native script (not roman).
+const nativeIsScript = computed(() => Boolean(activity.value?.parentInstructionsNative));
+
 // Scoring
 const scores = ref({});     // { childId: { completed: bool, isDriving: bool } }
 const submittingScore = ref(false);
@@ -39,6 +51,10 @@ const obsSaved = ref(false);
 const generatingContent = ref(false);
 const deletingContent = ref(false);
 const contentError = ref("");
+// Optional parent direction for a regeneration — why, and what to change/fix.
+// Threaded into the generator's prompt. Capped to match the server (6000 chars).
+const GUIDANCE_MAX = 6000;
+const regenGuidance = ref("");
 
 // Parent "where this fits in the plan" journey — lazy-loaded on expand.
 const journeyOpen = ref(false);
@@ -85,7 +101,7 @@ async function handleGenerateContent() {
   generatingContent.value = true;
   contentError.value = "";
   try {
-    const res = await generateActivityContent(activity.value.id);
+    const res = await generateActivityContent(activity.value.id, regenGuidance.value.trim());
     if (res?.configured === false) {
       contentError.value = res.text || "Content generation isn't configured yet.";
       return;
@@ -121,6 +137,25 @@ const generatingLink = ref(false);
 const playerLink = ref("");
 const linkError = ref("");
 const linkCopied = ref(false);
+
+// Shareable activity URL — the per-activity page itself. Any guardian in the
+// same family can open it and view/edit per their permissions, so this is the
+// link a parent hands to a partner guardian (or the guide quotes on a call).
+const shareLink = computed(() =>
+  activity.value ? `${window.location.origin}/activity/${activity.value.id}` : ""
+);
+const shareCopied = ref(false);
+const uidCopied = ref(false);
+
+async function copyToClipboard(text, flag) {
+  try {
+    await navigator.clipboard.writeText(text);
+    flag.value = true;
+    setTimeout(() => (flag.value = false), 2000);
+  } catch { /* clipboard blocked */ }
+}
+const copyShareLink = () => copyToClipboard(shareLink.value, shareCopied);
+const copyUid = () => copyToClipboard(activity.value?.id || "", uidCopied);
 
 const TYPE_ICONS = {
   quran: "📖", noorani_qaida: "🔤",
@@ -166,6 +201,28 @@ const targetChildren = computed(() => {
     : children.value.map((c) => c.id);
   return children.value.filter((c) => ids.includes(c.id));
 });
+
+// Per-child differentiated content (content.byChild). When present, the parent can
+// flip between each child's level-paced version here, mirroring the player.
+const previewChildId = ref("");
+const byChildMap = computed(() => activity.value?.contentByChild || null);
+const differentiatedChildren = computed(() => {
+  const m = byChildMap.value;
+  if (!m) return [];
+  return targetChildren.value.filter((c) => m[c.id]);
+});
+watch(differentiatedChildren, (kids) => {
+  if (kids.length && !kids.some((c) => c.id === previewChildId.value)) previewChildId.value = kids[0].id;
+}, { immediate: true });
+const previewContent = computed(() => {
+  const m = byChildMap.value;
+  if (m && previewChildId.value && m[previewChildId.value]) return m[previewChildId.value];
+  return activity.value?.content || null;
+});
+const previewChildName = computed(() =>
+  children.value.find((c) => c.id === previewChildId.value)?.name || previewChildId.value
+);
+const previewLevel = computed(() => activity.value?.differentiatedLevels?.[previewChildId.value] || "");
 
 const hasCoopDriver = computed(() =>
   Object.values(scores.value).some((s) => s.isDriving)
@@ -288,25 +345,42 @@ async function handleSubmitObservation() {
             <span class="meta-chip">{{ activity.subject }}</span>
             <span class="meta-chip">{{ activity.durationMinutes }} min</span>
             <span v-if="activity.coopMode" class="meta-chip co-op">Co-op</span>
+            <button
+              class="uid-chip"
+              :title="uidCopied ? 'Copied!' : 'Activity ID — click to copy'"
+              @click="copyUid"
+            >
+              <span class="uid-label">ID</span>
+              <span class="uid-value">{{ activity.id }}</span>
+              <span class="uid-copy">{{ uidCopied ? "✓" : "⧉" }}</span>
+            </button>
           </div>
         </div>
       </div>
 
-      <!-- Instructions -->
+      <!-- Instructions — shown in the guardian's native language first -->
       <section class="card">
         <h2 class="card-h">Parent Instructions</h2>
-        <p class="instructions">{{ activity.parentInstructions || "No instructions provided." }}</p>
-        <div v-if="activity.parentInstructionsTranslit" class="mt-instructions">
-          <div class="mt-head">
-            <span class="mt-label">In your language</span>
+
+        <template v-if="hasNativeInstructions">
+          <div class="pi-head">
             <SpeakButton
               :text="activity.parentInstructionsNative || activity.parentInstructionsTranslit"
               size="sm"
               label="Listen"
             />
           </div>
-          <p class="mt-translit">{{ activity.parentInstructionsTranslit }}</p>
-        </div>
+          <p
+            class="instructions pi-native"
+            :class="{ 'font-urdu': nativeIsScript, rtl: nativeIsScript }"
+          >{{ nativeInstructions }}</p>
+          <details v-if="activity.parentInstructions" class="pi-english">
+            <summary>In English</summary>
+            <p class="instructions">{{ activity.parentInstructions }}</p>
+          </details>
+        </template>
+
+        <p v-else class="instructions">{{ activity.parentInstructions || "No instructions provided." }}</p>
       </section>
 
       <!-- Walkthrough -->
@@ -339,10 +413,46 @@ async function handleSubmitObservation() {
             </button>
           </div>
         </div>
+        <!-- Optional direction for the generator: what's wrong with the current
+             content, or the angle/perspective to take this (re)generation. Fed
+             into the generator's prompt. -->
+        <div class="regen-guidance">
+          <label for="regen-guidance" class="rg-label">
+            Direction for the generator <span class="rg-optional">(optional)</span>
+          </label>
+          <textarea
+            id="regen-guidance"
+            v-model="regenGuidance"
+            class="rg-input"
+            :maxlength="GUIDANCE_MAX"
+            rows="3"
+            :disabled="generatingContent || deletingContent"
+            placeholder="What should change this time? e.g. the previous version was too hard — use simpler words; focus more on…; avoid…; add more worked examples."
+          ></textarea>
+          <span class="rg-count">{{ regenGuidance.length }} / {{ GUIDANCE_MAX }}</span>
+        </div>
         <p v-if="contentError" class="field-error" role="alert">{{ contentError }}</p>
 
-        <div v-if="activity.content" class="content-preview">
-          <ActivityContent :content="activity.content" />
+        <div v-if="activity.content || differentiatedChildren.length" class="content-preview">
+          <!-- Per-child differentiated versions: flip between each child's
+               level-paced content. Falls back to the shared blob below. -->
+          <div v-if="differentiatedChildren.length" class="bychild">
+            <div class="bychild-bar">
+              <span class="bychild-label">Per-child version:</span>
+              <button
+                v-for="c in differentiatedChildren"
+                :key="c.id"
+                type="button"
+                class="bychild-tab"
+                :class="{ active: c.id === previewChildId }"
+                @click="previewChildId = c.id"
+              >{{ c.name || c.id }}</button>
+            </div>
+            <p v-if="previewLevel" class="bychild-level">
+              <strong>{{ previewChildName }}’s level:</strong> {{ previewLevel }}
+            </p>
+          </div>
+          <ActivityContent :key="previewChildId || 'all'" :content="previewContent" />
         </div>
         <p v-else-if="generatingContent" class="card-desc generating">
           <span class="mini-spinner" aria-hidden="true"></span>
@@ -365,6 +475,23 @@ async function handleSubmitObservation() {
           </p>
           <p v-else-if="journeyError" class="field-error">{{ journeyError }}</p>
           <p v-else class="journey-text">{{ journeyText }}</p>
+        </div>
+      </section>
+
+      <!-- Share with a guardian — the per-activity page URL. A partner guardian
+           in the same family can open it to view (or edit, if their rights
+           permit) using the options on this page. Handy on a call with the guide. -->
+      <section class="card">
+        <h2 class="card-h">Share Activity</h2>
+        <p class="card-desc">
+          Send this link to a partner guardian. They can open this activity to view
+          it — and edit it if their permissions allow — using the options on this page.
+        </p>
+        <div class="link-box">
+          <input class="link-input" :value="shareLink" readonly @focus="$event.target.select()" />
+          <button class="btn secondary copy-btn" @click="copyShareLink">
+            {{ shareCopied ? "Copied!" : "Copy link" }}
+          </button>
         </div>
       </section>
 
@@ -472,6 +599,18 @@ async function handleSubmitObservation() {
 .activity-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .meta-chip { font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 999px; background: #f1f5f9; color: #475569; }
 .meta-chip.co-op { background: #e0f2fe; color: #0369a1; }
+/* Activity unique identifier — small, monospace, click-to-copy. Not meant to be
+   pretty, just always visible and copyable for support / sharing. */
+.uid-chip {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 999px;
+  background: #f8fafc; color: #64748b; border: 1px solid #e2e8f0;
+  cursor: pointer; font-family: inherit;
+}
+.uid-chip:hover { background: #f1f5f9; color: #334155; }
+.uid-label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.uid-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.uid-copy { color: #94a3b8; }
 .rank-badge { font-size: 0.72rem; font-weight: 700; padding: 0.15rem 0.5rem; border-radius: 999px; }
 .rank-1 { background: #dcfce7; color: #166534; }
 .rank-2 { background: #dbeafe; color: #1e40af; }
@@ -488,12 +627,29 @@ async function handleSubmitObservation() {
 .content-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem; }
 .content-head .card-h { margin: 0; }
 .content-actions { display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; }
+.regen-guidance { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.6rem 0 0.2rem; }
+.rg-label { font-size: 0.82rem; font-weight: 600; color: #334155; }
+.rg-optional { font-weight: 400; color: #94a3b8; }
+.rg-input {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 3.2rem;
+  font: inherit; font-size: 0.86rem; line-height: 1.4; color: #0f172a;
+  padding: 0.5rem 0.6rem; border: 1px solid #cbd5e1; border-radius: 0.5rem;
+}
+.rg-input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.15); }
+.rg-input:disabled { background: #f1f5f9; color: #94a3b8; }
+.rg-count { align-self: flex-end; font-size: 0.72rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
 .regen-btn { font-size: 0.8rem; padding: 0.3rem 0.8rem; flex-shrink: 0; }
 .del-btn { font-size: 0.8rem; padding: 0.3rem 0.8rem; flex-shrink: 0; }
 .btn.ghost { background: transparent; color: #475569; border: 1px solid #cbd5e1; }
 .btn.ghost.danger { color: #b91c1c; border-color: #fca5a5; }
 .btn.ghost.danger:hover:not(:disabled) { background: #fef2f2; border-color: #f87171; }
 .content-preview { margin-top: 0.75rem; }
+.bychild { margin-bottom: 0.85rem; }
+.bychild-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+.bychild-label { font-size: 0.82rem; font-weight: 600; color: #64748b; margin-right: 0.2rem; }
+.bychild-tab { font: inherit; font-size: 0.85rem; font-weight: 600; padding: 0.3rem 0.8rem; border-radius: 999px; border: 1px solid #d8b4fe; background: #fff; color: #7c3aed; cursor: pointer; }
+.bychild-tab.active { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+.bychild-level { margin: 0.5rem 0 0; padding: 0.5rem 0.7rem; background: #faf5ff; border: 1px solid #ede9fe; border-radius: 8px; font-size: 0.85rem; color: #475569; }
 .generating { display: flex; align-items: center; gap: 0.5rem; color: #475569; }
 .mini-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #cbd5e1; border-top-color: #0b1f3a; animation: spin 0.7s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -507,10 +663,16 @@ async function handleSubmitObservation() {
 .walkthrough { color: #475569; font-style: italic; }
 
 /* Mother-tongue (transliterated + spoken) parent instructions */
-.mt-instructions { margin-top: 0.85rem; padding-top: 0.75rem; border-top: 1px dashed #e2e8f0; }
-.mt-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }
-.mt-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
-.mt-translit { white-space: pre-wrap; color: #334155; line-height: 1.7; margin: 0; }
+/* Native-language parent instructions (primary). Nastaliq needs extra size and
+   vertical room to read beautifully; RTL for native scripts. */
+.pi-head { display: flex; justify-content: flex-end; margin-bottom: 0.35rem; }
+.pi-native { color: #1e293b; }
+.pi-native.font-urdu { font-size: 1.3rem; line-height: 2.6; }
+.pi-native.rtl { direction: rtl; text-align: right; }
+/* English fallback, demoted to a collapsible secondary block. */
+.pi-english { margin-top: 0.85rem; padding-top: 0.75rem; border-top: 1px dashed #e2e8f0; }
+.pi-english summary { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; cursor: pointer; }
+.pi-english .instructions { margin-top: 0.5rem; }
 
 /* Child link */
 .link-box { display: flex; gap: 0.5rem; margin-top: 0.75rem; }

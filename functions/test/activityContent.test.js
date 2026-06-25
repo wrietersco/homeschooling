@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { contentKindForType, cancelContentBackfill, isContentEmpty } from "../agents/activityContent.js";
+import { contentKindForType, cancelContentBackfill, isContentEmpty, enqueueContentBackfill } from "../agents/activityContent.js";
 
 // Fake db capturing the two doc writes cancelContentBackfill performs.
 function makeCancelDb() {
@@ -28,6 +28,62 @@ test("cancelContentBackfill marks both the queue row and the progress mirror can
   // Both writes must merge so they don't clobber sibling fields.
   assert.equal(db.writes.queue.opts.merge, true);
   assert.equal(db.writes.meta.opts.merge, true);
+});
+
+// Fake db for enqueueContentBackfill: serves an activity list and captures the
+// queue + meta writes. Activities given as [{type, content}].
+function makeEnqueueDb(activities) {
+  const writes = {};
+  const docs = activities.map((a, i) => ({ id: `a${i}`, data: () => a }));
+  const activitiesCol = { limit: () => ({ async get() { return { docs }; } }) };
+  function metaDoc() { return { async set(patch, opts) { writes.meta = { patch, opts }; } }; }
+  function queueDoc() { return { async set(patch, opts) { writes.queue = { patch, opts }; } }; }
+  return {
+    writes,
+    collection(name) {
+      if (name === "contentBackfillQueue") return { doc: () => queueDoc() };
+      // families/{id} → .collection("activities") | .collection("meta").doc("contentBackfill")
+      return {
+        doc: () => ({
+          collection: (sub) => (sub === "activities"
+            ? activitiesCol
+            : { doc: () => metaDoc() }),
+        }),
+      };
+    },
+  };
+}
+
+test("enqueueContentBackfill (force + types) counts only matching types and records the filter", async () => {
+  const db = makeEnqueueDb([
+    { type: "teaching", content: { kind: "tips" } },
+    { type: "teaching", content: { kind: "tips" } },
+    { type: "quran", content: { kind: "quran_reading" } },
+    { type: "mathematics", content: null },
+  ]);
+  const res = await enqueueContentBackfill({ db, familyId: "fam1", uid: "u1", force: true, types: ["teaching"] });
+  // Force mode counts ALL matching activities (overwrite), regardless of content.
+  assert.equal(res.total, 2);
+  assert.equal(res.mode, "regenerate");
+  assert.equal(res.status, "queued");
+  assert.deepEqual(db.writes.queue.patch.types, ["teaching"]);
+  assert.equal(db.writes.queue.patch.force, true);
+  assert.match(db.writes.queue.patch.forceToken, /^r\d+/);
+  assert.equal(db.writes.meta.patch.mode, "regenerate");
+  assert.equal(db.writes.meta.patch.total, 2);
+});
+
+test("enqueueContentBackfill (no filter, fill mode) counts only activities missing content", async () => {
+  const db = makeEnqueueDb([
+    { type: "teaching", content: { kind: "tips" } }, // has content → skipped in fill mode
+    { type: "mathematics", content: null },          // missing → counted
+    { type: "quran", content: null },                // missing → counted
+  ]);
+  const res = await enqueueContentBackfill({ db, familyId: "fam1", uid: "u1" });
+  assert.equal(res.total, 2);
+  assert.equal(res.mode, "fill");
+  assert.deepEqual(db.writes.queue.patch.types, []);
+  assert.equal(db.writes.queue.patch.forceToken, "");
 });
 
 test("quran_reading is reachable ONLY from type 'quran'", () => {
@@ -66,9 +122,14 @@ test("isContentEmpty rejects a hollow forced-call payload but accepts a filled o
   assert.equal(isContentEmpty({ kind: "dialogue", dialogue: { turns: [] } }), true);
   assert.equal(isContentEmpty({ kind: "problems", problems: [] }), true);
   assert.equal(isContentEmpty({ kind: "steps", worksheet: { steps: [] } }), true);
+  // tips: empty when it has neither facilitation tips nor an embedded story
+  assert.equal(isContentEmpty({ kind: "tips", tips: { tips: [] } }), true);
   // real content passes
   assert.equal(isContentEmpty({ kind: "reading", story: { paragraphs: ["abc"] } }), false);
   assert.equal(isContentEmpty({ kind: "qaida_exercise", exercises: [{ items: [{ text: "ا" }] }] }), false);
+  // tips is valid with facilitation tips, OR with just an embedded ready-to-use story
+  assert.equal(isContentEmpty({ kind: "tips", tips: { tips: ["read slowly"] } }), false);
+  assert.equal(isContentEmpty({ kind: "tips", tips: { story: { paragraphs: ["A story."] } } }), false);
 });
 
 test("procedural types get steps; parent-led + unknown fall back to tips", () => {

@@ -3,6 +3,7 @@
 // dispatched, its result fed back, and the loop repeats until the model returns
 // a final text answer or the step budget is exhausted. Every step is recorded
 // for the audit trail.
+import { withCurrentDate } from "../lib/dateContext.js";
 
 export async function runAgent({
   llm,
@@ -24,9 +25,12 @@ export async function runAgent({
   const contents = [...history, { role: "user", parts: [{ text: userMessage }] }];
   const steps = [];
   const config = toolConfig ? { ...generationConfig, toolConfig } : generationConfig;
+  // Every agent always knows today's date — embedded once at the top of its
+  // system instructions so date/scheduling/age reasoning is never guessed.
+  const datedSystem = withCurrentDate(system);
 
   for (let i = 0; i < maxSteps; i++) {
-    const res = await llm.generate({ system, contents, toolDeclarations, config });
+    const res = await llm.generate({ system: datedSystem, contents, toolDeclarations, config });
 
     if (res.functionCalls && res.functionCalls.length) {
       contents.push({ role: "model", parts: res.functionCalls.map((fc) => ({ functionCall: fc })) });
@@ -82,7 +86,27 @@ export async function runAgent({
       };
     }
 
-    return { text: res.text || "", steps, contents, stoppedAt: "final" };
+    // The model ended its turn with neither a tool call nor any visible text —
+    // an empty candidate (finishReason STOP with no parts). Returning "" here
+    // hands the UI a blank bubble that looks like the agent "fell asleep". Surface
+    // what happened instead, with the finishReason so it is debuggable in logs.
+    const finalText = (res.text || "").trim();
+    if (!finalText) {
+      console.warn(
+        `[runAgent] empty final response (finishReason=${res.finishReason || "none"}, steps=${steps.length})`
+      );
+      return {
+        text:
+          "I couldn't generate a reply that time — the model returned an empty response. " +
+          "Please try again; rephrasing or shortening your message usually helps.",
+        steps,
+        contents,
+        stoppedAt: "empty",
+        finishReason: res.finishReason || null,
+      };
+    }
+
+    return { text: finalText, steps, contents, stoppedAt: "final" };
   }
 
   return { text: "I wasn't able to finish within the step budget.", steps, contents, stoppedAt: "limit" };

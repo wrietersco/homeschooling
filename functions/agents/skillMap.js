@@ -19,7 +19,7 @@ import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { resolveCaller } from "../lib/caller.js";
 import { runAgent } from "./runtime.js";
 import { resolveLlm } from "./agentConfig.js";
-import { describeGuardian } from "./grounding.js";
+import { describeGuardian, summarizeChildPerformance } from "./grounding.js";
 
 // Stable id from a skill name so re-runs update the same skill rather than
 // duplicating it, and so it lines up with the family skills collection.
@@ -72,7 +72,7 @@ function ageFromDob(dob) {
   return yrs > 0 && yrs < 25 ? Math.floor(yrs) : null;
 }
 
-function buildChildPrompt({ child, guidingLight, guardians, activityLines, existingSkillNames }) {
+function buildChildPrompt({ child, guidingLight, guardians, activityLines, existingSkillNames, childPerformance = "" }) {
   const age = ageFromDob(child.dob);
   return [
     "You map a homeschooling child's learning: which SKILLS they develop and which activities build each one.",
@@ -80,6 +80,7 @@ function buildChildPrompt({ child, guidingLight, guardians, activityLines, exist
     `CHILD: ${child.name || child.id}${age != null ? ` · about ${age} years old` : ""}${child.dob ? ` (dob ${child.dob})` : ""}.`,
     `Guiding light (everything must serve this): ${guidingLight || "(not set)"}.`,
     guardians.length ? `Guardians: ${guardians.join("; ")}.` : "",
+    childPerformance ? `\n${childPerformance}\nGround each skill's \`extent\` in ${child.name || "this child"}'s actual progress above — how far THEY get, not the activity's ceiling.` : "",
     "",
     "AVAILABLE ACTIVITIES (use ONLY these ids):",
     ...activityLines,
@@ -118,6 +119,9 @@ export async function runSkillMap({ db, familyId, uid, role = "owner", llm, genC
   if (!activities.length) throw new HttpsError("failed-precondition", "Generate a syllabus first — there are no activities to map.");
   const activitiesById = new Map(activities.map((a) => [a.id, a]));
   const existingSkillNames = skillsSnap.docs.map((d) => d.data().name).filter(Boolean);
+  // Completion history + recent observations (read once for the whole family) so
+  // the agent grades each child's skill `extent` against real progress, not guesses.
+  const childPerformance = await summarizeChildPerformance(db, familyId, children);
 
   const activityLines = activities.map(
     (a) => `- ${a.id} · "${a.title}" · ${a.type} · ${a.subject || ""} · rank ${a.complexityRank || 1} · ${a.durationMinutes || 30}min`
@@ -152,7 +156,7 @@ export async function runSkillMap({ db, familyId, uid, role = "owner", llm, genC
       const tools = {
         async record_child_skills(args) { captured = args || {}; return { saved: true }; },
       };
-      const system = buildChildPrompt({ child, guidingLight, guardians, activityLines, existingSkillNames });
+      const system = buildChildPrompt({ child, guidingLight, guardians, activityLines, existingSkillNames, childPerformance });
       await runAgent({
         llm, system,
         toolDeclarations: [RECORD_DECLARATION],
@@ -300,7 +304,7 @@ export const requestSkillMap = onCall(
       throw new HttpsError("permission-denied", "Only family owners or parents can build the skill map.");
     }
     // Reuse the curriculum agent's config (larger output budget) for rich mapping.
-    const { llm, genConfig } = await resolveLlm(db, "curriculum", process.env.GEMINI_API_KEY);
+    const { llm, genConfig } = await resolveLlm(db, "curriculum", process.env.GEMINI_API_KEY, { familyId, uid, source: "requestSkillMap" });
     if (!llm) {
       return { configured: false, text: "The skill-mapping agent isn't configured — set the GEMINI_API_KEY secret to enable it." };
     }

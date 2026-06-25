@@ -17,6 +17,10 @@ const ttsLogs = ref([]);       // recent TTS events, newest first (diagnostics o
 let voices = [];
 let activeAudio = null; // currently-playing recorded-audio element (qirat, etc.)
 
+// Friendly names for the non-English languages we read aloud, for the
+// "no on-device voice" notice (most desktops ship no Arabic/Urdu voice).
+const LANG_NAMES = { ar: "Arabic", ur: "Urdu", fa: "Persian", ps: "Pashto" };
+
 function logTts(msg) {
   ttsLogs.value = [msg, ...ttsLogs.value].slice(0, 25);
 }
@@ -98,6 +102,7 @@ export function useSpeech() {
     const clear = () => { if (speakingId.value === id) speakingId.value = null; if (activeAudio === a) activeAudio = null; };
     a.onended = () => { clear(); if (onEnd) onEnd(); };
     a.onerror = () => { clear(); if (onError) onError(); else if (onEnd) onEnd(); };
+    a.onplaying = () => { lastError.value = ""; }; // audio reached the speakers — no error to show
     a.play().catch(() => { clear(); if (onError) onError(); else if (onEnd) onEnd(); });
   }
 
@@ -107,13 +112,28 @@ export function useSpeech() {
     window.speechSynthesis.cancel();
     if (!voices.length) loadVoices();
 
+    const voice = pickVoice(lang);
+    // We only reach the browser voice once server TTS is unavailable/failed. If
+    // there is also no installed voice for a non-English language (Arabic has
+    // none on most desktops), the utterance would play SILENTLY with zero
+    // feedback — the exact "tapping a qaida letter does nothing" symptom. Surface
+    // it instead of pretending to speak, so the failure is visible and explained.
+    const base = (lang || "").toLowerCase().split("-")[0];
+    if (!voice && voices.length && base && base !== "en") {
+      const name = LANG_NAMES[base] || base;
+      lastError.value = `Couldn't play audio — no ${name} voice on this device, and online speech is unavailable right now. Try again, or check the Audio diagnostics below.`;
+      logTts(`⚠ no on-device "${base}" voice; cannot speak "${text.slice(0, 24)}" offline`);
+      if (speakingId.value === id) speakingId.value = null;
+      if (onEnd) onEnd();
+      return;
+    }
+
     const u = new SpeechSynthesisUtterance(text);
     u.lang = lang || "en";
-    const voice = pickVoice(lang);
     if (voice) u.voice = voice;
     u.rate = rate;
     u.pitch = 1;
-    u.onstart = () => { speakingId.value = id; };
+    u.onstart = () => { speakingId.value = id; lastError.value = ""; }; // speaking — clear any prior notice
     u.onend = () => { if (speakingId.value === id) speakingId.value = null; if (onEnd) onEnd(); };
     u.onerror = () => { if (speakingId.value === id) speakingId.value = null; if (onEnd) onEnd(); };
     window.speechSynthesis.speak(u);
@@ -175,6 +195,7 @@ export function useSpeech() {
   // a playing conversation). Gemini TTS first, browser voice as fallback.
   function speak(text, lang = "en", { id = null, rate = 0.85, voiceName = "" } = {}) {
     if (!text) return;
+    lastError.value = ""; // fresh tap — clear any prior "couldn't be spoken" notice
     sequenceToken += 1;
     sequenceIndex.value = -1;
     _speak(text, lang, { id, rate, voiceName });

@@ -12,6 +12,8 @@ import { getStorage } from "firebase-admin/storage";
 import { createHash } from "node:crypto";
 import { resolveCaller } from "../lib/caller.js";
 import { loadAgentConfig } from "./agentConfig.js";
+import { parseUsage } from "./llm.js";
+import { recordCostEvent } from "../lib/costMeter.js";
 
 // ─── PCM → WAV (pure, unit-tested) ────────────────────────────────────────────
 // Gemini returns signed 16-bit little-endian mono PCM. Wrap it in a 44-byte
@@ -71,16 +73,40 @@ export async function synthesizePcm({ text, voiceName, model, apiKey, fetchImpl 
   return {
     pcm: Buffer.from(part.inlineData.data, "base64"),
     sampleRate: sampleRateFromMime(part.inlineData.mimeType),
+    usage: parseUsage(json?.usageMetadata),
   };
+}
+
+// A brief delivery cue prepended on retry. Gemini's single-speaker TTS treats
+// natural-language text before the content as a *style directive* it follows
+// rather than reads aloud (e.g. "Say cheerfully: …"), so only `text` is spoken.
+export const RECITE_CUE = "Say this slowly and clearly: ";
+
+// Synthesize, with one retry for the bare-token case. Gemini intermittently
+// returns NO audio for a single, isolated voweled glyph — exactly the Noorani
+// Qaida letters (e.g. "بَ") tapped one at a time — while full words/sentences
+// synthesize fine. When that happens we retry once with a short spoken cue that
+// gives the model enough to articulate the letter. The retry ONLY fires on a
+// genuine no-audio result, so every input that already works is untouched.
+// `synth` is injected (the real synthesizePcm in prod) so this stays unit-testable.
+export async function synthesizeSpeakable(synth, params) {
+  try {
+    return await synth(params);
+  } catch (e) {
+    if (/no audio/i.test(String(e?.message || ""))) {
+      return await synth({ ...params, text: RECITE_CUE + params.text });
+    }
+    throw e;
+  }
 }
 
 // ─── Callable ─────────────────────────────────────────────────────────────────
 export const synthesizeSpeech = onCall(
   { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 60 },
   async (request) => {
-    // Auth-scoped (any family member). Tenant isn't needed — audio is keyed by
-    // content hash in a shared cache.
-    await resolveCaller(request);
+    // Auth-scoped (any family member). The shared cache is keyed by content hash
+    // (tenant-independent), but we capture the family for cost attribution.
+    const { familyId, uid } = await resolveCaller(request);
 
     const db = (await import("firebase-admin/firestore")).getFirestore();
     const text = String(request.data?.text || "").trim().slice(0, 2000);
@@ -106,6 +132,13 @@ export const synthesizeSpeech = onCall(
         const meta = (await file.getMetadata())[0];
         const token = meta?.metadata?.firebaseStorageDownloadTokens;
         if (token) {
+          // Cache hit costs nothing, but log it so call counts stay honest.
+          if (familyId) {
+            await recordCostEvent(db, {
+              familyId, kind: "tts", agentKey: "tts", model, source: "synthesizeSpeech",
+              usage: {}, cached: true, uid,
+            });
+          }
           return { configured: true, cached: true, url: downloadUrl(bucket.name, filePath, token) };
         }
       }
@@ -116,9 +149,18 @@ export const synthesizeSpeech = onCall(
 
     let wav, sampleRate;
     try {
-      const out = await synthesizePcm({ text, voiceName, model, apiKey });
+      const out = await synthesizeSpeakable(synthesizePcm, { text, voiceName, model, apiKey });
       sampleRate = out.sampleRate;
       wav = pcmToWav(out.pcm, { sampleRate });
+      // Record cost. Prefer real token usage; fall back to audio duration (16-bit
+      // mono → 2 bytes/sample) so a usage-less response is still priced.
+      if (familyId) {
+        const audioSeconds = out.pcm.length / (sampleRate * 2);
+        await recordCostEvent(db, {
+          familyId, kind: "tts", agentKey: "tts", model, source: "synthesizeSpeech",
+          usage: { ...(out.usage || {}), audioSeconds }, uid,
+        });
+      }
     } catch (e) {
       throw new HttpsError("internal", e?.message || "Speech synthesis failed.");
     }

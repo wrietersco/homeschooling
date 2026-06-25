@@ -1,11 +1,12 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import {
   listFamilies, setFamilyStatus, listFamilyMembers,
   setMemberRole, removeMember, deleteFamily,
   getLlmConfig, setLlmConfig, deleteSyllabus,
   getQuranStatus, importQuran,
   getModelCatalog, previewModel, testAllModels,
+  getCostOverview, getFamilyCostDetail,
 } from "@/services/admin";
 
 // ── Tabs ─────────────────────────────────────────────────────────────────────
@@ -136,9 +137,16 @@ function agentMeta(k) { return AGENT_META[k] || { label: k, desc: "", kind: "tex
 function catalogFor(k) {
   return modelCatalog.value[agentMeta(k).kind] || modelCatalog.value.text || [];
 }
+// Look up a catalog entry by capability bucket + id (null if it's a custom id).
+function modelById(kind, id) {
+  return (modelCatalog.value[kind] || []).find((m) => m.id === id) || null;
+}
+function selectedModel(k) {
+  return modelById(agentMeta(k).kind, llmAgents.value[k]?.model);
+}
 function modelNote(k) {
-  const m = catalogFor(k).find((x) => x.id === llmAgents.value[k]?.model);
-  return m ? `${m.cost} cost | ${m.speed} | ${m.quality}` : "Custom model ID";
+  const m = selectedModel(k);
+  return m ? `${m.cost} cost | ${m.speed} | ${m.quality}` : "Custom model ID — not in the curated catalog.";
 }
 
 async function loadModelCatalog() {
@@ -264,6 +272,84 @@ async function runQuranImport(force = false) {
   }
 }
 
+// ── Costs ──────────────────────────────────────────────────────────────────────
+// Lazily loaded the first time the Costs tab is opened. The overview reads the
+// platform rollups; clicking a family drills into its daily series + raw events.
+const costMonth = ref("");
+const costOverview = ref(null);
+const costLoading = ref(false);
+const costError = ref("");
+const costDetail = ref(null);
+const costMoreLoading = ref(false);
+
+const trendMax = computed(() =>
+  Math.max(1e-9, ...((costOverview.value?.trend || []).map((t) => t.costUsd)))
+);
+const dailyMax = computed(() =>
+  Math.max(1e-9, ...((costDetail.value?.daily || []).map((d) => d.costUsd)))
+);
+
+function fmtUsd(n) {
+  const v = Number(n) || 0;
+  if (v === 0) return "$0";
+  if (v < 0.01) return `$${v.toFixed(5)}`;
+  return `$${v.toFixed(2)}`;
+}
+function fmtTs(ms) {
+  return ms ? new Date(ms).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" }) : "—";
+}
+function breakdownRows(map) {
+  return Object.entries(map || {})
+    .map(([key, v]) => ({ key, costUsd: Number(v?.costUsd) || 0, calls: Number(v?.calls) || 0 }))
+    .sort((a, b) => b.costUsd - a.costUsd);
+}
+
+function openCostsTab() {
+  tab.value = "costs";
+  if (!costOverview.value && !costLoading.value) loadCostOverview();
+}
+
+async function loadCostOverview() {
+  costLoading.value = true;
+  costError.value = "";
+  costDetail.value = null;
+  try {
+    const res = await getCostOverview(costMonth.value || undefined);
+    costOverview.value = res;
+    costMonth.value = res.month;
+  } catch (e) {
+    costError.value = e?.message || "Could not load costs.";
+  } finally {
+    costLoading.value = false;
+  }
+}
+
+async function openFamilyCost(fam) {
+  costDetail.value = { familyId: fam.familyId, name: fam.name, loading: true };
+  try {
+    const res = await getFamilyCostDetail({ familyId: fam.familyId, month: costMonth.value });
+    costDetail.value = { ...res, name: fam.name };
+  } catch (e) {
+    costDetail.value = { familyId: fam.familyId, name: fam.name, error: e?.message || "Could not load detail." };
+  }
+}
+
+async function loadMoreEvents() {
+  if (!costDetail.value?.nextCursor || costMoreLoading.value) return;
+  costMoreLoading.value = true;
+  try {
+    const res = await getFamilyCostDetail({
+      familyId: costDetail.value.familyId, month: costMonth.value, beforeTs: costDetail.value.nextCursor,
+    });
+    costDetail.value.events = [...(costDetail.value.events || []), ...res.events];
+    costDetail.value.nextCursor = res.nextCursor;
+  } catch {
+    /* best-effort; leave existing events in place */
+  } finally {
+    costMoreLoading.value = false;
+  }
+}
+
 onMounted(() => {
   loadFamilies();
   loadLlmConfig();
@@ -278,6 +364,7 @@ onMounted(() => {
       <h1>Platform admin</h1>
       <nav class="tabs">
         <button :class="{ active: tab === 'families' }" @click="tab = 'families'">Families</button>
+        <button :class="{ active: tab === 'costs' }" @click="openCostsTab">Costs</button>
         <button :class="{ active: tab === 'llm' }" @click="tab = 'llm'">LLM config</button>
         <button :class="{ active: tab === 'quran' }" @click="tab = 'quran'">Quran</button>
       </nav>
@@ -349,6 +436,127 @@ onMounted(() => {
       </div>
     </div>
 
+    <!-- ── Costs tab ────────────────────────────────────────────────────── -->
+    <div v-if="tab === 'costs'" class="costs-wrap">
+      <div class="toolbar">
+        <label class="month-pick">Month
+          <select v-model="costMonth" @change="loadCostOverview" :disabled="costLoading">
+            <option v-for="m in (costOverview?.months || [costMonth])" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </label>
+        <button class="btn sm" @click="loadCostOverview" :disabled="costLoading">
+          {{ costLoading ? "Loading…" : "Refresh" }}
+        </button>
+      </div>
+
+      <p v-if="costError" class="error">{{ costError }}</p>
+      <p v-else-if="costLoading && !costOverview" class="muted">Loading costs…</p>
+
+      <template v-else-if="costOverview">
+        <!-- Platform summary -->
+        <div class="card cost-summary">
+          <div class="qstat"><strong>{{ fmtUsd(costOverview.selected.costUsd) }}</strong><span>spend · {{ costMonth }}</span></div>
+          <div class="qstat"><strong>{{ costOverview.selected.calls || 0 }}</strong><span>AI calls</span></div>
+          <div class="qstat"><strong>{{ costOverview.families.length }}</strong><span>families billed</span></div>
+        </div>
+
+        <!-- 6-month trend -->
+        <div class="card">
+          <h3 class="llm-h">6-month trend</h3>
+          <div class="trend">
+            <div v-for="t in costOverview.trend" :key="t.period" class="trend-col" :title="`${t.period}: ${fmtUsd(t.costUsd)} (${t.calls} calls)`">
+              <div class="trend-bar-wrap">
+                <div class="trend-bar" :style="{ height: (100 * t.costUsd / trendMax) + '%' }"></div>
+              </div>
+              <span class="trend-amt">{{ fmtUsd(t.costUsd) }}</span>
+              <span class="trend-lbl">{{ t.period.slice(5) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Per-family table -->
+        <div class="card">
+          <h3 class="llm-h">By family</h3>
+          <p v-if="!costOverview.families.length" class="muted sm-text">No spend recorded for {{ costMonth }}.</p>
+          <table v-else class="cost-table">
+            <thead><tr><th>Family</th><th class="num">Spend</th><th class="num">Calls</th><th></th></tr></thead>
+            <tbody>
+              <tr v-for="f in costOverview.families" :key="f.familyId">
+                <td>{{ f.name }} <code class="fam-id">{{ f.familyId }}</code></td>
+                <td class="num">{{ fmtUsd(f.costUsd) }}</td>
+                <td class="num">{{ f.calls }}</td>
+                <td><button class="linkish" @click="openFamilyCost(f)">Details</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Family drill-in -->
+        <div v-if="costDetail" class="card cost-detail">
+          <div class="detail-head">
+            <h3 class="llm-h">{{ costDetail.name }} <code class="fam-id">{{ costDetail.familyId }}</code></h3>
+            <button class="linkish" @click="costDetail = null">Close</button>
+          </div>
+          <p v-if="costDetail.loading" class="muted sm-text">Loading detail…</p>
+          <p v-else-if="costDetail.error" class="error sm-text">{{ costDetail.error }}</p>
+          <template v-else>
+            <div class="qstat inline"><strong>{{ fmtUsd(costDetail.monthly.costUsd) }}</strong><span>{{ costDetail.month }} · {{ costDetail.monthly.calls || 0 }} calls</span></div>
+
+            <!-- Daily series -->
+            <div v-if="costDetail.daily?.length" class="trend daily">
+              <div v-for="d in costDetail.daily" :key="d.period" class="trend-col" :title="`${d.period}: ${fmtUsd(d.costUsd)} (${d.calls} calls)`">
+                <div class="trend-bar-wrap sm">
+                  <div class="trend-bar" :style="{ height: (100 * d.costUsd / dailyMax) + '%' }"></div>
+                </div>
+                <span class="trend-lbl">{{ d.period.slice(8) }}</span>
+              </div>
+            </div>
+
+            <!-- Breakdowns -->
+            <div class="breakdowns">
+              <div class="bd-col">
+                <h4>By agent</h4>
+                <div v-for="r in breakdownRows(costDetail.monthly.byAgent)" :key="r.key" class="bd-row">
+                  <span class="bd-key">{{ r.key }}</span><span class="bd-val">{{ fmtUsd(r.costUsd) }}</span>
+                </div>
+              </div>
+              <div class="bd-col">
+                <h4>By model</h4>
+                <div v-for="r in breakdownRows(costDetail.monthly.byModel)" :key="r.key" class="bd-row">
+                  <span class="bd-key">{{ r.key }}</span><span class="bd-val">{{ fmtUsd(r.costUsd) }}</span>
+                </div>
+              </div>
+              <div class="bd-col">
+                <h4>By kind</h4>
+                <div v-for="r in breakdownRows(costDetail.monthly.byKind)" :key="r.key" class="bd-row">
+                  <span class="bd-key">{{ r.key }}</span><span class="bd-val">{{ fmtUsd(r.costUsd) }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Raw event log -->
+            <h4 class="log-h">Recent calls (deep log)</h4>
+            <table class="cost-table log">
+              <thead><tr><th>When</th><th>Source</th><th>Model</th><th class="num">Tokens</th><th class="num">Cost</th></tr></thead>
+              <tbody>
+                <tr v-for="e in costDetail.events" :key="e.id">
+                  <td>{{ fmtTs(e.ts) }}</td>
+                  <td>{{ e.source || e.agentKey }} <span class="kind-tag" :class="e.kind">{{ e.kind }}</span><span v-if="e.cached" class="kind-tag cached">cached</span></td>
+                  <td><code>{{ e.model }}</code></td>
+                  <td class="num">{{ e.usage?.totalTokens || (e.usage?.inputTokens || 0) + (e.usage?.outputTokens || 0) || (e.usage?.images ? e.usage.images + ' img' : '—') }}</td>
+                  <td class="num">{{ fmtUsd(e.costUsd) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="!costDetail.events?.length" class="muted sm-text">No call events recorded.</p>
+            <button v-if="costDetail.nextCursor" class="btn sm" :disabled="costMoreLoading" @click="loadMoreEvents">
+              {{ costMoreLoading ? "Loading…" : "Load more" }}
+            </button>
+          </template>
+        </div>
+      </template>
+    </div>
+
     <!-- ── LLM Config tab — per agent ───────────────────────────────────── -->
     <div v-if="tab === 'llm'" class="llm-wrap">
       <p v-if="llmLoading" class="muted">Loading…</p>
@@ -384,6 +592,15 @@ onMounted(() => {
           <label>Model ID
             <input v-model="llmDefault.model" type="text" placeholder="gemini-2.5-flash" />
           </label>
+          <div v-if="modelById('text', llmDefault.model)" class="model-detail compact">
+            <div class="md-chips">
+              <span class="md-chip"><span class="md-chip-l">Cost</span>{{ modelById('text', llmDefault.model).cost }}</span>
+              <span class="md-chip"><span class="md-chip-l">Speed</span>{{ modelById('text', llmDefault.model).speed }}</span>
+              <span class="md-chip"><span class="md-chip-l">Price</span>{{ modelById('text', llmDefault.model).pricing }}</span>
+            </div>
+            <p class="md-when"><span class="md-when-l">When to use</span> {{ modelById('text', llmDefault.model).whenToUse }}</p>
+          </div>
+          <small v-else class="md-custom">Custom model ID — not in the curated catalog.</small>
           <div class="llm-row">
             <label>Temperature <span class="range-val">({{ llmDefault.temperature }})</span>
               <input v-model.number="llmDefault.temperature" type="range" min="0" max="2" step="0.05" />
@@ -408,12 +625,47 @@ onMounted(() => {
           <label>Model ID
             <select v-if="catalogFor(k).length" v-model="llmAgents[k].model">
               <option v-for="m in catalogFor(k)" :key="m.id" :value="m.id">
-                {{ m.label }} - {{ m.id }}
+                {{ m.label }}{{ m.recommended ? ' ★' : '' }} — {{ m.id }}
               </option>
             </select>
             <input v-else v-model="llmAgents[k].model" type="text" placeholder="gemini-2.5-flash" />
-            <small>{{ modelNote(k) }}</small>
           </label>
+
+          <!-- Rich detail for the selected model -->
+          <div v-if="selectedModel(k)" class="model-detail">
+            <div class="md-head">
+              <strong>{{ selectedModel(k).label }}</strong>
+              <span v-if="selectedModel(k).recommended" class="md-rec">Recommended</span>
+            </div>
+            <div class="md-chips">
+              <span class="md-chip"><span class="md-chip-l">Cost</span>{{ selectedModel(k).cost }}</span>
+              <span class="md-chip"><span class="md-chip-l">Speed</span>{{ selectedModel(k).speed }}</span>
+              <span v-if="selectedModel(k).pricing" class="md-chip"><span class="md-chip-l">Price</span>{{ selectedModel(k).pricing }}</span>
+              <span v-if="selectedModel(k).latency" class="md-chip"><span class="md-chip-l">Latency</span>{{ selectedModel(k).latency }}</span>
+            </div>
+            <p class="md-quality">{{ selectedModel(k).quality }}</p>
+            <p v-if="selectedModel(k).whenToUse" class="md-when">
+              <span class="md-when-l">When to use</span> {{ selectedModel(k).whenToUse }}
+            </p>
+            <details v-if="catalogFor(k).length > 1" class="md-compare">
+              <summary>Compare all {{ catalogFor(k).length }} {{ agentMeta(k).kind }} models</summary>
+              <table class="md-table">
+                <thead><tr><th>Model</th><th>Cost</th><th>Speed</th><th>When to use it</th></tr></thead>
+                <tbody>
+                  <tr v-for="m in catalogFor(k)" :key="m.id" :class="{ sel: m.id === llmAgents[k]?.model }">
+                    <td>
+                      <span class="md-t-name">{{ m.label }}</span>
+                      <code class="md-t-id">{{ m.id }}</code>
+                    </td>
+                    <td>{{ m.cost }}<br><span class="md-t-sub">{{ m.pricing }}</span></td>
+                    <td>{{ m.speed }}<br><span class="md-t-sub">{{ m.latency }}</span></td>
+                    <td class="md-t-when">{{ m.whenToUse }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </details>
+          </div>
+          <small v-else class="md-custom">{{ modelNote(k) }}</small>
 
           <template v-if="agentMeta(k).kind === 'text'">
             <div class="llm-row">
@@ -551,6 +803,30 @@ h1 { margin: 0; }
 .model-results th { color: #64748b; background: #f8fafc; font-weight: 600; }
 .preview-output { margin: -0.35rem 0 0; font-size: 0.82rem; color: #334155; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.55rem 0.7rem; }
 
+/* Rich model detail */
+.model-detail { margin: -0.35rem 0 0; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.7rem 0.8rem; display: flex; flex-direction: column; gap: 0.5rem; }
+.model-detail.compact { padding: 0.55rem 0.7rem; gap: 0.4rem; }
+.md-head { display: flex; align-items: center; gap: 0.5rem; }
+.md-head strong { font-size: 0.9rem; color: #1e293b; }
+.md-rec { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #15803d; background: #dcfce7; padding: 0.12rem 0.45rem; border-radius: 999px; }
+.md-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.md-chip { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.76rem; color: #334155; background: #fff; border: 1px solid #e2e8f0; border-radius: 999px; padding: 0.18rem 0.55rem; font-variant-numeric: tabular-nums; }
+.md-chip-l { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #94a3b8; }
+.md-quality { margin: 0; font-size: 0.82rem; color: #475569; }
+.md-when { margin: 0; font-size: 0.82rem; color: #334155; background: #eff6ff; border: 1px solid #dbeafe; border-radius: 8px; padding: 0.45rem 0.6rem; }
+.md-when-l { font-weight: 700; color: #1d4ed8; margin-right: 0.35rem; }
+.md-custom { color: #94a3b8; font-size: 0.8rem; }
+.md-compare summary { cursor: pointer; font-size: 0.8rem; color: #2563eb; user-select: none; }
+.md-compare[open] summary { margin-bottom: 0.5rem; }
+.md-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.md-table th { text-align: left; color: #64748b; font-weight: 600; padding: 0.35rem 0.5rem; border-bottom: 1px solid #e2e8f0; }
+.md-table td { padding: 0.4rem 0.5rem; border-top: 1px solid #f1f5f9; vertical-align: top; color: #334155; }
+.md-table tr.sel td { background: #eff6ff; }
+.md-t-name { display: block; font-weight: 600; color: #1e293b; }
+.md-t-id { font-size: 0.68rem; color: #94a3b8; }
+.md-t-sub { font-size: 0.7rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
+.md-t-when { max-width: 22rem; }
+
 .quran-panel { display: flex; flex-direction: column; gap: 0.85rem; }
 .quran-stats { display: flex; align-items: center; gap: 1.5rem; }
 .qstat { display: flex; flex-direction: column; }
@@ -574,6 +850,39 @@ small { color: #94a3b8; font-size: 0.8rem; }
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .linkish { background: none; border: none; cursor: pointer; font: inherit; font-size: 0.8rem; padding: 0; color: #2563eb; }
 .linkish.danger { color: #b91c1c; }
+
+/* Costs tab */
+.costs-wrap { display: flex; flex-direction: column; gap: 1rem; }
+.month-pick { flex-direction: row; align-items: center; gap: 0.5rem; font-size: 0.85rem; }
+.month-pick select { padding: 0.3rem 0.5rem; }
+.cost-summary { display: flex; gap: 2rem; flex-wrap: wrap; }
+.qstat.inline { flex-direction: row; align-items: baseline; gap: 0.5rem; }
+.trend { display: flex; align-items: flex-end; gap: 0.5rem; height: 140px; }
+.trend.daily { height: 90px; gap: 0.2rem; overflow-x: auto; }
+.trend-col { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; flex: 1; min-width: 0; }
+.trend-bar-wrap { display: flex; align-items: flex-end; width: 100%; max-width: 48px; height: 100px; background: #f1f5f9; border-radius: 6px 6px 0 0; }
+.trend-bar-wrap.sm { height: 60px; max-width: 22px; }
+.trend-bar { width: 100%; background: #0b1f3a; border-radius: 6px 6px 0 0; min-height: 2px; transition: height 0.3s; }
+.trend-amt { font-size: 0.72rem; color: #334155; font-weight: 600; }
+.trend-lbl { font-size: 0.7rem; color: #94a3b8; }
+.cost-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+.cost-table th { text-align: left; color: #64748b; font-weight: 600; padding: 0.4rem 0.5rem; border-bottom: 1px solid #e2e8f0; }
+.cost-table td { padding: 0.4rem 0.5rem; border-top: 1px solid #f1f5f9; }
+.cost-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.cost-table.log code { font-size: 0.76rem; }
+.cost-detail { display: flex; flex-direction: column; gap: 0.85rem; }
+.detail-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.breakdowns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.bd-col h4 { margin: 0 0 0.4rem; font-size: 0.82rem; color: #475569; }
+.bd-row { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.8rem; padding: 0.15rem 0; border-bottom: 1px solid #f8fafc; }
+.bd-key { color: #334155; }
+.bd-val { font-variant-numeric: tabular-nums; color: #0b1f3a; font-weight: 600; }
+.log-h { margin: 0.5rem 0 0; font-size: 0.85rem; color: #475569; }
+.kind-tag { font-size: 0.65rem; font-weight: 700; padding: 0.05rem 0.35rem; border-radius: 999px; text-transform: uppercase; margin-left: 0.35rem; background: #e0e7ff; color: #3730a3; }
+.kind-tag.tts { background: #dcfce7; color: #15803d; }
+.kind-tag.image { background: #fef3c7; color: #92400e; }
+.kind-tag.cached { background: #f1f5f9; color: #64748b; }
+@media (max-width: 560px) { .breakdowns { grid-template-columns: 1fr; } }
 
 .muted { color: #64748b; }
 .sm-text { font-size: 0.82rem; }

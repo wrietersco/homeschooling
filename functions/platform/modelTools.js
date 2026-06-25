@@ -28,7 +28,7 @@ async function pingModel({ capability, model, voiceName, sampleText, apiKey }) {
   }
   if (capability === "image") {
     // Image generation is slow + costly; we don't ping it. Treat as configured.
-    return { latencyMs: 0, skipped: true, output: "Image model not pinged (generation is costly)." };
+    return { latencyMs: 0, skipped: true, output: `Image model "${model}" not pinged (generation is costly). It will be used live when activities generate illustrations.` };
   }
   // text
   const client = createGeminiClient({ apiKey, model });

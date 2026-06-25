@@ -59,7 +59,22 @@ export function parseGeminiResponse(json) {
   if (!blockReason && !text && !functionCalls.length && ["SAFETY", "RECITATION", "PROHIBITED_CONTENT"].includes(finishReason)) {
     blockReason = finishReason;
   }
-  return { text, functionCalls, finishReason, blockReason };
+  return { text, functionCalls, finishReason, blockReason, usage: parseUsage(json?.usageMetadata) };
+}
+
+// Normalize Gemini's usageMetadata into a stable token-count shape for cost
+// metering. `candidatesTokenCount` is the visible output; `thoughtsTokenCount`
+// is "thinking" tokens (billed as output) — kept separate so callers can price
+// them but still see what the model actually emitted. Returns zeros when usage
+// is absent (older responses / injected fakes) so pricing math never NaNs.
+export function parseUsage(usageMetadata) {
+  const u = usageMetadata || {};
+  return {
+    inputTokens: Number(u.promptTokenCount) || 0,
+    outputTokens: Number(u.candidatesTokenCount) || 0,
+    thoughtTokens: Number(u.thoughtsTokenCount) || 0,
+    totalTokens: Number(u.totalTokenCount) || 0,
+  };
 }
 
 // HTTP statuses worth retrying — transient server / rate-limit conditions. 4xx

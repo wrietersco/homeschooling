@@ -11,6 +11,7 @@
 // effect immediately (no redeploy, no cache).
 import { platformLlmConfig } from "../lib/paths.js";
 import { createGeminiClient } from "./llm.js";
+import { recordCostEvent } from "../lib/costMeter.js";
 
 // Agents that can be configured independently. Keep in sync with the Platform UI.
 export const AGENT_KEYS = ["guide", "curriculum", "syllabus", "content", "scheduler", "brief", "image", "tts"];
@@ -74,11 +75,26 @@ export async function readLlmConfigDoc(db) {
 // Deep-merge built-in defaults ⊕ stored default ⊕ stored per-agent override.
 export function mergeAgentConfig(doc, agentKey) {
   const builtin = AGENT_DEFAULTS[agentKey] || AGENT_DEFAULTS.guide;
-  return {
-    ...builtin,
-    ...pickBlock(doc?.default),
-    ...pickBlock(doc?.agents?.[agentKey]),
-  };
+  const storedDefault = pickBlock(doc?.default);
+  const agentOverride = pickBlock(doc?.agents?.[agentKey]);
+  const merged = { ...builtin, ...storedDefault, ...agentOverride };
+
+  // The global `default` block must not silently lower an agent's token ceiling
+  // below its built-in. curriculum/content need maxOutputTokens >= 8192 because
+  // finalize_curriculum / content generation emit large tool-call payloads;
+  // truncation surfaces to users as "I ran out of room while writing that
+  // response" (Gemini finishReason MAX_TOKENS). The Platform UI seeds the global
+  // default at 2048, so saving "all agent settings" would otherwise clobber the
+  // higher built-in. Only an explicit per-agent override may reduce it.
+  if (
+    typeof builtin.maxOutputTokens === "number" &&
+    agentOverride.maxOutputTokens === undefined &&
+    typeof merged.maxOutputTokens === "number" &&
+    merged.maxOutputTokens < builtin.maxOutputTokens
+  ) {
+    merged.maxOutputTokens = builtin.maxOutputTokens;
+  }
+  return merged;
 }
 
 // Resolve the effective config for one agent. One Firestore read per call.
@@ -91,14 +107,46 @@ export async function loadAgentConfig(db, agentKey) {
 // its resolved config. Returns { llm: null } when no API key is set so callers
 // can surface the "not configured" message. The model and generation knobs come
 // from the superadmin per-agent config (with built-in fallbacks).
-export async function resolveLlm(db, agentKey, apiKey) {
+//
+// `meterCtx`, when supplied, attributes every generate() call to a family for
+// cost logging: { familyId, source, uid?, childId?, activityId?, runId? }. The
+// client is wrapped so metering is automatic for both runAgent and any direct
+// llm.generate() callers — best-effort, never blocking the agent on a log write.
+export async function resolveLlm(db, agentKey, apiKey, meterCtx = null) {
   if (!apiKey) return { llm: null, genConfig: undefined, config: null };
   const config = await loadAgentConfig(db, agentKey);
-  const llm = createGeminiClient({ apiKey, model: config.model });
+  const baseLlm = createGeminiClient({ apiKey, model: config.model });
+  const llm = meterCtx?.familyId ? withCostMetering(db, baseLlm, agentKey, config.model, meterCtx) : baseLlm;
   const genConfig = {
     temperature: config.temperature,
     maxOutputTokens: config.maxOutputTokens,
     thinkingBudget: config.thinkingBudget,
   };
   return { llm, genConfig, config };
+}
+
+// Wrap a Gemini client so each generate() records a text cost event after the
+// model returns. Metering errors are swallowed inside recordCostEvent.
+function withCostMetering(db, client, agentKey, model, meterCtx) {
+  return {
+    model: client.model,
+    async generate(args) {
+      const res = await client.generate(args);
+      if (res?.usage) {
+        await recordCostEvent(db, {
+          familyId: meterCtx.familyId,
+          kind: "text",
+          agentKey,
+          model,
+          source: meterCtx.source || agentKey,
+          usage: res.usage,
+          uid: meterCtx.uid,
+          childId: meterCtx.childId,
+          activityId: meterCtx.activityId,
+          runId: meterCtx.runId,
+        });
+      }
+      return res;
+    },
+  };
 }

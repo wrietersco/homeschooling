@@ -7,6 +7,9 @@ import { useProfilesStore } from "@/stores/profiles";
 import { addBlock, removeBlock } from "@/services/planner";
 import { updateGuardian } from "@/services/profiles";
 import { autoSchedule } from "@/services/scheduler";
+import { useActivityLink } from "@/composables/useActivityLink";
+
+const { copiedId, copyActivityLink } = useActivityLink();
 
 const auth = useAuthStore();
 const activityStore = useActivityStore();
@@ -387,6 +390,13 @@ const filteredCount = computed(() => filteredGroups.value.reduce((n, g) => n + g
                 <span :class="`rank-badge rank-${block.complexityRank}`">
                   {{ RANK_LABELS[block.complexityRank] }}
                 </span>
+                <button
+                  type="button"
+                  class="share-link-btn"
+                  :title="copiedId === block.activityId ? 'Link copied!' : 'Copy shareable link'"
+                  :aria-label="`Copy shareable link for ${block.activityTitle}`"
+                  @click="copyActivityLink(block.activityId)"
+                >{{ copiedId === block.activityId ? "✓" : "🔗" }}</button>
                 <router-link
                   :to="`/activity/${block.activityId}?blockId=${block.id}&dateKey=${day.dateKey}`"
                   class="view-link"
@@ -628,6 +638,10 @@ const filteredCount = computed(() => filteredGroups.value.reduce((n, g) => n + g
 .block-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 0.2rem; }
 .view-link { font-size: 0.68rem; color: #0b1f3a; text-decoration: none; }
 .view-link:hover { text-decoration: underline; }
+/* Copy-link icon sits with the Run link on the right; auto margin keeps the
+   rank badge anchored to the left. */
+.share-link-btn { margin-left: auto; margin-right: 0.4rem; background: none; border: none; padding: 0; cursor: pointer; font-size: 0.72rem; line-height: 1; }
+.share-link-btn:hover { opacity: 0.7; }
 
 /* ─── Modal ──────────────────────────────────────────────────────────────── */
 .modal-backdrop {

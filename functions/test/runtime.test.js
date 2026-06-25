@@ -102,6 +102,17 @@ test("runAgent returns immediately after the stopAfterTool tool fires", async ()
   assert.equal(llm.calls.length, 1); // and we never asked the model again
 });
 
+test("runAgent surfaces an empty final response instead of a blank string", async () => {
+  // Gemini sometimes ends a turn with finishReason STOP and no parts (empty
+  // candidate). That must not reach the UI as "" — a blank bubble that looks
+  // like the agent fell asleep. It should become a clear, non-empty message.
+  const llm = fakeLlm([{ text: "", functionCalls: [], finishReason: "STOP" }]);
+  const result = await runAgent({ llm, tools: {}, userMessage: "x" });
+  assert.equal(result.stoppedAt, "empty");
+  assert.equal(result.finishReason, "STOP");
+  assert.ok(result.text.length > 0, "empty final should yield a non-empty diagnostic message");
+});
+
 test("runAgent stops at the step budget if the model never finalizes", async () => {
   const llm = fakeLlm([{ text: "", functionCalls: [{ name: "loop", args: {} }] }]);
   const tools = { loop: async () => ({ ok: true }) };

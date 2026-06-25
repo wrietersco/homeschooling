@@ -22,7 +22,7 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { resolveCaller } from "../lib/caller.js";
 import { runAgent } from "./runtime.js";
-import { resolveLlm } from "./agentConfig.js";
+import { resolveLlm, loadAgentConfig } from "./agentConfig.js";
 import { describeGuardian, summarizeChildPerformance } from "./grounding.js";
 import { enrichQuranContent } from "./quranSource.js";
 import { generateActivityImage, generateObjectImages } from "./imageGen.js";
@@ -56,6 +56,14 @@ function defaultLangForType(type) {
   if (type === "quran" || type === "noorani_qaida" || type === "arabic_reading") return "ar";
   if (type === "urdu_reading") return "ur";
   return "en";
+}
+
+// Max length of the parent's free-text regeneration guidance. Mirrors the
+// 6000-char textarea in the UI; clamped server-side so a crafted client can't
+// blow up the prompt.
+export const GUIDANCE_MAX_CHARS = 6000;
+export function clampGuidance(v) {
+  return String(v || "").slice(0, GUIDANCE_MAX_CHARS).trim();
 }
 
 // ─── save_content tool declaration ────────────────────────────────────────────
@@ -221,11 +229,26 @@ const SAVE_CONTENT_DECLARATION = {
         required: ["steps"],
       },
 
-      // tips — parent facilitation guidance for activities with no child artifact.
+      // tips — a ready-to-run lesson kit for parent-led activities: the actual
+      // material the activity needs (a story, scenario, role-play, reflection)
+      // WRITTEN OUT IN FULL, plus facilitation guidance. The parent never has to
+      // go and source anything themselves.
       tips: {
         type: "object",
-        description: "Helpful guidance so the PARENT can run this activity well (used when there's no readable text / problems / steps for the child).",
+        description: "A ready-to-run kit so the PARENT can run this activity with NOTHING to prepare. If the activity revolves around a story / scenario / role-play / worked example, write that material out in FULL in `story`. Then give facilitation guidance.",
         properties: {
+          lang: { type: "string", description: "BCP-47 language of the story + guidance, matching the activity's instructions (e.g. 'ur' for Urdu, 'en')." },
+          story: {
+            type: "object",
+            description: "When the activity needs a story / narrative / scenario / role-play script (e.g. a character-building, empathy, seerah, or moral-lesson activity), write the COMPLETE, ready-to-read material here — never ask the parent to find or choose one. For Islamic stories, draw on authentic seerah / sahaba / prophetic narratives.",
+            properties: {
+              title: { type: "string", description: "The story / scenario title." },
+              paragraphs: { type: "array", items: { type: "string" }, description: "The full story told in 3-7 short paragraphs, complete with a beginning, middle and end, in the activity's language." },
+              moral: { type: "string", description: "The lesson / takeaway the story illustrates (ties to the guiding light)." },
+            },
+            required: ["paragraphs"],
+          },
+          discussionQuestions: { type: "array", items: { type: "string" }, description: "3-5 questions the parent asks the child after the story / activity to draw out the lesson and reflection." },
           tips: { type: "array", items: { type: "string" }, description: "3-6 concrete tips for running the activity effectively." },
           watchFor: { type: "array", items: { type: "string" }, description: "Common pitfalls or signs the child is struggling." },
           encourage: { type: "array", items: { type: "string" }, description: "Encouraging phrases / ways to praise effort." },
@@ -266,7 +289,7 @@ const SAVE_CONTENT_DECLARATION = {
 };
 
 // ─── Prompt ───────────────────────────────────────────────────────────────────
-function buildSystemPrompt({ activity, kind, guidingLight, children, guardians = [], recentlyUsed = [], childPerformance = "", planContext = "" }) {
+function buildSystemPrompt({ activity, kind, guidingLight, children, guardians = [], recentlyUsed = [], childPerformance = "", planContext = "", guidance = "" }) {
   const childLine = children.length
     ? children.map((c) => `${c.name || c.id}${c.dob ? ` (dob ${c.dob})` : ""}`).join("; ")
     : "(none)";
@@ -282,7 +305,7 @@ function buildSystemPrompt({ activity, kind, guidingLight, children, guardians =
     story:
       "Produce ONE short, original ENGLISH story passage of 2-4 short paragraphs at the child's reading level (set story.lang to 'en'). Include 3-6 vocabulary words with simple meanings and 2-3 comprehension questions. The story must embody the guiding light.",
     tips:
-      "This activity has no readable text / problems / steps for the child — it's parent-led. Fill the `tips` object with 3-6 concrete tips for running it well, a few things to watch for, and encouraging phrases. Be specific to THIS activity and the children. Do NOT invent verses, drills, or worksheets.",
+      "This activity is parent-led, so provide EVERYTHING the parent needs to run it RIGHT NOW with nothing to prepare or look up. Never tell the parent to 'find', 'select', 'choose', 'pick', or 'prepare' a story or material — if the activity revolves around a story, scenario, role-play, worked example, or reflection, YOU must write that material out IN FULL in the `story` field (a complete, original, age-appropriate narrative with a real beginning, middle, and end). For Islamic character / empathy / seerah lessons, base it on authentic seerah, sahaba, or prophetic narratives and reflect the guiding light. Even if the activity's plan says to 'choose a story', you choose it and write the whole thing here. Add 3-5 `discussionQuestions` to draw out the lesson, then fill `tips`, `watchFor`, and `encourage` for facilitation. Set `lang` to the activity's language (e.g. 'ur'). Do NOT invent Qur'anic verses or Qaida drills.",
     problems:
       "Produce 5-10 problem sums matched to the activity's complexity rank. Each problem has the question to solve, the correct answer, an optional hint, and optional step-by-step working. Progress from easier to harder within the set.",
     steps:
@@ -317,6 +340,15 @@ function buildSystemPrompt({ activity, kind, guidingLight, children, guardians =
     // The subject plan (the "canvas") — the agent renders THIS activity's
     // pre-decided objective and weaves it into the surrounding arc.
     planContext ? `\n${planContext}` : "",
+    // The parent's own instructions for THIS (re)generation — why they're
+    // regenerating and what to change/fix. Highest priority short of safety and
+    // canonical correctness: it tells the agent what was wrong before and the
+    // angle to take this time.
+    guidance ? [
+      "",
+      "PARENT'S INSTRUCTIONS FOR THIS REGENERATION (follow these closely — they explain why this content is being regenerated and what to change):",
+      guidance,
+    ].join("\n") : "",
     "",
     `REQUIRED CONTENT KIND: ${kind}`,
     kindGuidance[kind] || kindGuidance.steps,
@@ -412,7 +444,18 @@ function sanitizeContent(kind, raw, type) {
     };
   } else if (kind === "tips") {
     const t = raw.tips || {};
+    const lang = str(t.lang) || out.primaryLang;
+    // Embedded ready-to-use narrative (story / scenario / role-play) so the
+    // parent never has to source one. Kept only when it actually has paragraphs.
+    const rawStory = t.story || {};
+    const storyParas = arr(rawStory.paragraphs).map(str).filter(Boolean).slice(0, 10);
+    const story = storyParas.length
+      ? { title: str(rawStory.title), paragraphs: storyParas, moral: str(rawStory.moral), lang }
+      : null;
     out.tips = {
+      lang,
+      ...(story ? { story } : {}),
+      discussionQuestions: arr(t.discussionQuestions).map(str).filter(Boolean).slice(0, 8),
       tips: arr(t.tips).map(str).filter(Boolean).slice(0, 8),
       watchFor: arr(t.watchFor).map(str).filter(Boolean).slice(0, 6),
       encourage: arr(t.encourage).map(str).filter(Boolean).slice(0, 6),
@@ -474,7 +517,8 @@ export function isContentEmpty(content) {
     case "problems":
       return !(content.problems?.length);
     case "tips":
-      return !(content.tips?.tips?.length);
+      // Valid when it carries facilitation tips OR an embedded ready-to-use story.
+      return !(content.tips?.tips?.length || content.tips?.story?.paragraphs?.length);
     default: // steps
       return !(content.worksheet?.steps?.length);
   }
@@ -506,7 +550,7 @@ export function describeNoContent(result, kind = "") {
 // ─── Pure generator — produces content for an activity, no DB access ──────────
 // Reused by the syllabus worker (inline, at creation time) and the callable.
 // `geminiApiKey` + `storagePrefix` enable storybook image generation for stories.
-export async function generateContentForActivity({ activity, children = [], guardians = [], guidingLight = "", childPerformance = "", llm, genConfig, db = null, geminiApiKey = "", storagePrefix = "", planContext = "" }) {
+export async function generateContentForActivity({ activity, children = [], guardians = [], guidingLight = "", childPerformance = "", llm, genConfig, db = null, geminiApiKey = "", storagePrefix = "", planContext = "", guidance = "" }) {
   const kind = contentKindForType(activity.type);
   const familyId = storagePrefix || "";
 
@@ -527,7 +571,7 @@ export async function generateContentForActivity({ activity, children = [], guar
       return { saved: true };
     },
   };
-  const system = buildSystemPrompt({ activity, kind, guidingLight, children, guardians, recentlyUsed, childPerformance, planContext });
+  const system = buildSystemPrompt({ activity, kind, guidingLight, children, guardians, recentlyUsed, childPerformance, planContext, guidance });
 
   // One attempt of the agent. Returns the runAgent result so we can diagnose why
   // it produced no content (the usual culprit is MAX_TOKENS truncating the
@@ -579,13 +623,23 @@ export async function generateContentForActivity({ activity, children = [], guar
     }
   }
 
+  // Resolve the superadmin's configured image model once (per-agent override,
+  // falling back to the built-in default). Best-effort: any failure → default.
+  let imageModel;
+  if (captured && geminiApiKey && db) {
+    try { imageModel = (await loadAgentConfig(db, "image")).model; }
+    catch (e) { console.warn(`[content] image model resolve failed: ${e?.message || e}`); }
+  }
+
   // Storybook illustration for reading stories (spec §41). Best-effort.
   if (captured && captured.kind === "story" && captured.story && geminiApiKey) {
     const scene = `${captured.story.title}. ${(captured.story.paragraphs || [])[0] || ""}`.slice(0, 400);
     const image = await generateActivityImage({
       scene,
       apiKey: geminiApiKey,
+      model: imageModel,
       pathHint: `${storagePrefix || "shared"}/${slugify(activity.title)}`,
+      meter: familyId ? { db, familyId, activityId: activity.id, source: "activityContent" } : null,
     });
     if (image) captured.story.image = image;
   }
@@ -605,7 +659,7 @@ export async function generateContentForActivity({ activity, children = [], guar
       const base = `${storagePrefix || "shared"}/${slugify(activity.title)}`;
       const images = await generateObjectImages(
         targets.slice(0, 8).map((t, i) => ({ subject: t.imageSubject, pathHint: `${base}-pic${i + 1}` })),
-        { apiKey: geminiApiKey }
+        { apiKey: geminiApiKey, model: imageModel, meter: familyId ? { db, familyId, activityId: activity.id, source: "activityContent" } : null }
       );
       images.forEach((img, i) => { if (img) targets[i].image = img; });
     }
@@ -643,7 +697,7 @@ async function loadFamilyContext(db, familyId) {
 }
 
 // ─── Core runner for the callable (loads context, writes to DB) ───────────────
-export async function runGenerateContent({ db, familyId, activityId, uid, llm, genConfig }) {
+export async function runGenerateContent({ db, familyId, activityId, uid, llm, genConfig, guidance = "" }) {
   const activityRef = db
     .collection("families").doc(familyId)
     .collection("activities").doc(activityId);
@@ -663,6 +717,7 @@ export async function runGenerateContent({ db, familyId, activityId, uid, llm, g
     geminiApiKey: process.env.GEMINI_API_KEY || "",
     storagePrefix: familyId,
     planContext,
+    guidance,
   });
   if (!content) {
     await activityRef.update({ contentError: reason || "No content produced." }).catch(() => {});
@@ -677,26 +732,41 @@ export async function runGenerateContent({ db, familyId, activityId, uid, llm, g
 // Processes a bounded batch per call (LLM + image latency) and returns how many
 // remain so the client can loop until done. Best-effort per activity: one
 // failure never aborts the batch.
-export async function runBackfill({ db, familyId, uid, llm, genConfig, limit, shouldCancel = null }) {
+export async function runBackfill({ db, familyId, uid, llm, genConfig, limit, shouldCancel = null, force = false, forceToken = "", subjectId = "", types = [], guidance = "" }) {
   const snap = await db
     .collection("families").doc(familyId)
     .collection("activities").limit(500).get();
-  const missing = snap.docs.filter((d) => !d.data().content);
-  const total = missing.length;
+  let docs = snap.docs;
+  if (subjectId) docs = docs.filter((d) => d.data().subjectId === subjectId);
+  const typeSet = Array.isArray(types) && types.length ? new Set(types) : null;
+  if (typeSet) docs = docs.filter((d) => typeSet.has(d.data().type));
+  // "fill" mode = activities with no content yet. "regenerate" (force) mode =
+  // every activity not yet refreshed in THIS run, tracked by a per-run token, so
+  // it OVERWRITES existing content and still converges (each pass clears more).
+  const tok = String(forceToken || "");
+  const pending = force
+    ? docs.filter((d) => String(d.data().contentRegenToken || "") !== tok)
+    : docs.filter((d) => !d.data().content);
+  const total = pending.length;
   if (!total) return { total: 0, processed: 0, remaining: 0 };
 
   const { children, guardians, guidingLight } = await loadFamilyContext(db, familyId);
   const childPerformance = await summarizeChildPerformance(db, familyId, children);
   // Load all subject plans once per pass; each activity reads its slice (canvas).
   const plans = await loadSubjectPlans(db, familyId);
-  const batch = missing.slice(0, limit);
+  const batch = pending.slice(0, limit);
 
-  let processed = 0;
+  let processed = 0;   // successful (re)generations
+  let advanced = 0;    // items that won't reappear next pass (so `remaining` is accurate)
   let cancelled = false;
   for (const d of batch) {
     // Stop promptly if the parent hit "Stop" — checked between activities so an
     // in-flight batch ends within one activity rather than running to completion.
     if (shouldCancel && (await shouldCancel())) { cancelled = true; break; }
+    // In force mode, stamp the run token regardless of outcome so a stubbornly
+    // failing activity isn't retried forever within the same run; in fill mode a
+    // failure stays pending and is retried on a later pass.
+    const stamp = force ? { contentRegenToken: tok } : {};
     try {
       const activity = { id: d.id, ...d.data() };
       const planContext = activity.subjectId ? buildPlanContextString(plans.get(activity.subjectId), activity.id) : "";
@@ -705,21 +775,26 @@ export async function runBackfill({ db, familyId, uid, llm, genConfig, limit, sh
         geminiApiKey: process.env.GEMINI_API_KEY || "",
         storagePrefix: familyId,
         planContext,
+        guidance,
       });
       if (content) {
-        await d.ref.update({ content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "" });
+        await d.ref.update({ content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "", ...stamp });
         processed++;
+        advanced++;
       } else {
         // Record WHY so it's visible instead of a silent skip, then retry later.
-        await d.ref.update({ contentError: reason || "No content produced." });
+        await d.ref.update({ contentError: reason || "No content produced.", ...stamp });
+        if (force) advanced++;
         console.warn(`[content] backfill produced no content for ${d.id} (${activity.type}): ${reason}`);
       }
     } catch (e) {
-      // skip this activity; it will be retried on a later backfill pass
+      // skip this activity; it will be retried on a later backfill pass (fill
+      // mode). In force mode, stamp it so the run moves past it and converges.
+      if (force) { try { await d.ref.update({ contentRegenToken: tok }); advanced++; } catch { /* ignore */ } }
       console.warn(`[content] backfill skipped activity ${d.id} in ${familyId}: ${e?.message || e}`);
     }
   }
-  return { total, processed, remaining: Math.max(0, total - processed), cancelled };
+  return { total, processed, remaining: Math.max(0, total - advanced), cancelled };
 }
 
 // ─── Callable ─────────────────────────────────────────────────────────────────
@@ -729,14 +804,16 @@ export const generateActivityContent = onCall(
     const { db, uid, familyId } = await resolveCaller(request);
     const activityId = String(request.data?.activityId || "").trim();
     if (!activityId) throw new HttpsError("invalid-argument", "activityId is required.");
+    // Optional parent direction for this (re)generation — why, and what to change.
+    const guidance = clampGuidance(request.data?.guidance);
     await enforceDailyLimit(db, familyId, "content"); // audit #12
 
-    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY);
+    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, activityId, source: "generateActivityContent" });
     if (!llm) {
       return { configured: false, text: "Content generation isn't configured — set the GEMINI_API_KEY secret to enable it." };
     }
 
-    const { kind, content } = await runGenerateContent({ db, familyId, activityId, uid, llm, genConfig });
+    const { kind, content } = await runGenerateContent({ db, familyId, activityId, uid, llm, genConfig, guidance });
     return { configured: true, kind, content };
   }
 );
@@ -770,7 +847,7 @@ export const backfillActivityContent = onCall(
   { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 540 },
   async (request) => {
     const { db, uid, familyId } = await resolveCaller(request);
-    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY);
+    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, source: "backfillActivityContent" });
     if (!llm) return { configured: false, total: 0, processed: 0, remaining: 0 };
 
     const limit = Math.min(12, Math.max(1, Number(request.data?.limit) || 6));
@@ -793,8 +870,9 @@ export const requestContentSample = onCall(
     const subjectId = String(request.data?.subjectId || "").trim();
     if (!subjectId) throw new HttpsError("invalid-argument", "subjectId is required.");
     const limit = Math.min(8, Math.max(1, Number(request.data?.limit) || 6));
+    const guidance = clampGuidance(request.data?.guidance);
 
-    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY);
+    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, source: "requestContentSample" });
     if (!llm) return { configured: false, text: "Content generation isn't configured — set the GEMINI_API_KEY secret to enable it." };
 
     const actSnap = await db.collection("families").doc(familyId)
@@ -820,6 +898,7 @@ export const requestContentSample = onCall(
           geminiApiKey: process.env.GEMINI_API_KEY || "",
           storagePrefix: familyId,
           planContext,
+          guidance,
         });
         if (content) {
           await aRef.update({ content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "" });
@@ -853,8 +932,9 @@ export const regenerateFailedContent = onCall(
     }
     const subjectId = String(request.data?.subjectId || "").trim();
     const limit = Math.min(15, Math.max(1, Number(request.data?.limit) || 10));
+    const guidance = clampGuidance(request.data?.guidance);
 
-    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY);
+    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, source: "regenerateFailedContent" });
     if (!llm) return { configured: false, text: "Content generation isn't configured — set the GEMINI_API_KEY secret to enable it." };
 
     const snap = await db.collection("families").doc(familyId).collection("activities").limit(500).get();
@@ -879,6 +959,7 @@ export const regenerateFailedContent = onCall(
           geminiApiKey: process.env.GEMINI_API_KEY || "",
           storagePrefix: familyId,
           planContext,
+          guidance,
         });
         if (content) {
           await aRef.update({ content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "" });
@@ -925,11 +1006,19 @@ function backfillMetaRef(db, familyId) {
 // count what's missing up front so the UI has a denominator (total) and a start
 // time (for an ETA) the instant the banner appears — before the worker's first
 // pass a minute later.
-export async function enqueueContentBackfill({ db, familyId, uid }) {
+export async function enqueueContentBackfill({ db, familyId, uid, force = false, subjectId = "", types = [], guidance = "" }) {
   let total = 0;
+  // A fresh per-run token marks which activities this regenerate run has already
+  // refreshed, so it overwrites existing content yet still terminates.
+  const forceToken = force ? `r${Date.now()}` : "";
+  const typeList = Array.isArray(types) ? [...new Set(types.map(String).filter(Boolean))] : [];
+  const typeSet = typeList.length ? new Set(typeList) : null;
   try {
     const snap = await db.collection("families").doc(familyId).collection("activities").limit(500).get();
-    total = snap.docs.filter((d) => !d.data().content).length;
+    let docs = snap.docs;
+    if (subjectId) docs = docs.filter((d) => d.data().subjectId === subjectId);
+    if (typeSet) docs = docs.filter((d) => typeSet.has(d.data().type));
+    total = force ? docs.length : docs.filter((d) => !d.data().content).length;
   } catch (e) { console.warn(`[content] backfill precount failed for ${familyId}: ${e?.message || e}`); }
 
   const status = total > 0 ? "queued" : "done";
@@ -937,18 +1026,26 @@ export async function enqueueContentBackfill({ db, familyId, uid }) {
     familyId,
     uid: uid || "system",
     status,
+    force: Boolean(force),
+    forceToken,
+    subjectId: subjectId || "",
+    types: typeList,
+    guidance: guidance || "",
     processedTotal: 0,
     updatedAt: new Date(),
   }, { merge: true });
   await backfillMetaRef(db, familyId).set({
     status,
+    mode: force ? "regenerate" : "fill",
+    subjectId: subjectId || "",
+    types: typeList,
     processed: 0,
     total,
     remaining: total,
     startedAt: new Date(),
     updatedAt: new Date(),
   }, { merge: true });
-  return { familyId, status, total };
+  return { familyId, status, total, mode: force ? "regenerate" : "fill" };
 }
 
 // Drain up to `limit` queued families, one batch each, re-queuing the rest.
@@ -982,6 +1079,10 @@ export async function runContentBackfillQueuePass({ db, limit = 2 } = {}) {
 
     const familyId = claimed.familyId || q.id;
     const uid = claimed.uid || "system";
+    // Re-resolve a per-family metered client so each drained family's cost is
+    // attributed correctly (the pass-level client above is family-agnostic).
+    const { llm: familyLlm, genConfig: familyGenConfig } =
+      await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, source: "contentBackfillWorker" });
     try {
       await backfillMetaRef(db, familyId).set({ status: "running", updatedAt: new Date() }, { merge: true });
       // Cancellation check (the parent's "Stop" button): re-read the queue row
@@ -991,7 +1092,10 @@ export async function runContentBackfillQueuePass({ db, limit = 2 } = {}) {
         return s.exists && s.data().status === "cancelled";
       };
       const { processed: batchProcessed, remaining, cancelled } = await runBackfill({
-        db, familyId, uid, llm, genConfig, limit: BACKFILL_BATCH, shouldCancel,
+        db, familyId, uid, llm: familyLlm || llm, genConfig: familyGenConfig || genConfig, limit: BACKFILL_BATCH, shouldCancel,
+        force: Boolean(claimed.force), forceToken: claimed.forceToken || "",
+        subjectId: claimed.subjectId || "", types: claimed.types || [],
+        guidance: claimed.guidance || "",
       });
       const processedTotal = Number(claimed.processedTotal || 0) + batchProcessed;
       // Honour a stop: finalise as cancelled and do NOT re-queue. Re-check the
@@ -1055,7 +1159,17 @@ export const requestContentBackfill = onCall(
   async (request) => {
     const { db, uid, familyId } = await resolveCaller(request);
     await enforceDailyLimit(db, familyId, "backfill"); // audit #12
-    const result = await enqueueContentBackfill({ db, familyId, uid });
+    // force=true regenerates content for activities that ALREADY have it (an
+    // overwrite); optionally scoped to one subject and/or a set of activity
+    // types. default fills only missing.
+    const force = Boolean(request.data?.force);
+    const subjectId = String(request.data?.subjectId || "").trim();
+    const types = Array.isArray(request.data?.types)
+      ? request.data.types.map((t) => String(t || "").trim()).filter(Boolean).slice(0, 20)
+      : [];
+    // Parent's free-text direction for this run (why regenerate, what to fix).
+    const guidance = clampGuidance(request.data?.guidance);
+    const result = await enqueueContentBackfill({ db, familyId, uid, force, subjectId, types, guidance });
     return { configured: true, ...result };
   }
 );

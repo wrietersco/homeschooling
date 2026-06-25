@@ -195,7 +195,10 @@ function buildWorkerSystemPrompt({ subjectName, macroGoals, contentOutline, inst
     "  scene (e.g. a daily-routine conversation). The app renders these as a playable, two-",
     "  voice conversation — prefer it over `teaching` whenever the activity is a conversation.",
     "- Use `teaching` for hands-on/discussion activities that have no single reading/recitation",
-    "  artifact (the app will give the parent facilitation tips for these).",
+    "  artifact. The app then generates a READY-TO-RUN kit for these — and when the activity",
+    "  needs a story, scenario, or role-play, the app writes that material out in full. So in",
+    "  `parentInstructions` describe how to FACILITATE the activity; never tell the parent to",
+    "  go find, select, choose, or prepare a story/material themselves — assume it is provided.",
     motherTongue ? [
       "PARENT LANGUAGE (mother tongue):",
       `- The guiding parent's mother tongue is ${motherTongue}. For EVERY activity, besides the English parentInstructions, also fill:`,
@@ -646,16 +649,24 @@ export async function runSyllabusQueuePass({ db, limit = 2 } = {}) {
         await q.ref.set({ status: "cancelled", updatedAt: new Date() }, { merge: true });
         continue;
       }
+      // Per-family metered clients so each run's cost is attributed to its family
+      // (the pass-level clients above are family-agnostic).
+      const runUid = run.uid || claimed.uid || "system";
+      const runId = claimed.runId;
+      const { llm: famLlm, genConfig: famGenConfig } =
+        await resolveLlm(db, "syllabus", process.env.GEMINI_API_KEY, { familyId: claimed.familyId, uid: runUid, runId, source: "syllabusWorker" });
+      const { llm: famContentLlm, genConfig: famContentGenConfig } =
+        await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId: claimed.familyId, uid: runUid, runId, source: "syllabusWorker" });
       await continueSyllabusRun({
         db,
         familyId: claimed.familyId,
         runId: claimed.runId,
-        uid: run.uid || claimed.uid || "system",
+        uid: runUid,
         role: run.role || "owner",
-        llm,
-        genConfig,
-        contentLlm,
-        contentGenConfig,
+        llm: famLlm || llm,
+        genConfig: famGenConfig || genConfig,
+        contentLlm: famContentLlm || contentLlm,
+        contentGenConfig: famContentGenConfig || contentGenConfig,
         subjectLimit: 1,
       });
       processed += 1;
@@ -687,7 +698,7 @@ export const generateSyllabus = onCall(
     const curriculumId = String(request.data?.curriculumId || "").trim();
     if (!runId && !curriculumId) throw new HttpsError("invalid-argument", "curriculumId or runId is required.");
 
-    const { llm } = await resolveLlm(db, "syllabus", process.env.GEMINI_API_KEY);
+    const { llm } = await resolveLlm(db, "syllabus", process.env.GEMINI_API_KEY, { familyId, uid, runId, source: "generateSyllabus" });
     if (!llm) {
       return {
         configured: false,

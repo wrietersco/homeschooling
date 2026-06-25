@@ -21,7 +21,7 @@ const props = defineProps({
   content: { type: Object, required: true },
 });
 
-const { speak, speakSequence, sequenceIndex, speakingId, playAudio, loadingId, ttsLogs } = useSpeech();
+const { speak, speakSequence, sequenceIndex, speakingId, playAudio, loadingId, ttsLogs, lastError } = useSpeech();
 
 const kind = computed(() => props.content?.kind || "steps");
 const primaryLang = computed(() => props.content?.primaryLang || "en");
@@ -152,6 +152,22 @@ const storyParagraphs = computed(() => {
 // or a whole section at a time so parents can listen instead of read.
 const tipsLang = computed(() => tipsLangFor(props.content?.tips));
 const tipsSections = computed(() => buildTipsSections(props.content?.tips));
+// Embedded ready-to-use story (character-building / empathy / seerah activities)
+// and the discussion questions that draw out its lesson.
+const tipsStory = computed(() => {
+  const s = props.content?.tips?.story;
+  return s && Array.isArray(s.paragraphs) && s.paragraphs.length ? s : null;
+});
+// "Read aloud" speaks the whole story — and the moral (the green takeaway) is
+// part of the story, so parents who listen instead of read still hear the point.
+const tipsStoryReadText = computed(() => {
+  const s = tipsStory.value;
+  if (!s) return "";
+  return [...s.paragraphs, s.moral].filter(Boolean).join(" ");
+});
+const tipsDiscussion = computed(() =>
+  (props.content?.tips?.discussionQuestions || []).filter((q) => typeof q === "string" && q.trim())
+);
 function lineId(text) { return tipLineId(tipsLang.value, text); }
 function playSection(items) { speakSequence(tipSequence(tipsLang.value, items)); }
 </script>
@@ -432,9 +448,42 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
       </div>
     </div>
 
-    <!-- ─── TIPS (parent facilitation) ─────────────────────────────── -->
+    <!-- ─── TIPS (parent-led lesson kit: embedded story + facilitation) ─ -->
     <div v-else-if="kind === 'tips' && content.tips" class="tips">
-      <p class="ac-hint">This activity is parent-led — here's how to guide it well. Tap 🔊 to hear any line, or play a whole section.</p>
+      <!-- Ready-to-use story / scenario, written out in full so the parent has
+           nothing to source. Rendered before the facilitation guidance. -->
+      <div v-if="tipsStory" class="tips-story">
+        <div class="story-head">
+          <h3 class="story-title" :class="fontClassFor(tipsStory.lang || tipsLang)">{{ tipsStory.title || "Story" }}</h3>
+          <SpeakButton :text="tipsStoryReadText" :lang="tipsStory.lang || tipsLang" size="md" label="Read aloud" :rate="0.9" />
+        </div>
+        <div class="passage" :class="[fontClassFor(tipsStory.lang || tipsLang), { rtl: isRtlLang(tipsStory.lang || tipsLang) }]">
+          <div v-for="(para, pi) in tipsStory.paragraphs" :key="pi" class="para">
+            <div class="para-tools">
+              <SpeakButton :text="para" :lang="tipsStory.lang || tipsLang" size="sm" label="Paragraph" :rate="0.9" />
+            </div>
+            <p class="para-body" :style="{ fontSize: (1.15 * fontScale) + 'rem' }">{{ para }}</p>
+          </div>
+        </div>
+        <p v-if="tipsStory.moral" class="tips-moral" :class="[fontClassFor(tipsStory.lang || tipsLang), { rtl: isRtlLang(tipsStory.lang || tipsLang) }]">
+          <span class="tips-moral-ico">🌱</span>{{ tipsStory.moral }}
+        </p>
+      </div>
+
+      <div v-if="tipsDiscussion.length" class="tips-block">
+        <div class="tips-block-head">
+          <h4 class="sub-h">💬 Talk about it</h4>
+          <button type="button" class="section-play" aria-label="Play discussion questions" @click="playSection(tipsDiscussion)">🔊 Play section</button>
+        </div>
+        <ul class="tips-list" :class="[fontClassFor(tipsLang), { rtl: isRtlLang(tipsLang) }]">
+          <li v-for="(q, i) in tipsDiscussion" :key="i" class="tip-line" :class="{ speaking: speakingId === lineId(q) }">
+            <SpeakButton :text="q" :lang="tipsLang" size="sm" class="tip-speak" />
+            <span class="tip-text">{{ q }}</span>
+          </li>
+        </ul>
+      </div>
+
+      <p class="ac-hint">Here's how to guide it well. Tap 🔊 to hear any line, or play a whole section.</p>
       <div v-for="section in tipsSections" :key="section.key" class="tips-block">
         <div class="tips-block-head">
           <h4 class="sub-h">{{ section.icon }} {{ section.title }}</h4>
@@ -466,6 +515,7 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
     <p v-if="loadingId" class="audio-status" role="status">
       <span class="spin-sm" aria-hidden="true"></span> Preparing audio…
     </p>
+    <p v-else-if="lastError" class="audio-error" role="status">🔇 {{ lastError }}</p>
     <details v-if="ttsLogs.length" class="audio-diag">
       <summary>Audio diagnostics</summary>
       <ul class="audio-log"><li v-for="(l, i) in ttsLogs" :key="i">{{ l }}</li></ul>
@@ -498,8 +548,18 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
 /* Nastaliq needs more size + vertical room to read beautifully. */
 .tips-list.font-urdu .tip-text { font-size: 1.3rem; line-height: 2.6; }
 
+/* Tips — embedded ready-to-use story + its moral */
+.tips-story { background: rgba(255,255,255,0.7); border: 1px solid #e2e8f0; border-radius: 12px; padding: 0.85rem 1rem; margin-bottom: 0.85rem; }
+.tips-story .story-head { margin-bottom: 0.6rem; }
+.tips-moral { margin: 0.75rem 0 0; padding: 0.6rem 0.8rem; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; color: #166534; line-height: 1.7; }
+.tips-moral.rtl { text-align: right; }
+.tips-moral.font-urdu { font-size: 1.25rem; line-height: 2.4; }
+.tips-moral-ico { margin-right: 0.4rem; }
+.tips-moral.rtl .tips-moral-ico { margin: 0 0 0 0.4rem; }
+
 /* Audio status + diagnostics */
 .audio-status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: #475569; margin: 0.75rem 0 0; }
+.audio-error { font-size: 0.82rem; color: #9a3412; background: #ffedd5; border-radius: 8px; padding: 0.4rem 0.6rem; margin: 0.75rem 0 0; }
 .spin-sm { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid #cbd5e1; border-top-color: #0b1f3a; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .audio-diag { margin-top: 0.5rem; font-size: 0.78rem; color: #64748b; }

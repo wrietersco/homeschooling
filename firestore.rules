@@ -57,9 +57,15 @@ service cloud.firestore {
       allow read, write: if signedIn() && request.auth.uid == uid;
     }
 
-    // Platform config: superadmin only.
+    // Platform config (incl. platform/pricing): superadmin only.
     match /platform/{doc=**} {
       allow read, write: if isSuperAdmin();
+    }
+
+    // Platform-wide cost rollups: superadmin read; written server-side (Admin SDK).
+    match /platformCostRollups/{period} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
     }
 
     // Global skill registry (top-level collection): readable by any signed-in
@@ -109,6 +115,17 @@ service cloud.firestore {
       match /agentRuns/{path=**} {
         allow read: if canRead(familyId);
         allow write: if isSuperAdmin();
+      }
+
+      // Cost metering (Phase A) — deep per-call log + rollups. Superadmin-only:
+      // families do not see dollar figures. Written server-side (Admin SDK).
+      match /costEvents/{path=**} {
+        allow read: if isSuperAdmin();
+        allow write: if false;
+      }
+      match /costRollups/{path=**} {
+        allow read: if isSuperAdmin();
+        allow write: if false;
       }
 
       // Member-read / parent-write content (each match also covers the group's

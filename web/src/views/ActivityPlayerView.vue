@@ -11,6 +11,7 @@ import { submitScore, addObservation, updateBlockStatus } from "@/services/playe
 import { getActivityJourney } from "@/services/brief";
 import ActivityContent from "@/components/ActivityContent.vue";
 import SpeakButton from "@/components/SpeakButton.vue";
+import GuideChat from "@/components/GuideChat.vue";
 
 const auth = useAuthStore();
 
@@ -49,6 +50,15 @@ const currentActivity = computed(() => {
   return b ? activityCache.value[b.id]?.activity || null : null;
 });
 const dayHasBlocks = computed(() => blocks.value.length > 0);
+
+// Parent instructions show in the guardian's native language first — mother
+// tongue in native script (e.g. Urdu Nastaliq), falling back to the roman
+// transliteration; English is kept as a collapsible secondary.
+const nativeInstructions = computed(() =>
+  currentActivity.value?.parentInstructionsNative || currentActivity.value?.parentInstructionsTranslit || ""
+);
+const hasNativeInstructions = computed(() => Boolean(nativeInstructions.value));
+const nativeIsScript = computed(() => Boolean(currentActivity.value?.parentInstructionsNative));
 
 // Resolve the children this activity is for. The stored targetChildren may be
 // empty OR contain stale/garbage ids that don't match any current child — in
@@ -117,6 +127,8 @@ function ensureScores() {
   for (const c of kids) next[c.id] = existing[c.id] || { completed: false, isDriving: false };
   scores.value[b.id] = next;
   if (!obsChild.value[b.id]) obsChild.value[b.id] = kids[0].id;
+  // Keep the in-focus child valid for the per-child work area.
+  if (!kids.some((c) => c.id === activeChildId.value)) activeChildId.value = kids[0].id;
 }
 watch([currentBlock, targetChildren], ensureScores, { immediate: true });
 
@@ -157,6 +169,36 @@ function toggleDriver(blockId, childId) {
 }
 
 const coopMode = computed(() => Boolean(currentActivity.value?.coopMode || currentBlock.value?.coopMode));
+
+// A genuinely *combined* activity is one more than one child does together (a
+// co-op). Only then do the instructions + content belong to everyone at once and
+// are shown as a single shared block. Otherwise each target child does the
+// activity individually, so we frame the content per child rather than merging
+// them — even though they share the same generated material, the parent runs and
+// scores it separately for each.
+const combined = computed(() => coopMode.value && targetChildren.value.length > 1);
+const perChild = computed(() => !combined.value && targetChildren.value.length > 1);
+
+// Which child's run is in focus (only meaningful in per-child mode). Kept valid
+// against the resolved target children as the block / its children change.
+const activeChildId = ref("");
+const activeChild = computed(() =>
+  targetChildren.value.find((c) => c.id === activeChildId.value) || targetChildren.value[0] || null
+);
+
+// In per-child mode, prefer a per-child content variant (content.byChild[childId])
+// when one exists — that's how differentiated, level-paced activities (e.g.
+// Noorani Qaida) give each child material at their own level. Falls back to the
+// shared blob for undifferentiated / co-op activities.
+const activeContent = computed(() => {
+  const a = currentActivity.value;
+  if (!a) return null;
+  const byChild = a.contentByChild;
+  if (perChild.value && byChild && activeChildId.value && byChild[activeChildId.value]) {
+    return byChild[activeChildId.value];
+  }
+  return a.content || null;
+});
 
 async function saveScores() {
   const b = currentBlock.value;
@@ -239,6 +281,35 @@ async function saveObservation() {
 
 const completedCount = computed(() => blocks.value.filter((b) => blockDone.value[b.id]).length);
 
+// Copy the current activity's unique id (for sharing / support reference).
+const uidCopied = ref(false);
+async function copyUid() {
+  const id = currentBlock.value?.activityId;
+  if (!id) return;
+  try {
+    await navigator.clipboard.writeText(id);
+    uidCopied.value = true;
+    setTimeout(() => (uidCopied.value = false), 2000);
+  } catch { /* clipboard blocked */ }
+}
+
+// In-the-moment context handed to the guide so its answers are about whatever
+// activity is open right now (not just the family at large).
+const guideOpen = ref(false);
+const guideContext = computed(() => {
+  const b = currentBlock.value;
+  const a = currentActivity.value;
+  if (!b) return `On the Activity Player for ${dateKey.value}; nothing scheduled.`;
+  const kids = targetChildren.value.map((c) => c.name || c.id).join(", ") || "all children";
+  const bits = [
+    `On the Activity Player for ${dateKey.value}.`,
+    `Current activity: "${b.activityTitle}" (${b.subject}, type ${b.type}, ${RANK_LABELS[b.complexityRank] || "?"}).`,
+    `For: ${kids}.`,
+  ];
+  if (a?.parentInstructions) bits.push(`Parent instructions: ${a.parentInstructions}`);
+  return bits.join(" ").slice(0, 600);
+});
+
 onMounted(async () => {
   await loadChildren();
   await loadDay();
@@ -300,40 +371,96 @@ watch(dateKey, () => loadDay());
               <span class="meta-chip">{{ currentBlock.scheduledTime }} · {{ currentBlock.durationMinutes }} min</span>
               <span v-if="blockDone[currentBlock.id]" class="meta-chip done-chip">Done ✓</span>
             </div>
+            <!-- Unique id + a stable, shareable link to this activity's own page,
+                 where a guardian can view/edit it per their permissions. -->
+            <div class="play-uid">
+              <button class="uid-chip" :title="uidCopied ? 'Copied!' : 'Activity ID — click to copy'" @click="copyUid">
+                <span class="uid-label">ID</span>
+                <span class="uid-value">{{ currentBlock.activityId }}</span>
+                <span class="uid-copy">{{ uidCopied ? "✓" : "⧉" }}</span>
+              </button>
+              <router-link class="uid-open" :to="`/activity/${currentBlock.activityId}`">Open / share page →</router-link>
+            </div>
             <div v-if="targetChildren.length" class="play-children">
               <span class="for-label">For</span>
               <span v-for="c in targetChildren" :key="c.id" class="child-chip">{{ c.name || c.id }}</span>
-              <span v-if="coopMode" class="child-chip coop">Co-op (together)</span>
-              <span v-else-if="targetChildren.length > 1" class="child-chip both">Combined</span>
+              <span v-if="combined" class="child-chip coop">Co-op (together)</span>
+              <span v-else-if="targetChildren.length > 1" class="child-chip indiv">Individually</span>
             </div>
           </div>
         </div>
 
-        <!-- Parent instructions -->
-        <details v-if="currentActivity?.parentInstructions" class="collapse">
-          <summary>Parent instructions</summary>
-          <p class="collapse-body">{{ currentActivity.parentInstructions }}</p>
-          <div v-if="currentActivity.parentInstructionsTranslit" class="mt-instructions">
-            <div class="mt-head">
-              <span class="mt-label">In your language</span>
-              <SpeakButton
-                :text="currentActivity.parentInstructionsNative || currentActivity.parentInstructionsTranslit"
-                size="sm"
-                label="Listen"
-              />
-            </div>
-            <p class="mt-translit">{{ currentActivity.parentInstructionsTranslit }}</p>
+        <!-- Per-child work area. The instructions + content belong to one child
+             at a time and are framed for that child — they only merge into a
+             single shared block when the activity is genuinely combined (a co-op
+             more than one child does together). For a non-co-op activity that
+             targets several children, each does it individually, so we tab
+             between them rather than presenting one merged session. -->
+        <div class="work-area" :class="{ combined, 'per-child': perChild }">
+          <div class="who-bar" :class="{ combined }">
+            <template v-if="combined">
+              <span class="who-ico">👥</span>
+              <div class="who-text">
+                <span class="who-title">Together</span>
+                <span class="who-sub">{{ targetChildren.map((c) => c.name || c.id).join(", ") }} do this as one combined activity.</span>
+              </div>
+            </template>
+            <template v-else-if="perChild">
+              <div class="who-tabs" role="tablist" aria-label="Choose a child">
+                <button
+                  v-for="c in targetChildren"
+                  :key="c.id"
+                  type="button"
+                  class="who-tab"
+                  :class="{ active: c.id === activeChildId }"
+                  role="tab"
+                  :aria-selected="c.id === activeChildId"
+                  @click="activeChildId = c.id"
+                >👤 {{ c.name || c.id }}</button>
+              </div>
+              <span class="who-sub indiv">Done individually with each child — showing <strong>{{ activeChild?.name || activeChild?.id }}</strong>.</span>
+            </template>
+            <template v-else-if="targetChildren.length">
+              <span class="who-ico">👤</span>
+              <div class="who-text">
+                <span class="who-title">For {{ activeChild?.name || activeChild?.id }}</span>
+              </div>
+            </template>
           </div>
-        </details>
 
-        <!-- Ready-to-do content -->
-        <div v-if="activityCache[currentBlock.id]?.loading" class="state">Loading activity…</div>
-        <div v-else-if="currentActivity?.content" class="content-box">
-          <ActivityContent :content="currentActivity.content" />
+          <!-- Parent instructions — guardian's native language first -->
+          <details v-if="currentActivity?.parentInstructions || hasNativeInstructions" class="collapse">
+            <summary>Parent instructions</summary>
+            <template v-if="hasNativeInstructions">
+              <div class="mt-head">
+                <SpeakButton
+                  :text="currentActivity.parentInstructionsNative || currentActivity.parentInstructionsTranslit"
+                  size="sm"
+                  label="Listen"
+                />
+              </div>
+              <p
+                class="collapse-body pi-native"
+                :class="{ 'font-urdu': nativeIsScript, rtl: nativeIsScript }"
+              >{{ nativeInstructions }}</p>
+              <div v-if="currentActivity.parentInstructions" class="mt-instructions">
+                <span class="mt-label">In English</span>
+                <p class="mt-translit">{{ currentActivity.parentInstructions }}</p>
+              </div>
+            </template>
+            <p v-else class="collapse-body">{{ currentActivity.parentInstructions }}</p>
+          </details>
+
+          <!-- Ready-to-do content. Keyed by the in-focus child so switching tabs
+               re-mounts it (resets per-run UI state like reveals / font size). -->
+          <div v-if="activityCache[currentBlock.id]?.loading" class="state">Loading activity…</div>
+          <div v-else-if="activeContent" class="content-box">
+            <ActivityContent :key="perChild ? activeChildId : 'all'" :content="activeContent" />
+          </div>
+          <p v-else class="state muted">
+            No interactive content for this activity yet — follow the instructions above.
+          </p>
         </div>
-        <p v-else class="state muted">
-          No interactive content for this activity yet — follow the instructions above.
-        </p>
 
         <!-- Where this fits in the plan -->
         <section class="record">
@@ -406,6 +533,23 @@ watch(dateKey, () => loadDay());
         </div>
       </div>
     </template>
+
+    <!-- Guide dock: an omniscient, read-only assistant that guides the signed-in
+         guardian. It knows who is logged in, remembers their past questions, and
+         is handed the activity currently open as context. -->
+    <div class="guide-dock" :class="{ open: guideOpen }">
+      <button class="guide-fab" @click="guideOpen = !guideOpen" :aria-expanded="guideOpen">
+        <span class="fab-ico">🧭</span>
+        <span class="fab-label">{{ guideOpen ? "Hide guide" : "Ask the guide" }}</span>
+      </button>
+      <div v-if="guideOpen" class="guide-panel">
+        <div class="guide-panel-head">
+          <strong>Your guide</strong>
+          <span class="guide-sub">Knows your family · remembers this chat</span>
+        </div>
+        <GuideChat :context="guideContext" placeholder="Ask about this activity or any child…" />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -442,20 +586,50 @@ watch(dateKey, () => loadDay());
 .rank-3 { background: #fef9c3; color: #854d0e; } .rank-4 { background: #fed7aa; color: #9a3412; }
 .rank-5 { background: #f3e8ff; color: #6b21a8; }
 
+.play-uid { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-top: 0.5rem; }
+.uid-chip { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.7rem; padding: 0.12rem 0.5rem; border-radius: 999px; background: #f8fafc; color: #64748b; border: 1px solid #e2e8f0; cursor: pointer; font-family: inherit; }
+.uid-chip:hover { background: #f1f5f9; color: #334155; }
+.uid-label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.uid-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.uid-copy { color: #94a3b8; }
+.uid-open { font-size: 0.72rem; color: #2563eb; text-decoration: none; }
+.uid-open:hover { text-decoration: underline; }
+
 .play-children { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-top: 0.5rem; }
 .for-label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-right: 0.1rem; }
 .child-chip { font-size: 0.72rem; font-weight: 600; padding: 0.12rem 0.55rem; border-radius: 999px; background: #e0e7ff; color: #3730a3; }
 .child-chip.coop { background: #e0f2fe; color: #0369a1; }
-.child-chip.both { background: #dcfce7; color: #166534; }
 
 .collapse { background: #f8fafc; border-radius: 10px; padding: 0.6rem 0.8rem; }
 .collapse summary { cursor: pointer; font-size: 0.85rem; color: #475569; }
 .collapse-body { margin: 0.5rem 0 0; white-space: pre-wrap; color: #1e293b; line-height: 1.6; }
 .mt-instructions { margin-top: 0.6rem; padding-top: 0.5rem; border-top: 1px dashed #e2e8f0; }
-.mt-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.3rem; }
-.mt-label { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
+.mt-head { display: flex; justify-content: flex-end; margin-bottom: 0.3rem; }
+.mt-label { display: block; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 0.3rem; }
 .mt-translit { white-space: pre-wrap; color: #334155; line-height: 1.6; margin: 0; }
+/* Native-language instructions (primary). Nastaliq needs extra size + room. */
+.pi-native.font-urdu { font-size: 1.25rem; line-height: 2.5; }
+.pi-native.rtl { direction: rtl; text-align: right; }
 .content-box { background: #fbfdff; border: 1px solid #eef2f7; border-radius: 12px; padding: 1rem; }
+
+/* Per-child work area — a framed unit so it's always clear whose instructions +
+   content are on screen. The frame turns green when the activity is combined
+   (everyone together) vs indigo when it's one child at a time. */
+.work-area { display: flex; flex-direction: column; gap: 1rem; border: 1px solid #e5e9f0; border-left: 4px solid #c7d2fe; border-radius: 12px; padding: 0.85rem; background: #fcfdff; }
+.work-area.combined { border-left-color: #86efac; background: #f6fef8; }
+.who-bar { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.who-ico { font-size: 1.3rem; }
+.who-text { display: flex; flex-direction: column; gap: 0.05rem; }
+.who-title { font-size: 0.95rem; font-weight: 700; color: #1e293b; }
+.who-sub { font-size: 0.76rem; color: #64748b; }
+.who-sub.indiv { flex-basis: 100%; }
+.who-sub strong { color: #3730a3; }
+.who-bar.combined .who-title { color: #166534; }
+.who-tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.who-tab { font-size: 0.78rem; font-weight: 600; padding: 0.28rem 0.7rem; border: 1px solid #c7d2fe; border-radius: 999px; background: #fff; color: #4338ca; cursor: pointer; }
+.who-tab:hover { background: #eef2ff; }
+.who-tab.active { background: #4338ca; border-color: #4338ca; color: #fff; }
+.child-chip.indiv { background: #eef2ff; color: #4338ca; }
 
 .record { border-top: 1px solid #f1f5f9; padding-top: 0.9rem; }
 .record h3 { margin: 0 0 0.6rem; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
@@ -488,4 +662,13 @@ watch(dateKey, () => loadDay());
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .field-error { color: #b91c1c; font-size: 0.82rem; margin: 0.3rem 0; }
 .success-msg { color: #15803d; font-size: 0.85rem; margin: 0 0 0.5rem; }
+
+/* Guide dock — floating bottom-right assistant */
+.guide-dock { position: fixed; right: 1rem; bottom: 1rem; z-index: 40; display: flex; flex-direction: column; align-items: flex-end; gap: 0.6rem; }
+.guide-fab { display: flex; align-items: center; gap: 0.5rem; background: #0b1f3a; color: #fff; border: none; border-radius: 999px; padding: 0.6rem 1rem; cursor: pointer; font: inherit; font-size: 0.9rem; box-shadow: 0 6px 18px rgba(11, 31, 58, 0.28); }
+.guide-fab .fab-ico { font-size: 1.1rem; }
+.guide-panel { width: min(380px, calc(100vw - 2rem)); background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 0.9rem; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18); }
+.guide-panel-head { display: flex; flex-direction: column; gap: 0.1rem; margin-bottom: 0.6rem; }
+.guide-panel-head strong { font-size: 0.95rem; color: #0f172a; }
+.guide-sub { font-size: 0.72rem; color: #94a3b8; }
 </style>

@@ -4,7 +4,7 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import admin from "firebase-admin";
-import { runAutoSchedule } from "../../functions/agents/scheduler.js";
+import { runAutoSchedule, loadScheduleHistory } from "../../functions/agents/scheduler.js";
 
 let db;
 const FAM = "schedulerFam";
@@ -71,4 +71,24 @@ test("runAutoSchedule writes a planned block and rejects bad inputs", async () =
   const runDoc = await db.collection("families").doc(FAM).collection("agentRuns").doc(result.runId).get();
   assert.equal(runDoc.data().status, "done");
   assert.equal(runDoc.data().scheduled, 1);
+});
+
+// Regression guard: loadScheduleHistory does a documentId() range query over
+// calendarDays. With a statically-imported FieldPath this threw against a
+// test-injected (root-package) db and was silently swallowed, so the scheduler
+// ran with no history. This asserts a prior-week block is actually read back.
+test("loadScheduleHistory reads prior placements in the window (FieldPath cross-package guard)", async () => {
+  const PAST = "2026-06-08"; // one week before WEEK[0], inside the 6-week lookback
+  const dayRef = db.collection("families").doc(FAM).collection("calendarDays").doc(PAST);
+  await dayRef.set({ updatedAt: new Date() }, { merge: true });
+  await dayRef.collection("blocks").add({
+    activityId: "act1", activityTitle: "Counting to 10", type: "mathematics",
+    subject: "Math", scheduledTime: "09:00", complexityRank: 1, status: "planned",
+  });
+
+  const { days } = await loadScheduleHistory({ db, familyId: FAM, weekDateKeys: WEEK });
+  const past = days.find((d) => d.date === PAST);
+  assert.ok(past, "expected the prior-week day to be loaded (history query must not silently fail)");
+  assert.equal(past.blocks.length, 1);
+  assert.equal(past.blocks[0].activityId, "act1");
 });

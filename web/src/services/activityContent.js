@@ -9,8 +9,10 @@ const _backfillActivityContent = httpsCallable(functions, "backfillActivityConte
 const _requestContentBackfill = httpsCallable(functions, "requestContentBackfill");
 const _stopContentBackfill = httpsCallable(functions, "stopContentBackfill");
 
-export async function generateActivityContent(activityId) {
-  const res = await _generateActivityContent({ activityId });
+// `guidance` is the parent's optional free-text direction for this (re)generation
+// — why they're regenerating and what to change. Capped at 6000 chars server-side.
+export async function generateActivityContent(activityId, guidance = "") {
+  const res = await _generateActivityContent({ activityId, guidance });
   return res.data;
 }
 
@@ -31,8 +33,15 @@ export async function backfillActivityContent(limit = 6) {
 // Ask the server to (re)start a backfill for the caller's family. Returns
 // immediately — a scheduled worker drains it server-side (like the syllabus
 // builder). Progress lives at families/{familyId}/meta/contentBackfill.
-export async function requestContentBackfill() {
-  const res = await _requestContentBackfill({});
+//   force=true  → REGENERATE: overwrite content activities already have.
+//   subjectId   → scope the run to one subject (optional).
+//   types       → scope the run to one or more activity types (optional).
+//   guidance    → parent's free-text direction for the run (why / what to fix),
+//                 capped at 6000 chars server-side (optional).
+// Default (no args) fills only activities missing content — and is what the
+// progress card's Resume calls, so it must keep working with zero arguments.
+export async function requestContentBackfill({ force = false, subjectId = "", types = [], guidance = "" } = {}) {
+  const res = await _requestContentBackfill({ force, subjectId, types, guidance });
   return res.data;
 }
 
@@ -56,8 +65,8 @@ export async function requestContentPlanning(subjectId = "") {
 // parent/QA tester can quality-check the impact before a full run. Returns the
 // generated items. Best with a plan already built for that subject.
 const _requestContentSample = httpsCallable(functions, "requestContentSample", { timeout: 540000 });
-export async function requestContentSample(subjectId, limit = 6) {
-  const res = await _requestContentSample({ subjectId, limit });
+export async function requestContentSample(subjectId, limit = 6, guidance = "") {
+  const res = await _requestContentSample({ subjectId, limit, guidance });
   return res.data;
 }
 
@@ -65,7 +74,7 @@ export async function requestContentSample(subjectId, limit = 6) {
 // contentError). Returns { processed, generated, remaining, items }. Optionally
 // scope to one subject. Call again to chip through a large backlog.
 const _regenerateFailedContent = httpsCallable(functions, "regenerateFailedContent", { timeout: 540000 });
-export async function regenerateFailedContent(subjectId = "", limit = 10) {
-  const res = await _regenerateFailedContent(subjectId ? { subjectId, limit } : { limit });
+export async function regenerateFailedContent(subjectId = "", limit = 10, guidance = "") {
+  const res = await _regenerateFailedContent({ ...(subjectId ? { subjectId } : {}), limit, guidance });
   return res.data;
 }
