@@ -108,11 +108,22 @@ test("qaidaTtsPayload: spoken text is pure Arabic for every provider (no Latin)"
   assert.match(o.instructions, /العربية/); // directive is in Arabic
 });
 
-test("qaidaTtsPayload: directive asks for letter-by-letter (jor tor) spell-out then the whole word", () => {
+test("qaidaTtsPayload: directive asks for jor-tor then the complete word via الكلمة الكاملة: cue", () => {
   const item = { glyph: "بَ" };
   const o = qaidaTtsPayload(item, "openai", "gpt-4o-mini-tts");
-  assert.match(o.instructions, /تقطيع/);        // spell each letter (jor tor)
-  assert.match(o.instructions, /الكلمة الأخيرة/); // then read the whole final word
+  assert.match(o.instructions, /تقطيع/);             // spell each letter (jor tor)
+  assert.match(o.instructions, /الكلمة الكاملة:/);   // explicit cue matching the text format
+  assert.match(o.instructions, /لا تقطّعها/);         // "do not spell it out"
+});
+
+test("qaidaTtsPayload: multi-letter word has الكلمة الكاملة: label in TTS text", () => {
+  const item = { glyph: "قَلْبْ" };
+  const o = qaidaTtsPayload(item, "openai", "gpt-4o-mini-tts");
+  assert.match(o.text, /الكلمة الكاملة: قَلْبْ$/);  // label present, word is the final segment
+  assert.ok(!/[A-Za-z]/.test(o.text), `spoken text must be Latin-free: ${o.text}`);
+  // Single glyph: no readback, no label
+  const single = qaidaTtsPayload({ glyph: "بَ" }, "openai", "gpt-4o-mini-tts");
+  assert.ok(!/الكلمة/.test(single.text));
 });
 
 test("qaidaTtsPayload: legacy OpenAI models (tts-1 / tts-1-hd) get pure-Arabic text and NO instructions field", () => {

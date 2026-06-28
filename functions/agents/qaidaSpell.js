@@ -225,12 +225,17 @@ function unitVoice(u, arabic = false) {
 
 // `arabic: true` renders the harakat terms in Arabic script (for the OpenAI lane);
 // the default (Latin terms) is unchanged so Gemini behaves exactly as before.
-export function voiceScript(word, { arabic = false } = {}) {
+// `wordLabel: true` prefixes the whole-word readback with "الكلمة الكاملة:" so the
+// TTS model treats it unambiguously as "now speak this as a complete connected word,
+// not another spell element". Only meaningful for multi-letter words (single glyphs
+// have no readback). Used by arabicVoiceText for TTS; display (spellScript) stays
+// label-free so the audit UI stays clean.
+export function voiceScript(word, { arabic = false, wordLabel = false } = {}) {
   const units = mergeMadd(decompose(word).map(resolveUnit));
   if (!units.length) return "";
   const phrases = units.map((u) => unitVoice(u, arabic));
   const arabicWord = units.map((u) => u.glyph).join("");
-  return units.length === 1
-    ? phrases.join(VOICE_SEP)
-    : [...phrases, arabicWord].join(VOICE_SEP);
+  if (units.length === 1) return phrases.join(VOICE_SEP);
+  const wordPart = wordLabel ? `الكلمة الكاملة: ${arabicWord}` : arabicWord;
+  return [...phrases, wordPart].join(VOICE_SEP);
 }

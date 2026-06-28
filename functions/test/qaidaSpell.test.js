@@ -129,6 +129,19 @@ test("voiceScript arabic mode renders harakat in Arabic script (no Latin tokens 
   assert.equal(voiceScript("بَا", { arabic: true }), "ب زبر مد بَا");
 });
 
+test("voiceScript wordLabel: prefixes whole-word readback for multi-letter words only", () => {
+  // Multi-letter: label added before the whole-word readback so the TTS model
+  // treats it as "now speak this as one connected word".
+  assert.equal(
+    voiceScript("قَلْبْ", { arabic: true, wordLabel: true }),
+    "ق زبر قَ ، ل جزم لْ ، ب جزم بْ ، الكلمة الكاملة: قَلْبْ"
+  );
+  // Single glyph: no readback, wordLabel has no effect.
+  assert.equal(voiceScript("بَ", { arabic: true, wordLabel: true }), "ب زبر بَ");
+  // Latin mode + wordLabel also works (Gemini path).
+  assert.match(voiceScript("قَلْبْ", { wordLabel: true }), /الكلمة الكاملة:/);
+});
+
 test("every standard letter and mark has a name (table integrity)", () => {
   assert.equal(LETTERS["ن"].name, "Noon");
   assert.equal(LETTERS["ق"].name, "Qaaf");

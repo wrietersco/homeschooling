@@ -67,10 +67,11 @@ function buildItems(lesson) {
 // the glyph every time so it can never fall back to a stale Latin ttsScript stored
 // before this fix (the very thing that made the model voice in an English accent).
 // It is the "jor tor" spell-out — each letter named with its harakat and its
-// voweled glyph (e.g. "ب زبر بَ") — then the whole word, all in Arabic script so NO
-// provider or model can drift to a foreign accent from the text. The stored
-// ttsScript/spellScript are last-resort fallbacks only if the glyph yields nothing.
-const arabicVoiceText = (item) => voiceScript(item.glyph, { arabic: true }) || item.ttsScript || item.spellScript;
+// voweled glyph (e.g. "ب زبر بَ") — then "الكلمة الكاملة: <word>" so the model
+// treats the final segment unambiguously as "speak this as one connected word",
+// not as another spell element. The stored ttsScript/spellScript are last-resort
+// fallbacks only if the glyph somehow yields nothing.
+const arabicVoiceText = (item) => voiceScript(item.glyph, { arabic: true, wordLabel: true }) || item.ttsScript || item.spellScript;
 
 // One explicit directive: speak PURE ARABIC, spell each letter, then the whole
 // word. Written entirely in Arabic so no Latin token can pull the model toward an
@@ -84,7 +85,9 @@ const arabicVoiceText = (item) => voiceScript(item.glyph, { arabic: true }) || i
 //                              cache key); the all-Arabic spoken text is their steer.
 const PURE_ARABIC_DIRECTIVE =
   "اقرأ بالعربية الفصحى الصحيحة فقط مع النطق القرآني الواضح — لا تنطق بأي لكنة أجنبية أبداً. " +
-  "انطق كل حرف عربي مع حركته بوضوح حرفاً حرفاً (تقطيعاً)، ثم اقرأ الكلمة الأخيرة كلمةً عربيةً واحدةً متصلة.";
+  "النص تقطيع حرف بحرف ثم الكلمة الكاملة. " +
+  "انطق كل عنصر مفصول بفاصلة (،) ببطء ووضوح تام مع مخارج الحروف الصحيحة. " +
+  "عند ظهور «الكلمة الكاملة:» انطق ما بعدها فوراً كلمةً عربيةً واحدةً متصلةً كاملةً ببطء — لا تقطّعها أبداً.";
 
 // Build { text, instructions } for one item on a (provider, model), folding in an
 // optional per-take instruction (regen). Gemini carries the directive (+ any
