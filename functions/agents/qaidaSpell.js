@@ -225,17 +225,27 @@ function unitVoice(u, arabic = false) {
 
 // `arabic: true` renders the harakat terms in Arabic script (for the OpenAI lane);
 // the default (Latin terms) is unchanged so Gemini behaves exactly as before.
-// `wordLabel: true` prefixes the whole-word readback with "الكلمة الكاملة:" so the
-// TTS model treats it unambiguously as "now speak this as a complete connected word,
-// not another spell element". Only meaningful for multi-letter words (single glyphs
-// have no readback). Used by arabicVoiceText for TTS; display (spellScript) stays
-// label-free so the audit UI stays clean.
-export function voiceScript(word, { arabic = false, wordLabel = false } = {}) {
+// `wordLabel: true` prefixes the whole-word readback with "الكلمة الكاملة:" — the
+// explicit cue that tells the TTS model "speak this as one connected word, not
+// another spell element". Meaningful for multi-letter words only.
+// `wordRepeat: true` appends a second repetition of the complete word so the child
+// hears: jor-tor → word → word again (slowly). The directive instructs the model
+// to say the second repetition more slowly. All three flags compose freely.
+export function voiceScript(word, { arabic = false, wordLabel = false, wordRepeat = false } = {}) {
   const units = mergeMadd(decompose(word).map(resolveUnit));
   if (!units.length) return "";
   const phrases = units.map((u) => unitVoice(u, arabic));
   const arabicWord = units.map((u) => u.glyph).join("");
-  if (units.length === 1) return phrases.join(VOICE_SEP);
+
+  if (units.length === 1) {
+    // Single glyph: the jor-tor phrase already captures the sound; repeat the bare
+    // glyph twice after it so the format is consistent with multi-letter words.
+    const base = phrases.join(VOICE_SEP);
+    return wordRepeat ? [base, arabicWord, arabicWord].join(VOICE_SEP) : base;
+  }
+
   const wordPart = wordLabel ? `الكلمة الكاملة: ${arabicWord}` : arabicWord;
-  return [...phrases, wordPart].join(VOICE_SEP);
+  const parts = [...phrases, wordPart];
+  if (wordRepeat) parts.push(arabicWord); // second repetition — model told to say it more slowly
+  return parts.join(VOICE_SEP);
 }

@@ -94,16 +94,16 @@ test("providerDue: a legacy numeric lastVoicedAtMs counts as Gemini's timestamp"
 
 // ─── Pure-Arabic steering for every provider/model ────────────────────────────
 test("qaidaTtsPayload: spoken text is pure Arabic for every provider (no Latin)", () => {
-  const item = { glyph: "بَ" }; // → "ب زبر بَ"
+  const item = { glyph: "بَ" }; // single glyph → jor-tor + glyph twice
   const g = qaidaTtsPayload(item, "gemini", "gemini-2.5-flash-preview-tts");
   const o = qaidaTtsPayload(item, "openai", "gpt-4o-mini-tts");
   // Gemini: Arabic-language directive leads as a style cue (not spoken), then Arabic script.
   assert.match(g.text, /العربية/); // directive is in Arabic
   assert.ok(!/[A-Za-z]/.test(g.text.split("\n\n")[0]), `Gemini directive must be Latin-free: ${g.text}`);
-  assert.match(g.text, /ب زبر بَ$/);
+  assert.match(g.text, /ب زبر بَ ، بَ ، بَ$/);
   assert.equal(g.instructions, "");
   // OpenAI 4o: clean pure-Arabic spoken text (zero Latin letters); Arabic directive steers.
-  assert.equal(o.text, "ب زبر بَ");
+  assert.equal(o.text, "ب زبر بَ ، بَ ، بَ");
   assert.ok(!/[A-Za-z]/.test(o.text), `OpenAI spoken text must be Latin-free: ${o.text}`);
   assert.match(o.instructions, /العربية/); // directive is in Arabic
 });
@@ -116,33 +116,34 @@ test("qaidaTtsPayload: directive asks for jor-tor then the complete word via ا�
   assert.match(o.instructions, /لا تقطّعها/);         // "do not spell it out"
 });
 
-test("qaidaTtsPayload: multi-letter word has الكلمة الكاملة: label in TTS text", () => {
+test("qaidaTtsPayload: TTS text is jor-tor → الكلمة الكاملة: word → word again (three segments)", () => {
+  // Multi-letter: jor-tor then word twice
   const item = { glyph: "قَلْبْ" };
   const o = qaidaTtsPayload(item, "openai", "gpt-4o-mini-tts");
-  assert.match(o.text, /الكلمة الكاملة: قَلْبْ$/);  // label present, word is the final segment
+  assert.equal(o.text, "ق زبر قَ ، ل جزم لْ ، ب جزم بْ ، الكلمة الكاملة: قَلْبْ ، قَلْبْ");
   assert.ok(!/[A-Za-z]/.test(o.text), `spoken text must be Latin-free: ${o.text}`);
-  // Single glyph: no readback, no label
+  // Single glyph: jor-tor then bare glyph twice (consistent three-segment format)
   const single = qaidaTtsPayload({ glyph: "بَ" }, "openai", "gpt-4o-mini-tts");
-  assert.ok(!/الكلمة/.test(single.text));
+  assert.equal(single.text, "ب زبر بَ ، بَ ، بَ");
 });
 
 test("qaidaTtsPayload: legacy OpenAI models (tts-1 / tts-1-hd) get pure-Arabic text and NO instructions field", () => {
   const item = { glyph: "بَ" };
   for (const model of ["tts-1", "tts-1-hd"]) {
     const o = qaidaTtsPayload(item, "openai", model, "speak slower");
-    assert.equal(o.text, "ب زبر بَ"); // the all-Arabic text is their only steer
-    assert.equal(o.instructions, ""); // a field they reject is never attached (keeps the cache honest)
+    assert.equal(o.text, "ب زبر بَ ، بَ ، بَ"); // all-Arabic text with word repeated — their only steer
+    assert.equal(o.instructions, ""); // field they reject is never attached (keeps cache honest)
   }
 });
 
 test("qaidaTtsPayload: a per-take instruction folds into the directive, never the spoken text", () => {
   const item = { glyph: "بَ" };
   const o = qaidaTtsPayload(item, "openai", "gpt-4o-mini-tts", "speak slower");
-  assert.equal(o.text, "ب زبر بَ");          // spoken text stays clean
-  assert.match(o.instructions, /speak slower/); // cue rides the steering field
+  assert.equal(o.text, "ب زبر بَ ، بَ ، بَ");  // spoken text stays clean (word repeated)
+  assert.match(o.instructions, /speak slower/);  // cue rides the steering field
   const g = qaidaTtsPayload(item, "gemini", "gemini-2.5-flash-preview-tts", "speak slower");
-  assert.match(g.text, /speak slower/);        // Gemini folds it into the leading cue
-  assert.match(g.text, /ب زبر بَ$/);
+  assert.match(g.text, /speak slower/);           // Gemini folds it into the leading cue
+  assert.match(g.text, /ب زبر بَ ، بَ ، بَ$/);
 });
 
 test("planPassDue: only a queued job with at least one due provider is due", () => {

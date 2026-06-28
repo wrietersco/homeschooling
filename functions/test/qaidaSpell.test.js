@@ -130,8 +130,6 @@ test("voiceScript arabic mode renders harakat in Arabic script (no Latin tokens 
 });
 
 test("voiceScript wordLabel: prefixes whole-word readback for multi-letter words only", () => {
-  // Multi-letter: label added before the whole-word readback so the TTS model
-  // treats it as "now speak this as one connected word".
   assert.equal(
     voiceScript("قَلْبْ", { arabic: true, wordLabel: true }),
     "ق زبر قَ ، ل جزم لْ ، ب جزم بْ ، الكلمة الكاملة: قَلْبْ"
@@ -140,6 +138,24 @@ test("voiceScript wordLabel: prefixes whole-word readback for multi-letter words
   assert.equal(voiceScript("بَ", { arabic: true, wordLabel: true }), "ب زبر بَ");
   // Latin mode + wordLabel also works (Gemini path).
   assert.match(voiceScript("قَلْبْ", { wordLabel: true }), /الكلمة الكاملة:/);
+});
+
+test("voiceScript wordRepeat: appends the complete word a second time (slowly repetition)", () => {
+  // Multi-letter: jor-tor → الكلمة الكاملة: word → word again
+  assert.equal(
+    voiceScript("قَلْبْ", { arabic: true, wordLabel: true, wordRepeat: true }),
+    "ق زبر قَ ، ل جزم لْ ، ب جزم بْ ، الكلمة الكاملة: قَلْبْ ، قَلْبْ"
+  );
+  // Single glyph: jor-tor → glyph → glyph (consistent three-segment format)
+  assert.equal(
+    voiceScript("بَ", { arabic: true, wordRepeat: true }),
+    "ب زبر بَ ، بَ ، بَ"
+  );
+  // wordRepeat without wordLabel: second word still appended (no label on first)
+  assert.equal(
+    voiceScript("رَزَ", { arabic: true, wordRepeat: true }),
+    "ر زبر رَ ، ز زبر زَ ، رَزَ ، رَزَ"
+  );
 });
 
 test("every standard letter and mark has a name (table integrity)", () => {

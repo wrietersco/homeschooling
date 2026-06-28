@@ -52,26 +52,25 @@ function requireSuperAdmin(request) {
 function buildItems(lesson) {
   return lesson.glyphs.map((glyph) => {
     const { naturalWord } = spellOut(glyph);
-    const arabicScript = voiceScript(glyph, { arabic: true });
     return {
       glyph,
       translit: naturalWord,
-      spellScript: arabicScript,  // Arabic jor-tor callout shown in UI + activity captions
-      ttsScript: arabicScript,    // same — fed to TTS (re-derived anyway at synth time)
+      // spellScript — jor-tor only, shown as caption in the activity player.
+      spellScript: voiceScript(glyph, { arabic: true }),
+      // ttsScript — the EXACT text sent to TTS: jor-tor → الكلمة الكاملة: word → word again.
+      // Displayed in the superadmin audit list so the full spoken content is visible.
+      ttsScript: voiceScript(glyph, { arabic: true, wordLabel: true, wordRepeat: true }),
       audioUrl: null,
     };
   });
 }
 
-// The text fed to TTS for an item — the PURE-ARABIC voice script, RE-DERIVED from
-// the glyph every time so it can never fall back to a stale Latin ttsScript stored
-// before this fix (the very thing that made the model voice in an English accent).
-// It is the "jor tor" spell-out — each letter named with its harakat and its
-// voweled glyph (e.g. "ب زبر بَ") — then "الكلمة الكاملة: <word>" so the model
-// treats the final segment unambiguously as "speak this as one connected word",
-// not as another spell element. The stored ttsScript/spellScript are last-resort
-// fallbacks only if the glyph somehow yields nothing.
-const arabicVoiceText = (item) => voiceScript(item.glyph, { arabic: true, wordLabel: true }) || item.ttsScript || item.spellScript;
+// The text fed to TTS — always RE-DERIVED from the glyph so no stale stored value
+// can reintroduce a Latin fallback. Format: jor-tor (letter + harakat + glyph for
+// each unit) → "الكلمة الكاملة: <word>" → <word again> so the model hears the cue
+// to speak the final two segments as one connected word, the second time more slowly.
+// Stored ttsScript/spellScript are last-resort fallbacks only if the glyph yields nothing.
+const arabicVoiceText = (item) => voiceScript(item.glyph, { arabic: true, wordLabel: true, wordRepeat: true }) || item.ttsScript || item.spellScript;
 
 // One explicit directive: speak PURE ARABIC, spell each letter, then the whole
 // word. Written entirely in Arabic so no Latin token can pull the model toward an
@@ -85,9 +84,10 @@ const arabicVoiceText = (item) => voiceScript(item.glyph, { arabic: true, wordLa
 //                              cache key); the all-Arabic spoken text is their steer.
 const PURE_ARABIC_DIRECTIVE =
   "اقرأ بالعربية الفصحى الصحيحة فقط مع النطق القرآني الواضح — لا تنطق بأي لكنة أجنبية أبداً. " +
-  "النص تقطيع حرف بحرف ثم الكلمة الكاملة. " +
-  "انطق كل عنصر مفصول بفاصلة (،) ببطء ووضوح تام مع مخارج الحروف الصحيحة. " +
-  "عند ظهور «الكلمة الكاملة:» انطق ما بعدها فوراً كلمةً عربيةً واحدةً متصلةً كاملةً ببطء — لا تقطّعها أبداً.";
+  "النص ثلاثة أقسام مفصولة بفاصلة عربية (،): تقطيع حرف بحرف، ثم الكلمة الكاملة مرة، ثم الكلمة الكاملة مرةً ثانية ببطء أكثر. " +
+  "انطق كل عنصر في التقطيع ببطء ووضوح تام مع مخارج الحروف الصحيحة. " +
+  "عند ظهور «الكلمة الكاملة:» انطق ما بعدها كلمةً واحدةً متصلةً كاملةً — لا تقطّعها أبداً. " +
+  "ثم كرّر الكلمة مرةً أخرى ببطء أكثر وضوحاً.";
 
 // Build { text, instructions } for one item on a (provider, model), folding in an
 // optional per-take instruction (regen). Gemini carries the directive (+ any
