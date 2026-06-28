@@ -14,6 +14,7 @@ import { resolveCaller } from "../lib/caller.js";
 import { loadAgentConfig } from "./agentConfig.js";
 import { parseUsage } from "./llm.js";
 import { recordCostEvent } from "../lib/costMeter.js";
+import { enforceFamilyTtsQuota } from "../platform/quota.js";
 
 // ─── PCM → WAV (pure, unit-tested) ────────────────────────────────────────────
 // Gemini returns signed 16-bit little-endian mono PCM. Wrap it in a 44-byte
@@ -77,6 +78,106 @@ export async function synthesizePcm({ text, voiceName, model, apiKey, fetchImpl 
   };
 }
 
+// ─── OpenAI TTS call ──────────────────────────────────────────────────────────
+// OpenAI's /v1/audio/speech with response_format "pcm" returns raw 24kHz, 16-bit
+// signed little-endian MONO PCM — byte-for-byte the same shape Gemini gives us —
+// so the exact same pcmToWav + cache + cost pipeline downstream is reused. The
+// audio response carries no token usage, so cost falls back to audioSeconds.
+export async function synthesizeOpenAiPcm({ text, voiceName, model, apiKey, instructions = "", fetchImpl = globalThis.fetch }) {
+  const body = { model, input: text, voice: voiceName, response_format: "pcm" };
+  // Steerable delivery via `instructions` is supported by the 4o TTS line; the
+  // legacy per-character models (tts-1 / tts-1-hd) reject the field, so attach it
+  // only when the model accepts one (and never on those, which would 400).
+  if (instructions && ttsModelAcceptsInstructions("openai", model)) body.instructions = instructions;
+  const res = await fetchImpl("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 300);
+    throw new Error(`OpenAI TTS ${res.status}: ${detail}`);
+  }
+  const pcm = Buffer.from(await res.arrayBuffer());
+  if (!pcm.length) throw new Error("OpenAI TTS returned no audio");
+  return { pcm, sampleRate: 24000, usage: {} };
+}
+
+// ─── Provider registry ────────────────────────────────────────────────────────
+// One entry per TTS backend. `synth` shares the { text, voiceName, model, apiKey }
+// → { pcm, sampleRate, usage } contract, so synthesizeSpeech is provider-agnostic.
+// `voices` lets us keep a configured voice only when it belongs to the active
+// provider (a Gemini voice like "Kore" is meaningless to OpenAI and vice-versa).
+// Voice sets per provider. OpenAI exposes 13 voices, but the legacy per-character
+// models (tts-1 / tts-1-hd) support only 9 — ballad/verse/marin/cedar are
+// gpt-4o-mini-tts-only. Source: developers.openai.com/api/docs/guides/text-to-speech.
+const GEMINI_VOICES = ["Kore", "Puck", "Charon", "Aoede", "Fenrir", "Leda", "Orus", "Zephyr"];
+const OPENAI_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse", "marin", "cedar"];
+const OPENAI_VOICES_LEGACY = ["alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"];
+const OPENAI_LEGACY_MODELS = ["tts-1", "tts-1-hd"];
+
+export const TTS_PROVIDERS = {
+  gemini: {
+    synth: synthesizePcm,
+    secret: "GEMINI_API_KEY",
+    defaultModel: "gemini-2.5-flash-preview-tts",
+    defaultVoice: "Kore",
+    looksLikeModel: (m) => /gemini/i.test(m || ""),
+    voices: GEMINI_VOICES,
+    voicesForModel: () => GEMINI_VOICES, // same voices for every Gemini TTS model
+  },
+  openai: {
+    synth: synthesizeOpenAiPcm,
+    secret: "OPENAI_API_KEY",
+    defaultModel: "gpt-4o-mini-tts",
+    defaultVoice: "alloy", // valid on every OpenAI TTS model
+    looksLikeModel: (m) => !/gemini/i.test(m || ""),
+    voices: OPENAI_VOICES,
+    voicesForModel: (m) => (OPENAI_LEGACY_MODELS.includes(m) ? OPENAI_VOICES_LEGACY : OPENAI_VOICES),
+  },
+};
+
+// Coerce a stored config (which may still hold the *other* provider's model/voice
+// from before a provider switch) onto valid values for `provider`.
+export function resolveTtsProvider(provider) {
+  return TTS_PROVIDERS[provider] ? provider : "gemini";
+}
+export function effectiveTtsModel(provider, model) {
+  const p = TTS_PROVIDERS[resolveTtsProvider(provider)];
+  return model && p.looksLikeModel(model) ? model : p.defaultModel;
+}
+// Voices valid for a provider+model pair (model optional → full provider set).
+export function voicesForTts(provider, model) {
+  return TTS_PROVIDERS[resolveTtsProvider(provider)].voicesForModel(model);
+}
+// Keep a configured voice only when it's valid for the active provider AND model
+// (e.g. "marin" is fine on gpt-4o-mini-tts but not on tts-1); else the default.
+export function effectiveTtsVoice(provider, voice, model) {
+  const p = TTS_PROVIDERS[resolveTtsProvider(provider)];
+  return voice && p.voicesForModel(model).includes(voice) ? voice : p.defaultVoice;
+}
+
+// Does a (provider, model) accept a separate `instructions` steering field? Gemini
+// has none (it is steered by a leading text cue, not a field), and OpenAI's legacy
+// per-character models (tts-1 / tts-1-hd) reject it — only the 4o TTS line accepts
+// one. Exported so the Qaida payload builder and the OpenAI synth agree on when a
+// directive can ride the steering channel, so a directive that can't be applied is
+// never attached (which would 400 the call AND poison the content-addressed cache).
+export function ttsModelAcceptsInstructions(provider, model) {
+  if (resolveTtsProvider(provider) !== "openai") return false;
+  return !OPENAI_LEGACY_MODELS.includes(model);
+}
+
+// Content-addressed cache key shared by click-to-hear (synthesizeSpeech) and the
+// Qaida audio worker, so a script voiced by one is free for the other. Keying on
+// provider too means the two providers never collide on a (voice, text) pair.
+export function ttsCacheHash({ provider, model, voiceName, text, instructions = "" }) {
+  // Append the instructions segment ONLY when present, so existing cache keys
+  // (no instructions) are byte-identical and previously-voiced clips still hit.
+  const base = `${provider}|${model}|${voiceName}|${text}`;
+  return createHash("sha256").update(instructions ? `${base}|${instructions}` : base).digest("hex").slice(0, 40);
+}
+
 // A brief delivery cue prepended on retry. Gemini's single-speaker TTS treats
 // natural-language text before the content as a *style directive* it follows
 // rather than reads aloud (e.g. "Say cheerfully: …"), so only `text` is spoken.
@@ -102,7 +203,7 @@ export async function synthesizeSpeakable(synth, params) {
 
 // ─── Callable ─────────────────────────────────────────────────────────────────
 export const synthesizeSpeech = onCall(
-  { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 60 },
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY"], timeoutSeconds: 60 },
   async (request) => {
     // Auth-scoped (any family member). The shared cache is keyed by content hash
     // (tenant-independent), but we capture the family for cost attribution.
@@ -112,15 +213,19 @@ export const synthesizeSpeech = onCall(
     const text = String(request.data?.text || "").trim().slice(0, 2000);
     if (!text) throw new HttpsError("invalid-argument", "text is required.");
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const cfg = await loadAgentConfig(db, "tts");
+    const provider = resolveTtsProvider(cfg.provider);
+    const { synth, secret } = TTS_PROVIDERS[provider];
+
+    const apiKey = process.env[secret];
     if (!apiKey) return { configured: false };
 
-    const cfg = await loadAgentConfig(db, "tts");
-    const model = cfg.model || "gemini-2.5-flash-preview-tts";
-    const voiceName = String(request.data?.voiceName || cfg.voiceName || "Kore").slice(0, 60);
+    const model = effectiveTtsModel(provider, cfg.model);
+    const voiceName = effectiveTtsVoice(provider, String(request.data?.voiceName || cfg.voiceName || "").slice(0, 60), model);
 
-    // Cache key: model + voice + text. Same request never re-synthesizes.
-    const hash = createHash("sha256").update(`${model}|${voiceName}|${text}`).digest("hex").slice(0, 40);
+    // Cache key: provider + model + voice + text. Same request never re-synthesizes,
+    // and the two providers never collide on a shared (voice, text) pair.
+    const hash = ttsCacheHash({ provider, model, voiceName, text });
     const filePath = `tts-cache/${hash}.wav`;
 
     let bucket;
@@ -147,9 +252,14 @@ export const synthesizeSpeech = onCall(
       bucket = null;
     }
 
+    // Cache miss ⇒ a real Gemini call. Enforce this family's share of the shared
+    // TTS daily pool (fair multi-tenant allocation). Throws resource-exhausted when
+    // the family is over budget; the client then falls back to the browser voice.
+    await enforceFamilyTtsQuota(db, familyId, model);
+
     let wav, sampleRate;
     try {
-      const out = await synthesizeSpeakable(synthesizePcm, { text, voiceName, model, apiKey });
+      const out = await synthesizeSpeakable(synth, { text, voiceName, model, apiKey });
       sampleRate = out.sampleRate;
       wav = pcmToWav(out.pcm, { sampleRate });
       // Record cost. Prefer real token usage; fall back to audio duration (16-bit
