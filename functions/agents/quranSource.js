@@ -241,6 +241,12 @@ function sourceLabelForDocs(docs, surahNums) {
 // Enrich a quran_reading content object in place with verified Arabic, words,
 // translation, transliteration, and audio. LOCAL-FIRST: when `db` is given, read
 // imported `quran/*` docs; missing verses fall back to the no-key public source.
+// arabic/transliteration/translation are ALWAYS overwritten by the verified
+// source when it has one (never gated on "the draft doesn't already have a
+// value") — the LLM's `translation` field is required by the content schema, so
+// it always drafts SOMETHING, and for a surah's first ayah that draft is prone
+// to translating just the fused Bismillah instead of the actual ayah. Keeping
+// the verified translation unconditional is what "✓ Verified text" promises.
 export async function enrichQuranContent(content, { db = null, fetchImpl = globalThis.fetch } = {}) {
   if (!content?.quran?.verses?.length) return content;
   const verses = content.quran.verses;
@@ -266,7 +272,7 @@ export async function enrichQuranContent(content, { db = null, fetchImpl = globa
         const draftWords = verse.words;
         verse.arabic = found.arabic;
         if (found.transliteration) verse.transliteration = found.transliteration;
-        if (found.translation && !verse.translation) verse.translation = found.translation;
+        if (found.translation) verse.translation = found.translation;
         if (found.words?.length) verse.words = mergeWordGlosses(found.words, draftWords);
         verse.audioUrl = found.audioUrl || verse.audioUrl;
         verse.__verified = true;
@@ -293,7 +299,7 @@ export async function enrichQuranContent(content, { db = null, fetchImpl = globa
       const v = await fetchVerse({ surah: verse.surah, ayah: verse.ayah, fetchImpl });
       verse.arabic = v.arabic || verse.arabic;
       if (v.transliteration) verse.transliteration = v.transliteration;
-      if (v.translation && !verse.translation) verse.translation = v.translation;
+      if (v.translation) verse.translation = v.translation;
       if (v.words?.length) verse.words = mergeWordGlosses(v.words, draftWords);
       verse.audioUrl = v.audioUrl || verse.audioUrl;
       anyOk = true;

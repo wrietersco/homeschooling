@@ -8,7 +8,7 @@ import { resolveCaller } from "../lib/caller.js";
 import { buildGroundedSystemPrompt } from "./grounding.js";
 import { createTools, filterDeclarations, READ_ONLY_TOOL_NAMES } from "./tools.js";
 import { runAgent } from "./runtime.js";
-import { resolveLlm } from "./agentConfig.js";
+import { resolveLlm, secretNameForProvider } from "./agentConfig.js";
 import { regenerateBriefSafe } from "./knowledgeBrief.js";
 
 const CURRICULUM_BASE_PROMPT = [
@@ -192,16 +192,20 @@ export async function runCurriculum({ db, familyId, uid, role, message, history 
   };
 }
 
-export const askCurriculum = onCall({ secrets: ["GEMINI_API_KEY"] }, async (request) => {
+export const askCurriculum = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"] }, async (request) => {
   const { db, uid, familyId, role } = await resolveCaller(request);
   const message = String(request.data?.message || "").trim().slice(0, 4000);
   if (!message) throw new HttpsError("invalid-argument", "Send a message to the curriculum agent.");
   const history = Array.isArray(request.data?.history) ? request.data.history : [];
 
-  const { llm, genConfig } = await resolveLlm(db, "curriculum", process.env.GEMINI_API_KEY, { familyId, uid, source: "askCurriculum" });
+  const { llm, genConfig, provider } = await resolveLlm(
+    db, "curriculum",
+    { gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY },
+    { familyId, uid, source: "askCurriculum" }
+  );
   if (!llm) {
     return {
-      text: "The curriculum agent isn't configured yet — set the GEMINI_API_KEY secret to enable it.",
+      text: `The curriculum agent isn't configured yet — set the ${secretNameForProvider(provider)} secret to enable it.`,
       configured: false,
     };
   }

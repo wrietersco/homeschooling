@@ -10,7 +10,7 @@
 // resolved, and it is read fresh on every invocation so superadmin edits take
 // effect immediately (no redeploy, no cache).
 import { platformLlmConfig } from "../lib/paths.js";
-import { createGeminiClient } from "./llm.js";
+import { createGeminiClient, createOpenAiClient, createClaudeClient, DEFAULT_ANTHROPIC_MODEL } from "./llm.js";
 import { recordCostEvent } from "../lib/costMeter.js";
 
 // Agents that can be configured independently. Keep in sync with the Platform UI.
@@ -28,7 +28,7 @@ export const AGENT_DEFAULTS = {
   scheduler: { model: BASE_MODEL, temperature: 0.3, maxOutputTokens: 4096, thinkingBudget: 0, systemInstructions: "" },
   brief: { model: BASE_MODEL, temperature: 0.4, maxOutputTokens: 2048, thinkingBudget: 0, systemInstructions: "" },
   image: { model: "gemini-2.5-flash-image", systemInstructions: "" },
-  tts: { model: "gemini-2.5-flash-preview-tts", voiceName: "Kore", systemInstructions: "" },
+  tts: { provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Kore", systemInstructions: "" },
 };
 
 // Clean a stored block — keep only known, well-typed fields. Used both when
@@ -41,6 +41,7 @@ function pickBlock(raw = {}) {
   if (Number.isFinite(Number(raw.thinkingBudget))) out.thinkingBudget = Number(raw.thinkingBudget);
   if (typeof raw.systemInstructions === "string") out.systemInstructions = raw.systemInstructions;
   if (typeof raw.voiceName === "string" && raw.voiceName.trim()) out.voiceName = raw.voiceName.trim().slice(0, 60);
+  if (raw.provider === "gemini" || raw.provider === "openai" || raw.provider === "anthropic") out.provider = raw.provider;
   return out;
 }
 
@@ -103,26 +104,78 @@ export async function loadAgentConfig(db, agentKey) {
   return mergeAgentConfig(doc, agentKey);
 }
 
-// Build a ready-to-use Gemini client + generationConfig for a text agent from
-// its resolved config. Returns { llm: null } when no API key is set so callers
-// can surface the "not configured" message. The model and generation knobs come
-// from the superadmin per-agent config (with built-in fallbacks).
+// Human-facing secret name for a resolved provider, used in "isn't configured"
+// messages so the superadmin knows exactly which secret to set.
+export function secretNameForProvider(provider) {
+  if (provider === "openai") return "OPENAI_API_KEY";
+  if (provider === "anthropic") return "ANTHROPIC_API_KEY";
+  return "GEMINI_API_KEY";
+}
+
+// Choose the text provider for an agent. An explicit config.provider wins;
+// otherwise we infer from the model id (OpenAI ids like "gpt-4o-mini" / "o3" route
+// to OpenAI, "claude-*" ids route to Anthropic) and default to Gemini — so a saved
+// model id without a provider field still routes correctly. Mirrors the TTS
+// provider resolution in tts.js.
+export function resolveTextProvider(provider, model) {
+  if (provider === "openai") return "openai";
+  if (provider === "anthropic") return "anthropic";
+  if (provider === "gemini") return "gemini";
+  if (model && /^claude-/i.test(model)) return "anthropic";
+  if (model && !/gemini/i.test(model) && /^(gpt-|o[0-9]|chatgpt|ft:)/i.test(model)) return "openai";
+  return "gemini";
+}
+
+// Coerce a model id onto the resolved provider so a stale cross-provider value
+// (e.g. provider switched to OpenAI while the model still reads "gemini-2.5-flash-lite")
+// never gets sent to the wrong API — which would 404. Mirrors effectiveTtsModel in
+// tts.js. A model that already fits the provider (or any non-cross-provider custom
+// id) passes through unchanged.
+export function effectiveTextModel(provider, model) {
+  if (provider === "openai") return model && !/gemini/i.test(model) ? model : "gpt-4o-mini";
+  if (provider === "anthropic") return model && /^claude-/i.test(model) ? model : DEFAULT_ANTHROPIC_MODEL;
+  return model && !/^(gpt-|o[0-9]|chatgpt|ft:)/i.test(model) ? model : BASE_MODEL;
+}
+
+// Normalize the key argument: a bare string is the Gemini key (legacy single-key
+// callers); an object carries one key per provider. Keeps every existing
+// resolveLlm(db, key, process.env.GEMINI_API_KEY, …) caller working unchanged.
+function normalizeKeys(apiKeys) {
+  if (!apiKeys) return {};
+  if (typeof apiKeys === "string") return { gemini: apiKeys };
+  return { gemini: apiKeys.gemini, openai: apiKeys.openai, anthropic: apiKeys.anthropic };
+}
+
+// Build a ready-to-use LLM client + generationConfig for a text agent from its
+// resolved config. The provider (Gemini or OpenAI) comes from the superadmin
+// per-agent config; `apiKeys` may be a single Gemini key (legacy) or
+// { gemini, openai }. Returns { llm: null } when the selected provider has no key
+// set so callers can surface the "not configured" message. The model and
+// generation knobs come from the per-agent config (with built-in fallbacks).
 //
 // `meterCtx`, when supplied, attributes every generate() call to a family for
 // cost logging: { familyId, source, uid?, childId?, activityId?, runId? }. The
 // client is wrapped so metering is automatic for both runAgent and any direct
 // llm.generate() callers — best-effort, never blocking the agent on a log write.
-export async function resolveLlm(db, agentKey, apiKey, meterCtx = null) {
-  if (!apiKey) return { llm: null, genConfig: undefined, config: null };
+export async function resolveLlm(db, agentKey, apiKeys, meterCtx = null) {
   const config = await loadAgentConfig(db, agentKey);
-  const baseLlm = createGeminiClient({ apiKey, model: config.model });
-  const llm = meterCtx?.familyId ? withCostMetering(db, baseLlm, agentKey, config.model, meterCtx) : baseLlm;
+  const provider = resolveTextProvider(config.provider, config.model);
+  const model = effectiveTextModel(provider, config.model);
+  const keys = normalizeKeys(apiKeys);
+  const apiKey = keys[provider];
+  if (!apiKey) return { llm: null, genConfig: undefined, config, provider };
+  const baseLlm = provider === "openai"
+    ? createOpenAiClient({ apiKey, model })
+    : provider === "anthropic"
+    ? createClaudeClient({ apiKey, model })
+    : createGeminiClient({ apiKey, model });
+  const llm = meterCtx?.familyId ? withCostMetering(db, baseLlm, agentKey, model, meterCtx) : baseLlm;
   const genConfig = {
     temperature: config.temperature,
     maxOutputTokens: config.maxOutputTokens,
     thinkingBudget: config.thinkingBudget,
   };
-  return { llm, genConfig, config };
+  return { llm, genConfig, config, provider };
 }
 
 // Wrap a Gemini client so each generate() records a text cost event after the

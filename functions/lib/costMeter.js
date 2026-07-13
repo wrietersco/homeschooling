@@ -14,19 +14,38 @@ import { FieldValue } from "firebase-admin/firestore";
 import { familyPaths, platformPricing, platformCostRollups } from "./paths.js";
 
 // ─── Default pricing (USD per 1,000,000 tokens unless noted) ───────────────────
-// Sourced from Google's published Gemini API rates (June 2026). Overridable at
-// runtime via the platform/pricing doc; the resolved rate is snapshotted into
-// every event so old events keep their original cost after a rate change.
+// Sourced from each provider's published rates (Google Gemini, OpenAI, Anthropic
+// — June 2026). Overridable at runtime via the platform/pricing doc; the resolved
+// rate is snapshotted into every event so old events keep their original cost
+// after a rate change.
 export const DEFAULT_PRICING = {
   text: {
     "gemini-2.5-flash": { input: 0.30, output: 2.50 },
     "gemini-2.5-flash-lite": { input: 0.10, output: 0.40 },
     "gemini-2.5-pro": { input: 1.25, output: 10.00 }, // ≤200k-token context tier
     "gemini-2.0-flash": { input: 0.10, output: 0.40 },
+    // OpenAI chat models (published per-1M-token rates). Reasoning tokens, if any,
+    // are billed at the output rate — priceText folds thoughtTokens into output.
+    "gpt-4o-mini": { input: 0.15, output: 0.60 },
+    "gpt-4.1-mini": { input: 0.40, output: 1.60 },
+    "gpt-4o": { input: 2.50, output: 10.00 },
+    "gpt-4.1": { input: 2.00, output: 8.00 },
+    // Anthropic Claude models (published per-1M-token rates, June 2026). Sonnet 5
+    // intro pricing ($2/$10) runs through 2026-08-31; using the standard $3/$15
+    // rate here keeps the fallback conservative once the intro window ends.
+    "claude-sonnet-5": { input: 3.00, output: 15.00 },
+    "claude-opus-4-8": { input: 5.00, output: 25.00 },
   },
   tts: {
     "gemini-2.5-flash-preview-tts": { input: 0.50, output: 10.00 },
     "gemini-2.5-pro-preview-tts": { input: 1.00, output: 20.00 },
+    // OpenAI's audio response carries no token counts, so these are billed via the
+    // audioSeconds→output-tokens fallback (25 tok/s) in priceTts. gpt-4o-mini-tts
+    // is token-priced (~$0.015/min audio); tts-1/-hd are really per-character but
+    // approximated here on the same per-token basis so usage still gets a cost.
+    "gpt-4o-mini-tts": { input: 0.60, output: 12.00 },
+    "tts-1": { input: 0.00, output: 15.00 },
+    "tts-1-hd": { input: 0.00, output: 30.00 },
   },
   image: {
     // Gemini Flash Image output is billed per token ($30/1M); a ≤1024px image

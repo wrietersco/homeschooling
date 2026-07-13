@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import {
   pcmToWav, sampleRateFromMime, synthesizeSpeakable, RECITE_CUE,
   synthesizeOpenAiPcm, resolveTtsProvider, effectiveTtsModel, effectiveTtsVoice, voicesForTts, ttsCacheHash,
-  ttsModelAcceptsInstructions,
+  ttsModelAcceptsInstructions, isKnownTtsModel, resolveTtsSelection, TTS_PICKER_MODEL,
+  TONE_BY_CONTENT_KIND, OPENAI_INSTRUCTIONS_BY_CONTENT_KIND, ttsPayloadForKind,
 } from "../agents/tts.js";
 
 test("sampleRateFromMime parses rate, defaults to 24000", () => {
@@ -143,6 +144,64 @@ test("ttsCacheHash: instructions change the key only when present (existing keys
   assert.equal(withInstr, ttsCacheHash({ ...base, instructions: "Recite in Arabic." })); // stable
 });
 
+// ─── Default emotional tone by content kind ───────────────────────────────────
+test("ttsPayloadForKind: no kind and no override → plain text, no instructions", () => {
+  assert.deepEqual(ttsPayloadForKind("hello", "", "gemini", "gemini-2.5-flash-preview-tts"), { text: "hello", instructions: "" });
+  assert.deepEqual(ttsPayloadForKind("hello", "unknown-kind", "openai", "gpt-4o-mini-tts"), { text: "hello", instructions: "" });
+});
+
+test("ttsPayloadForKind: Gemini gets the tone baked into the text as a leading cue", () => {
+  const { text, instructions } = ttsPayloadForKind("بِسْمِ", "quran", "gemini", "gemini-2.5-flash-preview-tts");
+  assert.equal(instructions, ""); // Gemini has no instructions field
+  assert.ok(text.startsWith(TONE_BY_CONTENT_KIND.quran));
+  assert.ok(text.endsWith("بِسْمِ")); // original text preserved verbatim at the end
+});
+
+test("ttsPayloadForKind: OpenAI's steerable model gets the RICHER structured instructions, text untouched", () => {
+  const { text, instructions } = ttsPayloadForKind("Once upon a time", "story", "openai", "gpt-4o-mini-tts");
+  assert.equal(text, "Once upon a time");
+  assert.equal(instructions, OPENAI_INSTRUCTIONS_BY_CONTENT_KIND.story);
+  assert.notEqual(instructions, TONE_BY_CONTENT_KIND.story); // NOT the flat Gemini-style sentence
+  // Structured Voice/Tone/Pacing/Emotion direction — what actually moves gpt-4o-mini-tts.
+  assert.match(instructions, /Voice:.*Tone:.*Pacing:.*Emotion:/s);
+});
+
+test("every OPENAI_INSTRUCTIONS_BY_CONTENT_KIND entry follows the Voice/Tone/Pacing/Emotion structure", () => {
+  for (const [kind, text] of Object.entries(OPENAI_INSTRUCTIONS_BY_CONTENT_KIND)) {
+    assert.match(text, /Voice:/, `${kind} missing Voice:`);
+    assert.match(text, /Tone:/, `${kind} missing Tone:`);
+    assert.match(text, /Pacing:/, `${kind} missing Pacing:`);
+    assert.match(text, /Emotion:/, `${kind} missing Emotion:`);
+  }
+  // Same kind coverage as the Gemini-side map — no kind falls back to flat/no tone on OpenAI.
+  assert.deepEqual(Object.keys(OPENAI_INSTRUCTIONS_BY_CONTENT_KIND).sort(), Object.keys(TONE_BY_CONTENT_KIND).sort());
+});
+
+test("ttsPayloadForKind: OpenAI's legacy models (no instructions field) get plain text, no tone", () => {
+  const { text, instructions } = ttsPayloadForKind("Once upon a time", "story", "openai", "tts-1");
+  assert.equal(text, "Once upon a time");
+  assert.equal(instructions, "");
+});
+
+test("ttsPayloadForKind: an explicit instructions override wins over the kind default", () => {
+  const gemini = ttsPayloadForKind("hi", "quran", "gemini", "gemini-2.5-flash-preview-tts", "Sound extra sleepy.");
+  assert.ok(gemini.text.startsWith("Sound extra sleepy."));
+  assert.ok(!gemini.text.includes(TONE_BY_CONTENT_KIND.quran));
+
+  const openai = ttsPayloadForKind("hi", "quran", "openai", "gpt-4o-mini-tts", "Sound extra sleepy.");
+  assert.equal(openai.instructions, "Sound extra sleepy.");
+});
+
+test("every TONE_BY_CONTENT_KIND entry produces a distinct cache key for the same text/voice", () => {
+  const keys = Object.keys(TONE_BY_CONTENT_KIND).map((k) => {
+    const { text, instructions } = ttsPayloadForKind("سلام", k, "gemini", "gemini-2.5-flash-preview-tts");
+    return ttsCacheHash({ provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Kore", text, instructions });
+  });
+  assert.equal(new Set(keys).size, keys.length); // no two kinds collide
+  const plain = ttsCacheHash({ provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Kore", text: "سلام", instructions: "" });
+  assert.ok(!keys.includes(plain)); // toned clips never collide with the untoned one either
+});
+
 test("resolveTtsProvider falls back to gemini for unknown providers", () => {
   assert.equal(resolveTtsProvider("openai"), "openai");
   assert.equal(resolveTtsProvider("gemini"), "gemini");
@@ -177,6 +236,87 @@ test("OpenAI voice resolution is model-aware (legacy tts-1/-hd support only 9 vo
   assert.equal(effectiveTtsVoice("openai", "coral", "tts-1"), "coral"); // a supported one stays
   // Gemini uses the same 8 voices for every Gemini TTS model.
   assert.equal(voicesForTts("gemini", "gemini-2.5-flash-preview-tts").length, 8);
+});
+
+// ─── Explicit voice selection (per-element voice picker) ──────────────────────
+test("isKnownTtsModel: only catalog ids for the right provider pass", () => {
+  assert.equal(isKnownTtsModel("gemini", "gemini-2.5-pro-preview-tts"), true);
+  assert.equal(isKnownTtsModel("openai", "gpt-4o-mini-tts"), true);
+  assert.equal(isKnownTtsModel("openai", "tts-1"), true);
+  // Wrong provider for the id, or an unknown id, is rejected.
+  assert.equal(isKnownTtsModel("openai", "gemini-2.5-pro-preview-tts"), false);
+  assert.equal(isKnownTtsModel("gemini", "gpt-4o-mini-tts"), false);
+  assert.equal(isKnownTtsModel("openai", "totally-made-up-tts"), false);
+  assert.equal(isKnownTtsModel("openai", ""), false);
+});
+
+test("TTS_PICKER_MODEL uses Gemini's finest + OpenAI 4o", () => {
+  assert.equal(TTS_PICKER_MODEL.gemini, "gemini-2.5-pro-preview-tts");
+  assert.equal(TTS_PICKER_MODEL.openai, "gpt-4o-mini-tts");
+});
+
+test("resolveTtsSelection: no explicit selection falls back to saved config", () => {
+  const sel = resolveTtsSelection({
+    config: { provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Kore" },
+    isAvailable: () => true,
+  });
+  assert.deepEqual(sel, { provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Kore" });
+});
+
+test("resolveTtsSelection: a bare voiceName (no provider) coerces onto the config provider", () => {
+  const sel = resolveTtsSelection({
+    voiceName: "Puck",
+    config: { provider: "gemini", model: "gemini-2.5-flash-preview-tts" },
+    isAvailable: () => true,
+  });
+  assert.deepEqual(sel, { provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Puck" });
+});
+
+test("resolveTtsSelection: an explicit, AVAILABLE provider+model+voice is honored", () => {
+  const sel = resolveTtsSelection({
+    provider: "openai", model: "gpt-4o-mini-tts", voiceName: "marin",
+    config: { provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Kore" },
+    isAvailable: (p) => p === "openai",
+  });
+  assert.deepEqual(sel, { provider: "openai", model: "gpt-4o-mini-tts", voiceName: "marin" });
+});
+
+test("resolveTtsSelection: an explicit provider that is UNAVAILABLE falls back to config", () => {
+  const sel = resolveTtsSelection({
+    provider: "openai", model: "gpt-4o-mini-tts", voiceName: "marin",
+    config: { provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Kore" },
+    isAvailable: (p) => p === "gemini", // openai not configured
+  });
+  assert.deepEqual(sel, { provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Kore" });
+});
+
+test("resolveTtsSelection: an unknown model for an honored provider snaps to its default", () => {
+  const sel = resolveTtsSelection({
+    provider: "openai", model: "evil-model", voiceName: "marin",
+    config: {},
+    isAvailable: () => true,
+  });
+  assert.equal(sel.provider, "openai");
+  assert.equal(sel.model, "gpt-4o-mini-tts"); // provider default, not the bogus string
+  assert.equal(sel.voiceName, "marin");       // valid on the default model
+});
+
+test("resolveTtsSelection: an out-of-set voice for the chosen model snaps to the provider default voice", () => {
+  const sel = resolveTtsSelection({
+    provider: "gemini", model: "gemini-2.5-pro-preview-tts", voiceName: "marin", // marin is OpenAI-only
+    config: {},
+    isAvailable: () => true,
+  });
+  assert.deepEqual(sel, { provider: "gemini", model: "gemini-2.5-pro-preview-tts", voiceName: "Kore" });
+});
+
+test("resolveTtsSelection: distinct selections produce distinct cache keys (no charge on repeat)", () => {
+  const a = resolveTtsSelection({ provider: "openai", model: "gpt-4o-mini-tts", voiceName: "marin", isAvailable: () => true });
+  const b = resolveTtsSelection({ provider: "gemini", model: "gemini-2.5-pro-preview-tts", voiceName: "Kore", isAvailable: () => true });
+  const text = "بِسْمِ";
+  assert.notEqual(ttsCacheHash({ ...a, text }), ttsCacheHash({ ...b, text }));
+  // Same selection ⇒ identical key ⇒ a cache hit (free) on the next regenerate.
+  assert.equal(ttsCacheHash({ ...a, text }), ttsCacheHash({ ...a, text }));
 });
 
 test("ttsCacheHash is deterministic and provider-sensitive (shared by click-to-hear + Qaida)", () => {

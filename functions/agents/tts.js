@@ -15,6 +15,7 @@ import { loadAgentConfig } from "./agentConfig.js";
 import { parseUsage } from "./llm.js";
 import { recordCostEvent } from "../lib/costMeter.js";
 import { enforceFamilyTtsQuota } from "../platform/quota.js";
+import { MODEL_CATALOG } from "./modelCatalog.js";
 
 // ─── PCM → WAV (pure, unit-tested) ────────────────────────────────────────────
 // Gemini returns signed 16-bit little-endian mono PCM. Wrap it in a 44-byte
@@ -157,6 +158,39 @@ export function effectiveTtsVoice(provider, voice, model) {
   return voice && p.voicesForModel(model).includes(voice) ? voice : p.defaultVoice;
 }
 
+// Known TTS model ids per provider, taken from the curated catalog. An explicit
+// client-supplied model is honored ONLY if it's on this allowlist, so a stray model
+// string can never reach the provider call or poison the content-addressed cache key.
+const TTS_MODEL_IDS = (MODEL_CATALOG.tts || []).reduce((acc, m) => {
+  (acc[m.provider] ||= new Set()).add(m.id);
+  return acc;
+}, {});
+export function isKnownTtsModel(provider, model) {
+  const p = resolveTtsProvider(provider);
+  return Boolean(model) && Boolean(TTS_MODEL_IDS[p]?.has(model)) && TTS_PROVIDERS[p].looksLikeModel(model);
+}
+
+// The model each provider uses for USER-DRIVEN voice regeneration (the per-element
+// voice picker) — distinct from the platform default (`TTS_PROVIDERS[p].defaultModel`)
+// used for ordinary click-to-hear. Per product spec: Gemini's finest TTS, OpenAI's 4o.
+export const TTS_PICKER_MODEL = { gemini: "gemini-2.5-pro-preview-tts", openai: "gpt-4o-mini-tts" };
+
+// Resolve the effective (provider, model, voice) for ONE synthesis call. An explicit
+// client selection is honored only when its provider is known AND available (key set);
+// otherwise we fall back to the saved `tts` agent config — exactly today's behaviour
+// when nothing explicit is passed. Pure + unit-tested; the callable injects
+// `isAvailable` from the runtime env. A bare `voiceName` (no provider) still applies,
+// coerced onto the config provider/model.
+export function resolveTtsSelection({ provider, model, voiceName, config = {}, isAvailable = () => true } = {}) {
+  if (provider && TTS_PROVIDERS[provider] && isAvailable(provider)) {
+    const m = isKnownTtsModel(provider, model) ? model : TTS_PROVIDERS[provider].defaultModel;
+    return { provider, model: m, voiceName: effectiveTtsVoice(provider, voiceName || "", m) };
+  }
+  const p = resolveTtsProvider(config.provider);
+  const m = effectiveTtsModel(p, config.model);
+  return { provider: p, model: m, voiceName: effectiveTtsVoice(p, voiceName || config.voiceName || "", m) };
+}
+
 // Does a (provider, model) accept a separate `instructions` steering field? Gemini
 // has none (it is steered by a leading text cue, not a field), and OpenAI's legacy
 // per-character models (tts-1 / tts-1-hd) reject it — only the 4o TTS line accepts
@@ -182,6 +216,80 @@ export function ttsCacheHash({ provider, model, voiceName, text, instructions = 
 // natural-language text before the content as a *style directive* it follows
 // rather than reads aloud (e.g. "Say cheerfully: …"), so only `text` is spoken.
 export const RECITE_CUE = "Say this slowly and clearly: ";
+
+// ─── Default emotional tone by content kind ──────────────────────────────────
+// Every click-to-hear / regenerated clip should sound appropriately expressive
+// without a parent having to tune it per element — a Quran ayah, a bedtime
+// story, and a math problem should not all be read in the same flat voice.
+// Same per-provider steering mechanism as qaidaTtsPayload (platform/qaidaImport.js):
+//   • Gemini (no instructions field) — baked into `text` as a leading style cue,
+//     which Gemini follows as a directive and does NOT speak (see RECITE_CUE).
+//     Kept short/imperative here — a long prepended block risks Gemini treating
+//     part of it as content to read instead of a directive.
+//   • OpenAI gpt-4o-mini-tts — the `instructions` steering field. This model
+//     responds far more reliably to structured, multi-dimension direction
+//     (separate Voice/Tone/Pacing/Emotion/Pronunciation lines) than to a single
+//     adjective-laden sentence — a flat single-sentence instruction is why the
+//     OpenAI voices were still sounding emotionless.
+//   • OpenAI tts-1 / tts-1-hd — reject an instructions field, so none is
+//     attached (would 400 the call and poison the cache key); plain text plays.
+export const TONE_BY_CONTENT_KIND = {
+  quran: "Recite reverently, slowly, and clearly, honoring the sacred text.",
+  qaida: "Speak clearly, patiently, and slowly, like a teacher guiding a beginner reader.",
+  dialogue: "Speak naturally and expressively, in character for this line.",
+  story: "Narrate warmly and engagingly, like telling a story to a child.",
+  tips: "Speak warmly, calmly, and supportively, like a trusted mentor advising a parent.",
+  vocab: "Speak clearly and simply, like introducing a new word to a young learner.",
+  instructional: "Speak clearly, neutrally, and at an easy, unhurried pace.",
+};
+
+// Richer, structured instructions for OpenAI's `instructions` field specifically
+// (gpt-4o-mini-tts only — see ttsModelAcceptsInstructions). Deliberately more
+// elaborate than TONE_BY_CONTENT_KIND: this is a dedicated steering field, not
+// spoken text, so there's no risk of it bleeding into the audio, and the model
+// follows this Voice/Tone/Pacing/Emotion/Pronunciation structure noticeably
+// better than a single sentence.
+export const OPENAI_INSTRUCTIONS_BY_CONTENT_KIND = {
+  quran: "Voice: Warm but reverent, with the measured gravity of reciting sacred text. "
+    + "Tone: Calm and reverent, never excited. Pacing: Slow and deliberate, with natural pauses between phrases. "
+    + "Emotion: Quiet devotion. Pronunciation: Precise, honoring every syllable.",
+  qaida: "Voice: Patient and encouraging, like a kind teacher with a beginner reader. Tone: Warm and supportive. "
+    + "Pacing: Slow, with a clear pause after each letter or sound. Emotion: Gentle encouragement, never rushed. "
+    + "Pronunciation: Crisp and exaggeratedly clear.",
+  dialogue: "Voice: Lively and natural, fully in character for this line. "
+    + "Tone: Match the emotion the line implies — playful, curious, surprised. Pacing: Conversational, with natural rhythm. "
+    + "Emotion: Genuine and varied, not narrator-flat. Pronunciation: Clear but relaxed, like real conversation.",
+  story: "Voice: Warm, animated storyteller, like reading a bedtime story aloud. "
+    + "Tone: Engaging and expressive — let the emotion of each moment come through. "
+    + "Pacing: Quicker for excitement, slower for suspense or tenderness. Emotion: Genuine warmth and wonder. "
+    + "Pronunciation: Clear and lightly theatrical on key story beats.",
+  tips: "Voice: Warm, calm, and supportive, like a trusted mentor speaking privately to a parent. "
+    + "Tone: Encouraging and reassuring, never clinical. Pacing: Relaxed and steady. "
+    + "Emotion: Genuine warmth, quiet confidence.",
+  vocab: "Voice: Bright and clear, like introducing a fun new word to a young child. Tone: Cheerful and encouraging. "
+    + "Pacing: Slightly slower, clear pause after the word. Emotion: Light enthusiasm. "
+    + "Pronunciation: Very precise, syllable by syllable if needed.",
+  instructional: "Voice: Clear, neutral, and steady, like giving step-by-step directions. Tone: Calm and matter-of-fact. "
+    + "Pacing: Even and unhurried, brief pause between steps. Emotion: Neutral — clarity over expressiveness.",
+};
+
+// Build { text, instructions } for a synthesis call, folding in the default tone
+// for `contentKind` (if any) via the right channel for (provider, model). An
+// explicit `instructions` override wins over the kind default; an unrecognized
+// or absent kind falls through to plain text (no tone applied). OpenAI gets its
+// own richer instruction set (see OPENAI_INSTRUCTIONS_BY_CONTENT_KIND); an
+// explicit override applies verbatim to whichever channel is available.
+export function ttsPayloadForKind(text, contentKind, provider, model, explicitInstructions = "") {
+  if (resolveTtsProvider(provider) === "gemini") {
+    const tone = explicitInstructions || TONE_BY_CONTENT_KIND[contentKind] || "";
+    return tone ? { text: `${tone}\n\n${text}`, instructions: "" } : { text, instructions: "" };
+  }
+  if (ttsModelAcceptsInstructions(provider, model)) {
+    const tone = explicitInstructions || OPENAI_INSTRUCTIONS_BY_CONTENT_KIND[contentKind] || "";
+    return { text, instructions: tone };
+  }
+  return { text, instructions: "" };
+}
 
 // Synthesize, with one retry for the bare-token case. Gemini intermittently
 // returns NO audio for a single, isolated voweled glyph — exactly the Noorani
@@ -214,18 +322,34 @@ export const synthesizeSpeech = onCall(
     if (!text) throw new HttpsError("invalid-argument", "text is required.");
 
     const cfg = await loadAgentConfig(db, "tts");
-    const provider = resolveTtsProvider(cfg.provider);
+    // Honor an explicit per-element voice choice (from the activity voice picker) when
+    // its provider is configured; otherwise fall back to the saved `tts` config.
+    const isAvailable = (pv) => Boolean(TTS_PROVIDERS[pv] && process.env[TTS_PROVIDERS[pv].secret]);
+    const { provider, model, voiceName } = resolveTtsSelection({
+      provider: String(request.data?.provider || "").trim() || undefined,
+      model: String(request.data?.model || "").trim() || undefined,
+      voiceName: String(request.data?.voiceName || "").slice(0, 60),
+      config: cfg,
+      isAvailable,
+    });
     const { synth, secret } = TTS_PROVIDERS[provider];
 
     const apiKey = process.env[secret];
     if (!apiKey) return { configured: false };
 
-    const model = effectiveTtsModel(provider, cfg.model);
-    const voiceName = effectiveTtsVoice(provider, String(request.data?.voiceName || cfg.voiceName || "").slice(0, 60), model);
+    // Fold in a default emotional tone for this content kind (a Quran ayah,
+    // a bedtime story, and a math problem shouldn't all read the same way),
+    // unless the caller passes an explicit override. `spokenText` carries any
+    // Gemini style cue baked in; `instructions` carries OpenAI's steering field.
+    const contentKind = String(request.data?.contentKind || "").trim().slice(0, 40);
+    const explicitInstructions = String(request.data?.instructions || "").trim().slice(0, 300);
+    const { text: spokenText, instructions } = ttsPayloadForKind(text, contentKind, provider, model, explicitInstructions);
 
-    // Cache key: provider + model + voice + text. Same request never re-synthesizes,
-    // and the two providers never collide on a shared (voice, text) pair.
-    const hash = ttsCacheHash({ provider, model, voiceName, text });
+    // Cache key: provider + model + voice + (tone-applied) text + instructions.
+    // Same request never re-synthesizes; the two providers never collide on a
+    // shared (voice, text) pair; a different tone for the same raw text gets
+    // its own entry since `spokenText`/`instructions` differ.
+    const hash = ttsCacheHash({ provider, model, voiceName, text: spokenText, instructions });
     const filePath = `tts-cache/${hash}.wav`;
 
     let bucket;
@@ -259,7 +383,7 @@ export const synthesizeSpeech = onCall(
 
     let wav, sampleRate;
     try {
-      const out = await synthesizeSpeakable(synth, { text, voiceName, model, apiKey });
+      const out = await synthesizeSpeakable(synth, { text: spokenText, voiceName, model, apiKey, instructions });
       sampleRate = out.sampleRate;
       wav = pcmToWav(out.pcm, { sampleRate });
       // Record cost. Prefer real token usage; fall back to audio duration (16-bit
@@ -311,3 +435,25 @@ const MAX_INLINE_WAV_BYTES = 1_500_000;
 function downloadUrl(bucketName, filePath, token) {
   return `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(filePath)}?alt=media&token=${token}`;
 }
+
+// ─── Voice catalog for the per-element voice picker ─────────────────────────────
+// Auth-scoped (any family member). Returns the consolidated voice list the activity
+// voice picker renders — voices from BOTH providers, each tagged with its provider's
+// regeneration model — plus which providers are actually configured (so the UI can
+// disable an unavailable provider's group). No secrets leave the function.
+export const getTtsVoiceCatalog = onCall(
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY"] },
+  async (request) => {
+    await resolveCaller(request); // any signed-in family member
+    const providers = {};
+    for (const [key, p] of Object.entries(TTS_PROVIDERS)) {
+      const model = TTS_PICKER_MODEL[key] || p.defaultModel;
+      providers[key] = {
+        available: Boolean(process.env[p.secret]),
+        defaultModel: model,
+        voices: voicesForTts(key, model),
+      };
+    }
+    return { providers };
+  }
+);

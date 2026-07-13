@@ -18,7 +18,7 @@
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { resolveCaller } from "../lib/caller.js";
 import { runAgent } from "./runtime.js";
-import { resolveLlm } from "./agentConfig.js";
+import { resolveLlm, secretNameForProvider } from "./agentConfig.js";
 import { describeGuardian, summarizeChildPerformance } from "./grounding.js";
 
 // Stable id from a skill name so re-runs update the same skill rather than
@@ -297,16 +297,20 @@ export async function runSkillMap({ db, familyId, uid, role = "owner", llm, genC
 // Runs inline (up to 540s) and writes live progress to agentRuns as it goes, so
 // the client subscribes to the run doc for a live picture while awaiting.
 export const requestSkillMap = onCall(
-  { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 540 },
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 540 },
   async (request) => {
     const { db, uid, familyId, role } = await resolveCaller(request);
     if (!["owner", "parent"].includes(role)) {
       throw new HttpsError("permission-denied", "Only family owners or parents can build the skill map.");
     }
     // Reuse the curriculum agent's config (larger output budget) for rich mapping.
-    const { llm, genConfig } = await resolveLlm(db, "curriculum", process.env.GEMINI_API_KEY, { familyId, uid, source: "requestSkillMap" });
+    const { llm, genConfig, provider } = await resolveLlm(
+      db, "curriculum",
+      { gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY },
+      { familyId, uid, source: "requestSkillMap" }
+    );
     if (!llm) {
-      return { configured: false, text: "The skill-mapping agent isn't configured — set the GEMINI_API_KEY secret to enable it." };
+      return { configured: false, text: `The skill-mapping agent isn't configured — set the ${secretNameForProvider(provider)} secret to enable it.` };
     }
     const res = await runSkillMap({ db, familyId, uid, role, llm, genConfig });
     return { configured: true, ...res };

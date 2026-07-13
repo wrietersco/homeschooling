@@ -21,10 +21,37 @@ export const deleteSyllabus = (curriculumId, familyId) => call("deleteSyllabus")
 export const getQuranStatus = () => call("getQuranStatus")({});
 export const importQuran = (opts) => call("importQuran")(opts || {});
 
+// Noorani Qaida platform library (superadmin). The audit list is read straight
+// from the shared nooraniQaida/* collection (signed-in readable); these wrap the
+// superadmin-only mutations.
+export const getQaidaStatus = () => call("getQaidaStatus")({});
+export const importQaida = (opts) => call("importQaida")(opts || {});
+// `plan` ({ mode, models:{gemini,openai}, maxWords }) selects the provider(s)/
+// model(s) for this bulk run; omitted ⇒ the worker falls back to the TTS config.
+export const requestQaidaAudio = (plan) => call("requestQaidaAudio")(plan ? { plan } : {});
+export const stopQaidaAudio = () => call("stopQaidaAudio")({});
+// preview=true synthesizes a clip to audition without persisting; preview=false
+// saves the approved take onto the corpus item. `opts` may carry per-generation
+// TTS overrides ({ provider, model, voiceName }) applied to this take only.
+export const regenerateQaidaWord = (lessonId, glyph, instruction, preview = false, opts = {}) =>
+  call("regenerateQaidaWord")({
+    lessonId, glyph, instruction, preview,
+    provider: opts.provider || "", model: opts.model || "", voiceName: opts.voiceName || "",
+  });
+export const deleteQaidaLibrary = () => call("deleteQaidaLibrary")({});
+export const deleteQaidaAudio = () => call("deleteQaidaAudio")({});
+
 // Model tooling (superadmin).
 export const getModelCatalog = () => call("getModelCatalog")({});
 export const previewModel = (data) => call("previewModel")(data);
 export const testAllModels = () => call("testAllModels")({});
+
+// Usage dashboard (superadmin) — plain-language usage/limits/health + alerts.
+export const getUsageDashboard = () => call("getUsageDashboard")({});
+
+// TTS quota allocation (superadmin).
+export const getQuotaConfig = () => call("getQuotaConfig")({});
+export const setQuotaConfig = (cfg) => call("setQuotaConfig")(cfg);
 
 // Cost reporting (superadmin).
 export const getCostOverview = (month) => call("getCostOverview")(month ? { month } : {});

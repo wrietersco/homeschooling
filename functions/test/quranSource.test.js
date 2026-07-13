@@ -112,6 +112,35 @@ test("enrichQuranContent falls back to the no-key source when local docs are abs
   assert.equal(content.quran.verses[0].words.length, 2);
 });
 
+test("enrichQuranContent ALWAYS prefers the verified translation, even when the AI draft already has one", async () => {
+  // The content schema requires `translation`, so the LLM always drafts one —
+  // and for a surah's first ayah it's prone to mistranslating just the fused
+  // Bismillah instead of the real ayah. The verified source must win regardless.
+  const content = {
+    kind: "quran_reading",
+    quran: {
+      verses: [{ surah: 1, ayah: 1, arabic: "draft", translation: "In the name of Allah, the Most Gracious, the Most Merciful." }],
+    },
+  };
+
+  await enrichQuranContent(content, { fetchImpl: fakeFetch });
+
+  assert.equal(content.quran.verses[0].translation, "In the name of Allah"); // the verified translation, not the stale draft
+});
+
+test("enrichQuranContent ALWAYS prefers the verified translation from local docs too", async () => {
+  const docSnapshot = { exists: true, data: () => ({ verses: [{ ayah: 1, arabic: "بِسْمِ ٱللَّهِ", translation: "In the name of Allah", source: "curated" }] }) };
+  const db = { collection: () => ({ doc: () => ({ get: async () => docSnapshot }) }) };
+  const content = {
+    kind: "quran_reading",
+    quran: { verses: [{ surah: 1, ayah: 1, arabic: "draft", translation: "a stale AI-drafted translation" }] },
+  };
+
+  await enrichQuranContent(content, { db, fetchImpl: fakeFetch });
+
+  assert.equal(content.quran.verses[0].translation, "In the name of Allah");
+});
+
 test("verified words carry canonical 1-based per-word audio URLs (audit #10)", async () => {
   const verses = await fetchChapterVerses({ surah: 1, fetchImpl: fakeFetch });
   // Word audio is keyed to the canonical tokenisation, not the LLM draft split.

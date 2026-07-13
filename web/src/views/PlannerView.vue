@@ -4,7 +4,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useActivityStore } from "@/stores/activities";
 import { usePlannerStore } from "@/stores/planner";
 import { useProfilesStore } from "@/stores/profiles";
-import { addBlock, removeBlock } from "@/services/planner";
+import { addBlock, removeBlock, clearBlocks } from "@/services/planner";
 import { updateGuardian } from "@/services/profiles";
 import { autoSchedule } from "@/services/scheduler";
 import { useActivityLink } from "@/composables/useActivityLink";
@@ -170,6 +170,33 @@ async function scheduleViaAgent() {
   }
 }
 
+// ─── Clear all planned items for the week ────────────────────────────────────
+const weekBlockCount = computed(() =>
+  weekDays.value.reduce((n, d) => n + (plannerStore.dayBlocks[d.dateKey]?.length || 0), 0)
+);
+const clearConfirm = ref(false);
+const clearing = ref(false);
+
+function openClearConfirm() {
+  if (weekBlockCount.value) clearConfirm.value = true;
+}
+
+async function confirmClearWeek() {
+  if (!auth.familyId || clearing.value) return;
+  clearing.value = true;
+  agentSchedError.value = "";
+  try {
+    const removed = await clearBlocks(auth.familyId, weekDays.value.map((d) => d.dateKey));
+    clearConfirm.value = false;
+    agentSchedMsg.value = `Cleared ${removed} planned item${removed === 1 ? "" : "s"} from this week.`;
+    setTimeout(() => (agentSchedMsg.value = ""), 6000);
+  } catch (e) {
+    agentSchedError.value = e?.message || "Failed to clear the week.";
+  } finally {
+    clearing.value = false;
+  }
+}
+
 // ─── Guardian availability ───────────────────────────────────────────────────
 const WEEKDAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
 const availOpen = ref(false);
@@ -286,6 +313,12 @@ const filteredCount = computed(() => filteredGroups.value.reduce((n, g) => n + g
       </div>
       <div class="planner-actions">
         <button class="nav-btn" @click="openAvailability">🗓 Availability</button>
+        <button
+          class="nav-btn danger"
+          :disabled="!weekBlockCount"
+          :title="weekBlockCount ? 'Remove all planned items this week' : 'Nothing planned this week'"
+          @click="openClearConfirm"
+        >🗑 Clear all</button>
         <button class="nav-btn primary" :disabled="agentScheduling" @click="scheduleViaAgent">
           {{ agentScheduling ? "Scheduling…" : "✨ Schedule via agent" }}
         </button>
@@ -443,6 +476,25 @@ const filteredCount = computed(() => filteredGroups.value.reduce((n, g) => n + g
       </div>
     </teleport>
 
+    <!-- Clear-all confirmation modal -->
+    <teleport to="body">
+      <div v-if="clearConfirm" class="modal-backdrop" @click.self="clearConfirm = false">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="clear-title">
+          <h2 id="clear-title" class="modal-h">Clear this week?</h2>
+          <p class="modal-activity">
+            This removes all {{ weekBlockCount }} planned item{{ weekBlockCount === 1 ? "" : "s" }}
+            for {{ weekLabel }}. This can’t be undone.
+          </p>
+          <div class="modal-actions">
+            <button class="btn secondary" :disabled="clearing" @click="clearConfirm = false">Cancel</button>
+            <button class="btn danger" :disabled="clearing" @click="confirmClearWeek">
+              {{ clearing ? "Clearing…" : "Clear all" }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </teleport>
+
     <!-- Guardian availability modal -->
     <teleport to="body">
       <div v-if="availOpen" class="modal-backdrop" @click.self="availOpen = false">
@@ -508,6 +560,9 @@ const filteredCount = computed(() => filteredGroups.value.reduce((n, g) => n + g
 .nav-btn.primary { background: #0b1f3a; color: #fff; border-color: #0b1f3a; }
 .nav-btn.primary:disabled { opacity: 0.6; cursor: not-allowed; }
 .nav-btn.primary:hover { background: #13294d; }
+.nav-btn.danger { color: #b91c1c; border-color: #fecaca; }
+.nav-btn.danger:hover:not(:disabled) { background: #fef2f2; }
+.nav-btn.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .planner-actions { display: flex; align-items: center; gap: 0.5rem; }
 
@@ -664,5 +719,7 @@ const filteredCount = computed(() => filteredGroups.value.reduce((n, g) => n + g
 .btn { padding: 0.5rem 1rem; border-radius: 7px; border: none; cursor: pointer; font: inherit; }
 .btn.primary { background: #0b1f3a; color: #fff; }
 .btn.secondary { background: #f1f5f9; color: #334155; border: 1px solid #cbd5e1; }
+.btn.danger { background: #dc2626; color: #fff; }
+.btn.danger:hover:not(:disabled) { background: #b91c1c; }
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 </style>

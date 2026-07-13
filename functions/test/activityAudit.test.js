@@ -62,6 +62,47 @@ test("summarizeAudit counts the actionable buckets", () => {
   assert.equal(s.individualPaced, 3); // 2 clubbed + 1 single (co-op quran is shared)
 });
 
+test("plan targetingMode 'individual' is authoritative — clubs a teaching activity the heuristic would keep shared", () => {
+  // A teaching session the type heuristic calls "shared", but the content plan
+  // deliberately marked individually paced → must split.
+  const r = classifyActivity({
+    type: "teaching",
+    coopMode: false,
+    targetChildren: ["hadi", "ibrahim"],
+    plan: { material: { targetingMode: "individual" } },
+  });
+  assert.equal(r.paced, "individual");
+  assert.equal(r.pacedSource, "plan");
+  assert.equal(r.targetingMode, "individual");
+  assert.equal(r.clubbed, true);
+  assert.equal(r.recommendation, "split-per-child");
+  assert.match(r.rationale, /content plan marks/);
+});
+
+test("plan targetingMode 'shared' is authoritative — keeps a skill-paced activity the heuristic would split", () => {
+  const r = classifyActivity({
+    type: "noorani_qaida",
+    coopMode: false,
+    targetChildren: ["hadi", "ibrahim"],
+    plan: { material: { targetingMode: "shared" } },
+  });
+  assert.equal(r.paced, "shared");
+  assert.equal(r.pacedSource, "plan");
+  assert.equal(r.clubbed, false);
+  assert.equal(r.recommendation, "keep-shared");
+});
+
+test("a blank/garbage targetingMode falls back to the type heuristic", () => {
+  const r = classifyActivity({
+    type: "noorani_qaida",
+    targetChildren: ["a", "b"],
+    plan: { material: { targetingMode: "  " } },
+  });
+  assert.equal(r.pacedSource, "heuristic");
+  assert.equal(r.paced, "individual");
+  assert.equal(r.clubbed, true);
+});
+
 test("SKILL_PACED_TYPES excludes format/group types", () => {
   for (const t of ["teaching", "conversation", "physical", "computer", "ai_robotics"]) {
     assert.equal(SKILL_PACED_TYPES.has(t), false, `${t} should not be skill-paced`);

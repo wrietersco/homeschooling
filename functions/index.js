@@ -28,7 +28,7 @@ export { askGuide, clearGuideHistory } from "./agents/guide.js";
 export { askCurriculum } from "./agents/curriculum.js";
 
 // Phase 5 — Syllabus builder.
-export { generateSyllabus, stopSyllabus, syllabusWorker } from "./agents/syllabus.js";
+export { generateSyllabus, stopSyllabus, syllabusWorker, requestActivityTopUp } from "./agents/syllabus.js";
 
 // Activity content — type-specific content (verses / problems / story / steps).
 // Backfill runs server-side via a scheduled worker (like the syllabus builder):
@@ -41,8 +41,9 @@ export { generateActivityContent, deleteActivityContent, backfillActivityContent
 // isolation. Button-triggered from the Syllabus screen.
 export { requestContentPlanning } from "./agents/contentPlan.js";
 
-// Text-to-speech — click-to-hear any word/phrase/paragraph (Gemini voices).
-export { synthesizeSpeech } from "./agents/tts.js";
+// Text-to-speech — click-to-hear any word/phrase/paragraph (Gemini voices), plus the
+// voice catalog the per-element voice picker uses to regenerate audio in a chosen voice.
+export { synthesizeSpeech, getTtsVoiceCatalog } from "./agents/tts.js";
 
 // Planner auto-scheduler — lays the syllabus onto a week's calendar.
 export { autoSchedule } from "./agents/scheduler.js";
@@ -76,6 +77,13 @@ export { listFamilies, setFamilyStatus, listFamilyMembers, setMemberRole, remove
 // Cost reporting (superadmin) — platform/per-family cost overview + deep event log.
 export { getCostOverview, getFamilyCostDetail } from "./platform/costReport.js";
 
+// Usage dashboard (superadmin) — plain-language usage/limits/health + alerts.
+export { getUsageDashboard } from "./platform/usageDashboard.js";
+
+// Multi-tenant TTS quota — global pool split into platform reserve + per-family
+// budgets (superadmin-tunable). Enforced fail-open on the TTS paths.
+export { getQuotaConfig, setQuotaConfig } from "./platform/quota.js";
+
 // Phase 10 — Demo data seeder (superadmin-only).
 export { seedDemoFamily } from "./platform/seeder.js";
 
@@ -87,6 +95,11 @@ export { deleteCurriculum, deleteSyllabus } from "./platform/lifecycle.js";
 
 // Full-Quran import (superadmin) — populates the shared quran/* collection.
 export { importQuran, getQuranStatus } from "./platform/quranImport.js";
+
+// Noorani Qaida platform library (superadmin) — populates the shared
+// nooraniQaida/* collection with the standard lessons + deterministic spell-out
+// scripts, generates/caches their TTS audio, and supports per-word regenerate.
+export { importQaida, getQaidaStatus, requestQaidaAudio, stopQaidaAudio, qaidaAudioWorker, regenerateQaidaWord, deleteQaidaLibrary, deleteQaidaAudio } from "./platform/qaidaImport.js";
 
 // Superadmin model tooling — catalog, live preview, and a test-all health check.
 export { getModelCatalog, previewModel, testAllModels } from "./platform/modelTools.js";

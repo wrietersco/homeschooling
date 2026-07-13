@@ -7,6 +7,7 @@ import { useRoute } from "vue-router";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import ActivityContent from "@/components/ActivityContent.vue";
+import ProviderBadge from "@/components/ProviderBadge.vue";
 
 const route = useRoute();
 
@@ -104,11 +105,22 @@ onMounted(async () => {
 
       <!-- Activity title -->
       <h1 class="act-title">{{ session.activityTitle }}</h1>
-      <p class="act-meta">{{ session.durationMinutes }} min activity</p>
+      <p class="act-meta">
+        {{ session.durationMinutes }} min activity
+        <ProviderBadge :provider="session.contentProvider" :model="session.contentModel" />
+      </p>
+
+      <!-- Whose differentiated, level-paced version this link carries. -->
+      <div v-if="session.forChildName" class="for-child">
+        <span class="for-child-name">For {{ session.forChildName }}</span>
+        <span v-if="session.differentiatedLevel" class="for-child-level">{{ session.differentiatedLevel }}</span>
+      </div>
 
       <!-- Ready-to-do content: flashcards / qaida drills / story with voice -->
       <div v-if="session.content" class="content-box">
-        <ActivityContent :content="session.content" />
+        <!-- Saved voices play here (read-only); the picker is parent-only, so
+             can-edit-voice stays at its false default. -->
+        <ActivityContent :content="session.content" :audio-overrides="session.audioOverrides || {}" />
       </div>
 
       <!-- Instructions (collapsible once there's interactive content) -->
@@ -169,6 +181,10 @@ onMounted(async () => {
   color: #0f172a; line-height: 1.2;
 }
 .act-meta { margin: 0; font-size: 0.85rem; color: #94a3b8; }
+
+.for-child { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: center; }
+.for-child-name { font-size: 0.95rem; font-weight: 600; color: #334155; background: rgba(255,255,255,0.7); border-radius: 999px; padding: 0.2rem 0.8rem; }
+.for-child-level { font-size: 0.8rem; color: #475569; background: rgba(255,255,255,0.5); border-radius: 999px; padding: 0.2rem 0.7rem; }
 
 .content-box {
   background: rgba(255,255,255,0.55); border-radius: 16px; padding: 1.25rem;

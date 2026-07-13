@@ -77,6 +77,18 @@ a { color: var(--primary); }
   font-style: normal;
   font-display: swap;
 }
+/* Urdu Nastaliq — now self-hosted (Noto Nastaliq Urdu, SIL OFL) instead of
+   loaded from Google Fonts, so the beautiful Nastaliq hand renders even when
+   Google Fonts is slow, blocked, or unreachable. Arabic-block subset only;
+   Google serves one master for both weights, so 400–700 share this file. */
+@font-face {
+  font-family: "Noto Nastaliq Urdu";
+  src: url("/fonts/noto-nastaliq-urdu-arabic.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+200C-200E, U+2010-2011, U+FB50-FDFF, U+FE70-FEFC;
+}
 .font-arabic {
   font-family: "Indo-Pak Naskh", "Lateef", "Quran Naskh", "Scheherazade New", "Amiri", serif;
   line-height: 2.4;

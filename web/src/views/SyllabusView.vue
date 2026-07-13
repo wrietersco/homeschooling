@@ -6,11 +6,12 @@ import { useAuthStore } from "@/stores/auth";
 import { useCurriculumStore } from "@/stores/curriculum";
 import { useActivityStore } from "@/stores/activities";
 import { useProfilesStore } from "@/stores/profiles";
-import { resumeSyllabus, startSyllabus, stopSyllabus } from "@/services/syllabus";
+import { resumeSyllabus, startSyllabus, stopSyllabus, requestActivityTopUp } from "@/services/syllabus";
 import { deleteSyllabus, auditActivityDifferentiation, differentiateActivities } from "@/services/admin";
 import { requestContentPlanning, requestContentSample, regenerateFailedContent, requestContentBackfill } from "@/services/activityContent";
 import { useActivityLink } from "@/composables/useActivityLink";
 import ActivityContent from "@/components/ActivityContent.vue";
+import ProviderBadge from "@/components/ProviderBadge.vue";
 
 const { copiedId, copyActivityLink } = useActivityLink();
 
@@ -457,6 +458,76 @@ async function regenerateSelectedTypes() {
   }
 }
 
+// "Generate more activities" — creates brand-new activities of the selected
+// type(s) (NOT a content rewrite; see "Or regenerate only certain activity
+// types" below for that). Own selection state, own progress doc, own confirm
+// wording — kept fully separate from selectedTypes/regenerateSelectedTypes so
+// picking a type here can never be confused with arming a content overwrite.
+const topUpTypes = ref([]);
+function toggleTopUpType(t) {
+  const i = topUpTypes.value.indexOf(t);
+  if (i === -1) topUpTypes.value.push(t); else topUpTypes.value.splice(i, 1);
+}
+const topUpCount = ref(4);
+const topUpRunId = ref(null);
+const topUpRunData = ref(null);
+let topUpUnsub = null;
+watch(topUpRunId, (id) => {
+  if (topUpUnsub) { topUpUnsub(); topUpUnsub = null; }
+  if (!id || !auth.familyId) return;
+  topUpUnsub = onSnapshot(
+    doc(db, "families", auth.familyId, "agentRuns", id),
+    (snap) => { topUpRunData.value = snap.exists() ? { id: snap.id, ...snap.data() } : null; }
+  );
+});
+onUnmounted(() => { if (topUpUnsub) topUpUnsub(); });
+const topUpRunning = computed(() => topUpRunData.value?.status === "running");
+const topUpQueued = computed(() => topUpRunData.value?.status === "queued");
+const topUpDone = computed(() => topUpRunData.value?.status === "done");
+const topUpSubjectProgress = computed(() => {
+  if (!topUpRunData.value?.subjects) return [];
+  return Object.entries(topUpRunData.value.subjects)
+    .filter(([, s]) => s.matched)
+    .map(([id, s]) => ({ id, name: s.name || id, status: s.status || "pending", activityCount: s.activityCount || 0, targetActivityCount: s.targetActivityCount || 0, error: s.error }));
+});
+const startingTopUp = ref(false);
+const stoppingTopUp = ref(false);
+const topUpError = ref("");
+async function generateMoreActivities() {
+  if (startingTopUp.value || !topUpTypes.value.length || !activeCurriculum.value) return;
+  const n = Number(topUpCount.value) || 4;
+  const names = topUpTypes.value.map((t) => TYPE_LABELS[t] || t).join(", ");
+  if (!window.confirm(
+    `Add ${n} new ${names} activit${n === 1 ? "y" : "ies"} per matching subject? This creates brand-new activities — it will not change any existing ones.`
+  )) return;
+  startingTopUp.value = true;
+  topUpError.value = "";
+  try {
+    const res = await requestActivityTopUp({
+      curriculumId: activeCurriculum.value.id,
+      onlyTypes: [...topUpTypes.value],
+      addCount: n,
+    });
+    if (res?.configured === false) { topUpError.value = res.text || "The syllabus agent isn't configured."; return; }
+    topUpRunId.value = res.runId;
+  } catch (e) {
+    topUpError.value = e?.message || "Failed to start generation.";
+  } finally {
+    startingTopUp.value = false;
+  }
+}
+async function stopTopUp() {
+  if (!topUpRunId.value || stoppingTopUp.value) return;
+  stoppingTopUp.value = true;
+  try {
+    await stopSyllabus(topUpRunId.value);
+  } catch (e) {
+    topUpError.value = e?.message || "Could not stop generation.";
+  } finally {
+    stoppingTopUp.value = false;
+  }
+}
+
 // Retry-failed: activities that were attempted and failed carry a contentError
 // (and have no content). The activities store already streams these fields.
 const failedActivities = computed(() => activityStore.activities.filter((a) => a.contentError && !a.content));
@@ -510,14 +581,15 @@ const auditFlagged = computed(() =>
   (auditPlan.value?.activities || []).filter((a) => a.recommendation !== "keep-shared")
 );
 
-// Apply differentiation — pilot scoped to Noorani Qaida. Generates per-child
-// content variants, looping the bounded callable until nothing remains. Then
-// re-runs the audit so the list reflects the new state.
+// Apply differentiation — generates per-child content variants, looping the
+// bounded callable until nothing remains, then re-runs the audit so the list
+// reflects the new state. `types` narrows the run (e.g. just Noorani Qaida); an
+// empty array covers EVERY clubbed activity the audit flagged.
 const diffRunning = ref(false);
 const diffError = ref("");
 const diffProgress = ref("");
 const diffItems = ref([]);
-async function differentiateQaida() {
+async function differentiate(types = [], label = "activities") {
   diffRunning.value = true;
   diffError.value = "";
   diffItems.value = [];
@@ -528,14 +600,16 @@ async function differentiateQaida() {
     while (remaining > 0 && guard < 40) {
       // One activity per call: per-child content + image generation is slow, so a
       // small batch keeps each request comfortably under the function timeout.
-      const res = await differentiateActivities({ types: ["noorani_qaida"], limit: 1 });
+      const res = await differentiateActivities({ types, limit: 1 });
       if (res?.configured === false) { diffError.value = res.text || "Not configured."; break; }
       diffItems.value.push(...(res.items || []));
       remaining = Number(res.remaining) || 0;
-      diffProgress.value = `Differentiated ${diffItems.value.filter((i) => i.ok).length} activit${diffItems.value.filter((i) => i.ok).length === 1 ? "y" : "ies"}; ${remaining} remaining…`;
+      const done = diffItems.value.filter((i) => i.ok).length;
+      diffProgress.value = `Differentiated ${done} activit${done === 1 ? "y" : "ies"}; ${remaining} remaining…`;
       guard += 1;
     }
-    diffProgress.value = `Done — ${diffItems.value.filter((i) => i.ok).length} Noorani Qaida activit${diffItems.value.filter((i) => i.ok).length === 1 ? "y" : "ies"} now have per-child content.`;
+    const done = diffItems.value.filter((i) => i.ok).length;
+    diffProgress.value = `Done — ${done} ${label} activit${done === 1 ? "y" : "ies"} now have per-child content.`;
     await runAudit(); // refresh the flagged list
   } catch (e) {
     diffError.value = e?.message || "Differentiation failed.";
@@ -543,6 +617,8 @@ async function differentiateQaida() {
     diffRunning.value = false;
   }
 }
+const differentiateQaida = () => differentiate(["noorani_qaida"], "Noorani Qaida");
+const differentiateAllFlagged = () => differentiate([], "flagged");
 
 // ─── Progressive disclosure: power sections collapsed by default ─────────────
 const syllabusToolsEl = ref(null);
@@ -754,6 +830,7 @@ const statusGenerateLabel = computed(() => {
                   {{ COMPLEXITY_LABELS[a.complexityRank] || `R${a.complexityRank}` }}
                 </span>
                 <span v-if="a.coopMode" class="coop-badge">Co-op</span>
+                <ProviderBadge :provider="a.contentProvider" :model="a.contentModel" />
                 <button
                   type="button"
                   class="quick-view-btn"
@@ -865,6 +942,83 @@ const statusGenerateLabel = computed(() => {
           </div>
         </details>
 
+        <!-- A2. Generate more activities (creates NEW activities — distinct from
+             "Regenerate selected" in Content tools below, which only rewrites
+             content of activities that already exist) -->
+        <details v-if="regenTypes.length" class="power-section">
+          <summary>Generate more activities</summary>
+          <div class="power-body">
+            <p class="power-lede">
+              Adds brand-new activities of the type(s) you pick below — it does not change any
+              existing activity. (To rewrite existing activities instead, see "Regenerate only
+              certain activity types" in Content tools.)
+            </p>
+            <div class="rt-chips">
+              <button
+                v-for="t in regenTypes"
+                :key="t"
+                type="button"
+                class="rt-chip topup-chip"
+                :class="{ on: topUpTypes.includes(t) }"
+                :aria-pressed="topUpTypes.includes(t)"
+                :disabled="!canBuild"
+                @click="toggleTopUpType(t)"
+              >
+                <span class="rt-ico">{{ TYPE_ICONS[t] || "📝" }}</span>
+                {{ TYPE_LABELS[t] || t }}
+              </button>
+            </div>
+            <div class="rt-actions">
+              <label class="topup-count-label">
+                Add
+                <input type="number" v-model="topUpCount" min="1" max="12" class="qa-num" aria-label="How many new activities" :disabled="!canBuild" />
+                new activit{{ Number(topUpCount) === 1 ? "y" : "ies" }} per matching subject
+              </label>
+              <button
+                class="btn primary"
+                :disabled="!topUpTypes.length || startingTopUp || topUpRunning || topUpQueued || !canBuild"
+                @click="generateMoreActivities"
+              >
+                {{ startingTopUp ? "Starting…" : `Generate ${topUpCount || 4} new activities` }}
+              </button>
+              <button v-if="topUpTypes.length" class="rt-clear" type="button" @click="topUpTypes = []">Clear</button>
+            </div>
+
+            <div v-if="topUpRunData" class="progress-panel">
+              <div class="progress-header">
+                <span class="progress-title">New-activity progress</span>
+                <span class="progress-status" :class="topUpRunData.status">{{ topUpRunData.status }}</span>
+                <button
+                  v-if="topUpRunning || topUpQueued"
+                  class="btn-stop"
+                  type="button"
+                  :disabled="stoppingTopUp"
+                  @click="stopTopUp"
+                >{{ stoppingTopUp ? "Stopping…" : "Stop" }}</button>
+              </div>
+              <div class="subjects-progress">
+                <div
+                  v-for="s in topUpSubjectProgress"
+                  :key="s.id"
+                  class="subject-row"
+                  :class="statusClass(s.status)"
+                >
+                  <span class="status-icon">{{ statusIcon(s.status) }}</span>
+                  <span class="subject-name">{{ s.name }}</span>
+                  <span v-if="s.status === 'done'" class="subject-count">
+                    {{ s.activityCount }} / {{ s.targetActivityCount || "?" }} activities
+                  </span>
+                  <span v-if="s.status === 'error'" class="subject-err">{{ s.error }}</span>
+                </div>
+              </div>
+              <div v-if="topUpDone" class="progress-done">
+                ✓ Done — {{ topUpRunData.totalActivities }} activities total across the matched subjects.
+              </div>
+            </div>
+            <p v-if="topUpError" class="error">{{ topUpError }}</p>
+          </div>
+        </details>
+
         <!-- B. Content tools -->
         <details
           v-if="activityStore.activities.length && (!runData || runDone)"
@@ -948,6 +1102,7 @@ const statusGenerateLabel = computed(() => {
 
               <div v-if="regenTypes.length" class="regen-types">
                 <span class="rt-label">Or regenerate only certain activity types:</span>
+                <p class="rt-hint">Rewrites the content of activities that already exist — does not add new ones. (To add new activities instead, use "Generate more activities" in Syllabus tools above.)</p>
                 <div class="rt-chips">
                   <button
                     v-for="t in regenTypes"
@@ -1046,12 +1201,19 @@ const statusGenerateLabel = computed(() => {
                 <strong>{{ auditPlan.summary.toReview }}</strong> co-op skill activities to review.
               </p>
 
-              <!-- Pilot apply: differentiate Noorani Qaida into per-child content. -->
+              <!-- Apply: give each child their own level-paced version. The first
+                   button covers EVERY flagged (clubbed) activity; the second narrows
+                   to the original Noorani Qaida pilot. -->
               <div class="generate-all">
-                <span class="ga-count">Pilot: give each child their own level-paced version of the Noorani Qaida activities.</span>
-                <button class="btn primary" :disabled="diffRunning || auditRunning" @click="differentiateQaida">
-                  {{ diffRunning ? "Differentiating…" : "Differentiate Noorani Qaida" }}
-                </button>
+                <span class="ga-count">Give each child their own level-paced version of the flagged activities (one shared activity → per-child content, calendar &amp; scores intact).</span>
+                <div class="diff-btns">
+                  <button class="btn primary" :disabled="diffRunning || auditRunning || !auditPlan?.summary?.toSplit" @click="differentiateAllFlagged">
+                    {{ diffRunning ? "Differentiating…" : `Differentiate all flagged${auditPlan?.summary?.toSplit ? ` (${auditPlan.summary.toSplit})` : ""}` }}
+                  </button>
+                  <button class="btn secondary" :disabled="diffRunning || auditRunning" @click="differentiateQaida">
+                    Noorani Qaida only
+                  </button>
+                </div>
               </div>
               <p v-if="diffProgress" class="ga-started">{{ diffProgress }}</p>
               <p v-if="diffError" class="error">{{ diffError }}</p>
@@ -1133,6 +1295,7 @@ const statusGenerateLabel = computed(() => {
                     <span class="qv-chip">{{ quickViewActivity.subject }}</span>
                     <span v-if="quickViewActivity.durationMinutes" class="qv-chip">{{ quickViewActivity.durationMinutes }} min</span>
                     <span v-if="quickViewActivity.coopMode" class="qv-chip coop">Co-op</span>
+                    <ProviderBadge :provider="quickViewActivity.contentProvider" :model="quickViewActivity.contentModel" />
                   </div>
                 </div>
               </div>
@@ -1435,6 +1598,7 @@ const statusGenerateLabel = computed(() => {
 .bg-count { align-self: flex-end; font-size: 0.72rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
 .generate-all { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.9rem; padding-top: 0.85rem; border-top: 1px solid #eef2f7; }
 .ga-count { font-size: 0.85rem; color: #334155; }
+.diff-btns { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-left: auto; }
 .ga-done { font-size: 0.85rem; color: #15803d; }
 .ga-started { font-size: 0.82rem; color: #15803d; margin: 0.5rem 0 0; }
 .ga-hint { font-size: 0.78rem; color: #64748b; margin: 0.45rem 0 0; line-height: 1.5; }
@@ -1453,6 +1617,12 @@ const statusGenerateLabel = computed(() => {
 .rt-actions { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.6rem; }
 .rt-clear { border: none; background: none; color: #64748b; font-size: 0.8rem; cursor: pointer; text-decoration: underline; }
 .rt-clear:hover { color: #334155; }
+.rt-hint { font-size: 0.76rem; color: #94a3b8; margin: 0 0 0.6rem; line-height: 1.4; }
+
+/* Generate more activities (additive — blue accent distinguishes it from the
+   green "regenerate" chips so the two lookalike actions read differently at a glance) */
+.topup-chip.on { background: #1d4ed8; border-color: #1d4ed8; }
+.topup-count-label { font-size: 0.82rem; color: #64748b; display: flex; align-items: center; gap: 0.35rem; }
 
 /* Quick view drawer */
 .qv-overlay {

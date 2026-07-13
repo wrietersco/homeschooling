@@ -45,11 +45,12 @@ export function tipLineId(lang, text) {
 
 // Turn a section's items into the turn list speakSequence() expects, so the
 // whole section can be read aloud in order.
-export function tipSequence(lang, items, { rate = 0.95 } = {}) {
+export function tipSequence(lang, items, { rate = 0.95, contentKind = "tips" } = {}) {
   return (items || []).map((text) => ({
     text,
     lang,
     id: tipLineId(lang, text),
     rate,
+    contentKind,
   }));
 }

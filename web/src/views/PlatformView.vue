@@ -114,10 +114,10 @@ function fmtDate(ms) {
 // effective settings are prefilled; saving persists them.
 const AGENT_META = {
   guide: { label: "Guide", desc: "Read-only family Q&A assistant.", kind: "text" },
-  curriculum: { label: "Curriculum architect", desc: "Designs the 6-month plan.", kind: "text" },
-  syllabus: { label: "Syllabus builder", desc: "Generates the activity series.", kind: "text" },
-  content: { label: "Activity content", desc: "Writes per-activity verses / problems / steps.", kind: "text" },
-  scheduler: { label: "Planner scheduler", desc: "Auto-schedules activities onto the calendar.", kind: "text" },
+  curriculum: { label: "Curriculum architect", desc: "Designs the 6-month plan (Gemini, OpenAI, or Claude).", kind: "text" },
+  syllabus: { label: "Syllabus builder", desc: "Generates the activity series (Gemini, OpenAI, or Claude).", kind: "text" },
+  content: { label: "Activity content", desc: "Writes per-activity verses / problems / steps (Gemini, OpenAI, or Claude).", kind: "text" },
+  scheduler: { label: "Planner scheduler", desc: "Auto-schedules activities onto the calendar (Gemini, OpenAI, or Claude).", kind: "text" },
   brief: { label: "Knowledge brief", desc: "Writes the pedagogical brief grounding all agents.", kind: "text" },
   image: { label: "Storybook images", desc: "Generates story illustrations.", kind: "image" },
   tts: { label: "Text-to-speech", desc: "Reads words/phrases aloud (Gemini or OpenAI voices).", kind: "tts" },
@@ -136,12 +136,26 @@ const previewResults = ref({});
 const testingModels = ref(false);
 const testResults = ref([]);
 
+// Agents that can run on Gemini, OpenAI, or Claude. TTS has always been
+// switchable (Gemini/OpenAI only — Anthropic has no TTS API). curriculum,
+// syllabus, content, and scheduler are wired to all three text providers (their
+// callables pass gemini/openai/anthropic keys). Other text agents stay
+// Gemini-only until they're wired too, so nobody picks a model for a provider
+// that agent can't use yet.
+const PROVIDER_SWITCHABLE = new Set(["tts", "scheduler", "curriculum", "syllabus", "content"]);
+function providerSwitchable(k) { return PROVIDER_SWITCHABLE.has(k); }
+
 function agentMeta(k) { return AGENT_META[k] || { label: k, desc: "", kind: "text" }; }
-function ttsProvider(k) { return llmAgents.value[k]?.provider || "gemini"; }
+function agentProvider(k) { return llmAgents.value[k]?.provider || "gemini"; }
 function catalogFor(k) {
-  const list = modelCatalog.value[agentMeta(k).kind] || modelCatalog.value.text || [];
-  // TTS models span two providers; only show the ones for the selected provider.
-  if (agentMeta(k).kind === "tts") return list.filter((m) => (m.provider || "gemini") === ttsProvider(k));
+  const kind = agentMeta(k).kind;
+  const list = modelCatalog.value[kind] || modelCatalog.value.text || [];
+  // TTS + switchable text agents show only the selected provider's models.
+  if (kind === "tts") return list.filter((m) => (m.provider || "gemini") === agentProvider(k));
+  if (kind === "text") {
+    const prov = providerSwitchable(k) ? agentProvider(k) : "gemini";
+    return list.filter((m) => (m.provider || "gemini") === prov);
+  }
   return list;
 }
 // ── Qaida per-take TTS overrides (provider-aware) ─────────────────────────────
@@ -172,7 +186,7 @@ function voicesFor(k) {
   const m = selectedModel(k);
   if (m?.voices?.length) return m.voices;
   const byProvider = modelCatalog.value.voicesByProvider;
-  return (byProvider && byProvider[ttsProvider(k)]) || modelCatalog.value.voices || [];
+  return (byProvider && byProvider[agentProvider(k)]) || modelCatalog.value.voices || [];
 }
 // Switching a TTS agent's model may invalidate its voice — snap to a valid one.
 function onAgentModelChange(k) {
@@ -180,15 +194,17 @@ function onAgentModelChange(k) {
   const voices = voicesFor(k);
   if (llmAgents.value[k]?.voiceName && !voices.includes(llmAgents.value[k].voiceName)) llmAgents.value[k].voiceName = voices[0];
 }
-// On a provider switch, snap model + voice onto valid values for the new provider
-// so we never save a Gemini model/voice under OpenAI (or vice-versa).
-function onTtsProviderChange(k) {
+// On a provider switch, snap the model (and TTS voice) onto valid values for the
+// new provider so we never save a Gemini model/voice under OpenAI (or vice-versa).
+function onProviderChange(k) {
   const a = llmAgents.value[k];
   if (!a) return;
   const models = catalogFor(k);
   if (!models.some((m) => m.id === a.model)) a.model = (models.find((m) => m.recommended) || models[0])?.id || a.model;
-  const voices = voicesFor(k);
-  if (!voices.includes(a.voiceName)) a.voiceName = voices[0];
+  if (agentMeta(k).kind === "tts") {
+    const voices = voicesFor(k);
+    if (!voices.includes(a.voiceName)) a.voiceName = voices[0];
+  }
 }
 // Look up a catalog entry by capability bucket + id (null if it's a custom id).
 function modelById(kind, id) {
@@ -221,6 +237,13 @@ async function loadLlmConfig() {
     llmKeys.value = cfg.agentKeys || Object.keys(cfg.agents || {});
     llmDefault.value = { ...llmDefault.value, ...(cfg.default || {}) };
     llmAgents.value = cfg.agents || {};
+    // Switchable text agents need a concrete provider for the <select> to bind
+    // (TTS already carries one from its built-in default).
+    for (const k of llmKeys.value) {
+      if (providerSwitchable(k) && llmAgents.value[k] && !llmAgents.value[k].provider) {
+        llmAgents.value[k].provider = "gemini";
+      }
+    }
   } catch (e) {
     llmError.value = e?.message || "Could not load LLM config.";
   } finally {
@@ -275,7 +298,7 @@ async function runTestAllModels() {
   try {
     const r = await testAllModels();
     if (r?.configured === false) {
-      llmError.value = "Gemini API key is not configured.";
+      llmError.value = "No text-provider API key is configured (Gemini, OpenAI, or Anthropic).";
       return;
     }
     testResults.value = r?.results || [];
@@ -1205,12 +1228,14 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
           <h3 class="llm-h">{{ agentMeta(k).label }} <code class="agent-key">{{ k }}</code></h3>
           <p class="llm-desc muted">{{ agentMeta(k).desc }}</p>
 
-          <label v-if="agentMeta(k).kind === 'tts'">Provider
-            <select v-model="llmAgents[k].provider" @change="onTtsProviderChange(k)">
+          <label v-if="providerSwitchable(k)">Provider
+            <select v-model="llmAgents[k].provider" @change="onProviderChange(k)">
               <option value="gemini">Google Gemini</option>
               <option value="openai">OpenAI</option>
+              <option v-if="agentMeta(k).kind !== 'tts'" value="anthropic">Anthropic Claude</option>
             </select>
-            <small>OpenAI is billed per use (no free daily quota) — useful as a fallback when the Gemini TTS quota is spent. Requires the <code>OPENAI_API_KEY</code> secret.</small>
+            <small v-if="agentMeta(k).kind === 'tts'">OpenAI is billed per use (no free daily quota) — useful as a fallback when the Gemini TTS quota is spent. Requires the <code>OPENAI_API_KEY</code> secret.</small>
+            <small v-else>Run this agent on Google Gemini, OpenAI, or Anthropic Claude. OpenAI/Claude are billed per use; require the <code>OPENAI_API_KEY</code> / <code>ANTHROPIC_API_KEY</code> secret respectively.</small>
           </label>
 
           <label>Model ID
@@ -1276,8 +1301,8 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
             <select v-if="voicesFor(k).length" v-model="llmAgents[k].voiceName">
               <option v-for="v in voicesFor(k)" :key="v" :value="v">{{ v }}</option>
             </select>
-            <input v-else v-model="llmAgents[k].voiceName" type="text" :placeholder="ttsProvider(k) === 'openai' ? 'alloy' : 'Kore'" />
-            <small v-if="ttsProvider(k) === 'openai'">OpenAI voice, e.g. <code>alloy</code>, <code>nova</code>, <code>shimmer</code>.</small>
+            <input v-else v-model="llmAgents[k].voiceName" type="text" :placeholder="agentProvider(k) === 'openai' ? 'alloy' : 'Kore'" />
+            <small v-if="agentProvider(k) === 'openai'">OpenAI voice, e.g. <code>alloy</code>, <code>nova</code>, <code>shimmer</code>.</small>
             <small v-else>Gemini prebuilt voice, e.g. <code>Kore</code>, <code>Puck</code>, <code>Charon</code>.</small>
           </label>
 

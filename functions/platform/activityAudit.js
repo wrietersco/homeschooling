@@ -55,14 +55,26 @@ export function classifyActivity(activity = {}) {
   const coopMode = Boolean(activity.coopMode);
   const targets = Array.isArray(activity.targetChildren) ? activity.targetChildren.filter(Boolean) : [];
   const skillPaced = SKILL_PACED_TYPES.has(type);
-  const paced = skillPaced && !coopMode ? "individual" : "shared";
+
+  // The content plan's explicit individual-vs-shared axis (contentPlan.js material
+  // meta) is AUTHORITATIVE when set — it's a deliberate decision, not the
+  // type+coopMode heuristic we otherwise have to guess from (coopMode is set
+  // inconsistently by the syllabus agent, so we never trust it alone).
+  const targetingMode = str(activity.plan?.material?.targetingMode);
+  const pacedSource = targetingMode ? "plan" : "heuristic";
+  const paced = targetingMode
+    ? (targetingMode === "individual" ? "individual" : "shared")
+    : (skillPaced && !coopMode ? "individual" : "shared");
   const clubbed = paced === "individual" && targets.length > 1;
 
   let recommendation = "keep-shared";
   let rationale = "";
   if (clubbed) {
     recommendation = "split-per-child";
-    rationale = `${type} is individually paced but targets ${targets.length} children on one shared content blob — split into one activity per child and level each to that child's profile.`;
+    const basis = pacedSource === "plan"
+      ? `the content plan marks ${type} as individually paced`
+      : `${type} is individually paced`;
+    rationale = `${basis} but it targets ${targets.length} children on one shared content blob — split into one activity per child and level each to that child's profile.`;
   } else if (skillPaced && coopMode && targets.length > 1) {
     // Skill-paced AND flagged co-op: legitimate sometimes (shared recitation),
     // but worth a human glance — co-op on a per-pace skill can hide a mismatch.
@@ -80,6 +92,8 @@ export function classifyActivity(activity = {}) {
     coopMode,
     targetCount: targets.length,
     paced,
+    pacedSource,         // "plan" (explicit material meta) | "heuristic" (type+coop guess)
+    targetingMode,       // the raw plan value when set, else ""
     clubbed,
     recommendation,
     rationale,

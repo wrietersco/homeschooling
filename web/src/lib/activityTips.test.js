@@ -67,13 +67,16 @@ describe("activityTips", () => {
     it("maps items to speakSequence turns with stable, line-matching ids", () => {
       const seq = tipSequence("ur", ["ایک", "دو"]);
       expect(seq).toEqual([
-        { text: "ایک", lang: "ur", id: "ur::ایک", rate: 0.95 },
-        { text: "دو", lang: "ur", id: "ur::دو", rate: 0.95 },
+        { text: "ایک", lang: "ur", id: "ur::ایک", rate: 0.95, contentKind: "tips" },
+        { text: "دو", lang: "ur", id: "ur::دو", rate: 0.95, contentKind: "tips" },
       ]);
     });
     it("honours a custom rate and tolerates no items", () => {
       expect(tipSequence("en", ["go"], { rate: 0.8 })[0].rate).toBe(0.8);
       expect(tipSequence("ur")).toEqual([]);
+    });
+    it("honours a custom contentKind (e.g. the embedded story reads warmly, not as tips)", () => {
+      expect(tipSequence("en", ["go"], { contentKind: "story" })[0].contentKind).toBe("story");
     });
   });
 });

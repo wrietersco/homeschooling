@@ -21,7 +21,7 @@
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { resolveCaller } from "../lib/caller.js";
 import { runAgent } from "./runtime.js";
-import { resolveLlm } from "./agentConfig.js";
+import { resolveLlm, secretNameForProvider } from "./agentConfig.js";
 
 export const PLAN_VERSION = 1;
 
@@ -47,6 +47,13 @@ const RECORD_PLAN_DECLARATION = {
             objective: { type: "string", description: "One sentence: precisely what THIS activity teaches or achieves." },
             buildsOn: { type: "string", description: "Short: the prior activity/skill this one builds on." },
             keyContent: { type: "string", description: "The SPECIFIC content this activity must use so it never clashes with siblings — be concrete, e.g. 'Surah Al-Asr ayah 1-3', 'letters Alif to Jeem', 'addition within 10', the exact vocabulary set." },
+            // Material meta — how this activity's CONTENT behaves, so the
+            // scheduler can decide repetition counts and the differentiation
+            // audit knows whether to split per child or keep it shared.
+            repeatable: { type: "boolean", description: "true if the child repeats the SAME material across sessions to master it (memorisation: Qur'an / Qaida; drilling: times-tables). false for one-shot content used once (a story read once, a unique experiment or discussion)." },
+            repeatFrequency: { type: "string", description: "How often the same material recurs when repeatable: one of 'daily', 'weekly', 'biweekly', 'monthly'. Use 'once' when not repeatable." },
+            complexity: { type: "integer", description: "Intrinsic difficulty of THIS material, 1 (easiest) to 5 (hardest) — independent of its position in the arc." },
+            targetingMode: { type: "string", description: "'individual' if each child must work this material at their OWN level/pace (so it should be differentiated per child — most skill-paced memorisation, reading and maths); 'shared' if all targeted children genuinely do the same material together (co-op games, group discussion, shared listening)." },
           },
           required: ["activityId", "objective"],
         },
@@ -57,6 +64,37 @@ const RECORD_PLAN_DECLARATION = {
 };
 
 const str = (v) => (typeof v === "string" ? v.trim() : "");
+
+// ─── Material-meta normalizers ────────────────────────────────────────────────
+const REPEAT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "once"];
+const TARGETING_MODES = ["individual", "shared"];
+
+function normFrequency(v) {
+  const s = str(v).toLowerCase();
+  return REPEAT_FREQUENCIES.includes(s) ? s : "";
+}
+function normTargeting(v) {
+  const s = str(v).toLowerCase();
+  return TARGETING_MODES.includes(s) ? s : "";
+}
+function clampComplexity(v, fallback) {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n >= 1 && n <= 5 ? n : fallback;
+}
+
+// Build the material-meta block for one plan entry, with safe defaults. The
+// activity's complexity rank is the fallback for material complexity; an
+// unrecognised/blank targetingMode stays "" so the differentiation audit falls
+// back to its own type heuristic rather than trusting a hallucinated value.
+function sanitizeMaterial(entry, rank) {
+  const repeatable = entry?.repeatable === true;
+  return {
+    repeatable,
+    repeatFrequency: normFrequency(entry?.repeatFrequency) || (repeatable ? "daily" : "once"),
+    complexity: clampComplexity(entry?.complexity, rank),
+    targetingMode: normTargeting(entry?.targetingMode),
+  };
+}
 
 // Order activities the way a child progresses: by complexity rank, then creation.
 function orderActivities(list) {
@@ -72,13 +110,15 @@ export function sanitizeSubjectPlan(orderedActivities, captured) {
   const byId = new Map((Array.isArray(captured?.activities) ? captured.activities : []).map((e) => [str(e.activityId), e]));
   const activities = orderedActivities.map((a) => {
     const e = byId.get(a.id) || {};
+    const rank = Number(a.complexityRank) || 1;
     return {
       activityId: a.id,
       title: str(a.title) || "Activity",
-      rank: Number(a.complexityRank) || 1,
+      rank,
       objective: str(e.objective),
       buildsOn: str(e.buildsOn),
       keyContent: str(e.keyContent),
+      material: sanitizeMaterial(e, rank),
     };
   });
   return { coverage: str(captured?.coverage), activities };
@@ -94,12 +134,16 @@ export function buildPlanContextString(planDoc, activityId) {
     `${i + 1}. ${a.activityId === activityId ? "► " : ""}"${a.title}" — ${a.objective || "(objective tbd)"}${a.keyContent ? ` [covers: ${a.keyContent}]` : ""}`
   );
   const me = seq.find((a) => a.activityId === activityId);
+  const mat = me?.material;
+  const matHint = mat
+    ? `${mat.repeatable ? ` This material is repeated (${mat.repeatFrequency}) for mastery — make it worth revisiting.` : ""}${mat.targetingMode === "individual" ? " Pitch it to one child's level (it is individually paced)." : ""}`
+    : "";
   return [
     "SUBJECT LEARNING PLAN — weave THIS activity into the arc below. Do NOT duplicate what sibling activities cover; build on what comes before and set up what comes after.",
     planDoc.coverage ? `Overall arc: ${planDoc.coverage}` : "",
     "Full sequence (► marks the activity you are creating content for now):",
     ...lines,
-    me ? `\nYOUR ACTIVITY (►): ${me.objective || ""}${me.buildsOn ? ` Builds on: ${me.buildsOn}.` : ""}${me.keyContent ? ` Must cover EXACTLY: ${me.keyContent}.` : ""}` : "",
+    me ? `\nYOUR ACTIVITY (►): ${me.objective || ""}${me.buildsOn ? ` Builds on: ${me.buildsOn}.` : ""}${me.keyContent ? ` Must cover EXACTLY: ${me.keyContent}.` : ""}${matHint}` : "",
     "Deliver precisely this objective and content, and connect naturally to the steps immediately before and after.",
   ].filter(Boolean).join("\n");
 }
@@ -129,6 +173,7 @@ function buildPlanPrompt({ subjectName, macroGoals = [], contentOutline = "", gu
     ...activityLines,
     "",
     "For every activity set: a one-sentence objective, what it builds on, and the SPECIFIC content it must cover (be concrete — exact surah/ayah, exact letters, the math skill, the vocabulary set).",
+    "ALSO set each activity's material meta: repeatable (does the child repeat the SAME item to master it — memorisation/drilling — or is it one-shot), repeatFrequency, complexity (1-5 intrinsic difficulty), and targetingMode ('individual' = each child works it at their own level so it must be differentiated per child; 'shared' = all targeted children genuinely do it together). Skill-paced memorisation/reading/maths is usually 'individual'; co-op games and group discussion are 'shared'.",
     "Guarantee a rank 1→5 progression and that no two activities cover the same specific content unless it is deliberate revision.",
     "Call record_subject_plan exactly once. Write no prose outside the tool call.",
   ].filter(Boolean).join("\n");
@@ -167,7 +212,7 @@ export async function runSubjectPlan({ db, familyId, subjectId, subjectName, act
   const batch = db.batch();
   for (const e of plan.activities) {
     batch.update(db.collection("families").doc(familyId).collection("activities").doc(e.activityId), {
-      plan: { objective: e.objective, buildsOn: e.buildsOn, keyContent: e.keyContent },
+      plan: { objective: e.objective, buildsOn: e.buildsOn, keyContent: e.keyContent, material: e.material },
       planVersion: PLAN_VERSION,
     });
   }
@@ -244,15 +289,19 @@ export async function runContentPlanning({ db, familyId, uid, role = "owner", ll
 
 // ─── Callable ─────────────────────────────────────────────────────────────────
 export const requestContentPlanning = onCall(
-  { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 540 },
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 540 },
   async (request) => {
     const { db, uid, familyId, role } = await resolveCaller(request);
     if (!["owner", "parent"].includes(role)) {
       throw new HttpsError("permission-denied", "Only family owners or parents can plan content.");
     }
     const onlySubjectId = String(request.data?.subjectId || "").trim();
-    const { llm, genConfig } = await resolveLlm(db, "curriculum", process.env.GEMINI_API_KEY, { familyId, uid, source: "requestContentPlanning" });
-    if (!llm) return { configured: false, text: "The planning agent isn't configured — set the GEMINI_API_KEY secret to enable it." };
+    const { llm, genConfig, provider } = await resolveLlm(
+      db, "curriculum",
+      { gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY },
+      { familyId, uid, source: "requestContentPlanning" }
+    );
+    if (!llm) return { configured: false, text: `The planning agent isn't configured — set the ${secretNameForProvider(provider)} secret to enable it.` };
     const res = await runContentPlanning({ db, familyId, uid, role, llm, genConfig, onlySubjectId });
     return { configured: true, ...res };
   }

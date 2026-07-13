@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AGENT_KEYS, AGENT_DEFAULTS, mergeAgentConfig } from "../agents/agentConfig.js";
+import { AGENT_KEYS, AGENT_DEFAULTS, mergeAgentConfig, resolveTextProvider, effectiveTextModel, secretNameForProvider } from "../agents/agentConfig.js";
+import { DEFAULT_ANTHROPIC_MODEL } from "../agents/llm.js";
 
 test("AGENT_KEYS covers every configurable agent", () => {
   assert.deepEqual(AGENT_KEYS, ["guide", "curriculum", "syllabus", "content", "scheduler", "brief", "image", "tts"]);
@@ -62,8 +63,67 @@ test("mergeAgentConfig keeps the tts voiceName", () => {
   assert.equal(cfg.model, AGENT_DEFAULTS.tts.model);
 });
 
+test("mergeAgentConfig keeps the tts provider override (OpenAI round-trips)", () => {
+  // Regression: a saved OpenAI TTS override must survive a reload. Earlier the
+  // provider field was dropped on read/write, so the Platform screen reverted to
+  // Gemini even though the save "succeeded".
+  const doc = {
+    default: { model: "gemini-2.5-flash" }, // a "Save all agent settings" seeds this
+    agents: { tts: { provider: "openai", model: "gpt-4o-mini-tts", voiceName: "alloy" } },
+  };
+  const cfg = mergeAgentConfig(doc, "tts");
+  assert.equal(cfg.provider, "openai");
+  assert.equal(cfg.model, "gpt-4o-mini-tts"); // override beats the global text default
+  assert.equal(cfg.voiceName, "alloy");
+});
+
+test("mergeAgentConfig defaults the tts provider to gemini when unset", () => {
+  const cfg = mergeAgentConfig({ default: {}, agents: {} }, "tts");
+  assert.equal(cfg.provider, "gemini");
+});
+
 test("mergeAgentConfig ignores unknown / malformed fields", () => {
   const cfg = mergeAgentConfig({ default: { temperature: "not-a-number", junk: 1 }, agents: {} }, "guide");
   assert.equal(cfg.temperature, AGENT_DEFAULTS.guide.temperature); // bad value dropped
   assert.equal(cfg.junk, undefined);
+});
+
+test("resolveTextProvider: explicit provider wins", () => {
+  assert.equal(resolveTextProvider("openai", "gemini-2.5-flash"), "openai"); // explicit beats model id
+  assert.equal(resolveTextProvider("gemini", "gpt-4o-mini"), "gemini");
+  assert.equal(resolveTextProvider("anthropic", "gemini-2.5-flash"), "anthropic");
+});
+
+test("resolveTextProvider: infers from the model id when provider is unset", () => {
+  assert.equal(resolveTextProvider(undefined, "gpt-4o-mini"), "openai");
+  assert.equal(resolveTextProvider(undefined, "gpt-4.1"), "openai");
+  assert.equal(resolveTextProvider(undefined, "o3-mini"), "openai");
+  assert.equal(resolveTextProvider(undefined, "claude-sonnet-5"), "anthropic");
+  assert.equal(resolveTextProvider(undefined, "claude-opus-4-8"), "anthropic");
+  assert.equal(resolveTextProvider(undefined, "gemini-2.5-flash"), "gemini");
+  assert.equal(resolveTextProvider(undefined, undefined), "gemini"); // default
+  assert.equal(resolveTextProvider("", ""), "gemini");
+});
+
+test("effectiveTextModel: coerces a stale cross-provider model onto the provider's default", () => {
+  // The exact footgun: provider switched to OpenAI but the model still reads a
+  // Gemini id — sending that to OpenAI would 404. Coerce it to the OpenAI default.
+  assert.equal(effectiveTextModel("openai", "gemini-2.5-flash-lite"), "gpt-4o-mini");
+  assert.equal(effectiveTextModel("gemini", "gpt-4o-mini"), "gemini-2.5-flash");
+  assert.equal(effectiveTextModel("anthropic", "gemini-2.5-flash"), DEFAULT_ANTHROPIC_MODEL);
+  // A model that already fits the provider passes through unchanged.
+  assert.equal(effectiveTextModel("openai", "gpt-4o"), "gpt-4o");
+  assert.equal(effectiveTextModel("gemini", "gemini-2.5-pro"), "gemini-2.5-pro");
+  assert.equal(effectiveTextModel("anthropic", "claude-opus-4-8"), "claude-opus-4-8");
+  // Empty/missing → the provider default.
+  assert.equal(effectiveTextModel("openai", ""), "gpt-4o-mini");
+  assert.equal(effectiveTextModel("gemini", undefined), "gemini-2.5-flash");
+  assert.equal(effectiveTextModel("anthropic", undefined), DEFAULT_ANTHROPIC_MODEL);
+});
+
+test("secretNameForProvider maps each provider to its secret", () => {
+  assert.equal(secretNameForProvider("openai"), "OPENAI_API_KEY");
+  assert.equal(secretNameForProvider("anthropic"), "ANTHROPIC_API_KEY");
+  assert.equal(secretNameForProvider("gemini"), "GEMINI_API_KEY");
+  assert.equal(secretNameForProvider(undefined), "GEMINI_API_KEY");
 });

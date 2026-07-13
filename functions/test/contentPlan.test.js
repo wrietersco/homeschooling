@@ -50,3 +50,43 @@ test("buildPlanContextString returns empty string when there is no plan", () => 
   assert.equal(buildPlanContextString(null, "a1"), "");
   assert.equal(buildPlanContextString({ activities: [] }, "a1"), "");
 });
+
+test("sanitizeSubjectPlan captures material meta with sane normalization", () => {
+  const plan = sanitizeSubjectPlan(ORDERED, {
+    activities: [
+      { activityId: "a1", objective: "Memorise", repeatable: true, repeatFrequency: "Daily", complexity: 4, targetingMode: "Individual" },
+      { activityId: "a2", objective: "Read once", repeatable: false, repeatFrequency: "bogus", complexity: 99, targetingMode: "nonsense" },
+    ],
+  });
+  const [m1, m2] = plan.activities.map((a) => a.material);
+  // a1: valid values normalized (case-insensitive).
+  assert.deepEqual(m1, { repeatable: true, repeatFrequency: "daily", complexity: 4, targetingMode: "individual" });
+  // a2: repeatable false → frequency defaults to "once"; bad complexity falls back
+  // to the activity rank (2); unrecognised targetingMode → "" (audit heuristic).
+  assert.deepEqual(m2, { repeatable: false, repeatFrequency: "once", complexity: 2, targetingMode: "" });
+});
+
+test("sanitizeSubjectPlan defaults material meta when the agent omits it", () => {
+  const plan = sanitizeSubjectPlan(ORDERED, { activities: [{ activityId: "a1", objective: "x" }] });
+  // rank-1 activity, no meta → not repeatable, once, complexity=rank, no targeting.
+  assert.deepEqual(plan.activities[0].material, { repeatable: false, repeatFrequency: "once", complexity: 1, targetingMode: "" });
+});
+
+test("a repeatable entry with no frequency defaults to daily", () => {
+  const plan = sanitizeSubjectPlan(ORDERED, { activities: [{ activityId: "a1", objective: "x", repeatable: true }] });
+  assert.equal(plan.activities[0].material.repeatFrequency, "daily");
+});
+
+test("buildPlanContextString surfaces repeatable + individual material hints", () => {
+  const plan = sanitizeSubjectPlan(ORDERED, {
+    activities: [
+      { activityId: "a1", objective: "Recognise letters" },
+      { activityId: "a2", objective: "Memorise joining", repeatable: true, repeatFrequency: "weekly", targetingMode: "individual" },
+    ],
+  });
+  const ctx = buildPlanContextString(plan, "a2");
+  assert.match(ctx, /repeated \(weekly\) for mastery/);
+  assert.match(ctx, /individually paced/);
+  // The non-repeatable, non-individual sibling shows no material hint.
+  assert.doesNotMatch(buildPlanContextString(plan, "a1"), /repeated|individually paced/);
+});

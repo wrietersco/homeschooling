@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from "vue";
 import { useRoute } from "vue-router";
-import { doc, getDoc, collection, getDocs } from "firebase/firestore";
+import { doc, getDoc, collection, getDocs, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuthStore } from "@/stores/auth";
 import { createPlayerToken, submitScore, addObservation, updateBlockStatus } from "@/services/player";
@@ -9,6 +9,7 @@ import { generateActivityContent, deleteActivityContent } from "@/services/activ
 import { getActivityJourney } from "@/services/brief";
 import ActivityContent from "@/components/ActivityContent.vue";
 import SpeakButton from "@/components/SpeakButton.vue";
+import ProviderBadge from "@/components/ProviderBadge.vue";
 
 const route = useRoute();
 const auth = useAuthStore();
@@ -106,7 +107,14 @@ async function handleGenerateContent() {
       contentError.value = res.text || "Content generation isn't configured yet.";
       return;
     }
-    if (res?.content) activity.value.content = res.content;
+    if (res?.content) {
+      activity.value.content = res.content;
+      // No live Firestore listener on this page (just a one-time getDoc in
+      // onMounted), so the provider badge needs an explicit local patch — the
+      // callable now echoes back what it just persisted.
+      activity.value.contentProvider = res.contentProvider || "";
+      activity.value.contentModel = res.contentModel || "";
+    }
   } catch (e) {
     contentError.value = e?.message || "Failed to generate content.";
   } finally {
@@ -132,11 +140,35 @@ async function handleDeleteContent() {
   }
 }
 
-// Child link
-const generatingLink = ref(false);
-const playerLink = ref("");
+// Saved per-element voices. When a parent accepts a regenerated clip in the voice
+// picker, persist it on the activity (keyed by overrideKey) so it replays for everyone
+// — shared content, every child's variant, and child-player links — without being
+// charged again (the backend TTS cache already dedupes identical selections).
+const voiceSaveError = ref("");
+const voiceSavedAt = ref(0); // bumped on a successful save to flash a confirmation
+async function handleVoiceOverride({ key, provider, model, voiceName, url }) {
+  if (!activity.value || !key || !url) return;
+  const payload = { url, provider, model, voiceName };
+  voiceSaveError.value = "";
+  // Optimistic local update so the element plays the new voice immediately.
+  activity.value.audioOverrides = { ...(activity.value.audioOverrides || {}), [key]: payload };
+  try {
+    await updateDoc(
+      doc(db, "families", auth.familyId, "activities", activity.value.id),
+      { [`audioOverrides.${key}`]: payload }
+    );
+    voiceSavedAt.value = Date.now();
+  } catch (e) {
+    voiceSaveError.value = e?.message || "Couldn't save the voice.";
+  }
+}
+
+// Child link. Differentiated activities generate one link per child (keyed by
+// child id); undifferentiated ones use the single "all" key.
+const generatingKey = ref("");      // which link is currently generating
+const playerLinks = ref({});        // { [childId | "all"]: url }
 const linkError = ref("");
-const linkCopied = ref(false);
+const copiedKey = ref("");           // which link was just copied
 
 // Shareable activity URL — the per-activity page itself. Any guardian in the
 // same family can open it and view/edit per their permissions, so this is the
@@ -223,6 +255,15 @@ const previewChildName = computed(() =>
   children.value.find((c) => c.id === previewChildId.value)?.name || previewChildId.value
 );
 const previewLevel = computed(() => activity.value?.differentiatedLevels?.[previewChildId.value] || "");
+// Which provider/model wrote the CURRENTLY PREVIEWED content — the differentiated
+// pass's provider when a per-child variant is shown, else the shared generation's.
+const previewProvider = computed(() => {
+  const m = byChildMap.value;
+  if (m && previewChildId.value && m[previewChildId.value]) {
+    return { provider: activity.value?.differentiatedProvider || "", model: activity.value?.differentiatedModel || "" };
+  }
+  return { provider: activity.value?.contentProvider || "", model: activity.value?.contentModel || "" };
+});
 
 const hasCoopDriver = computed(() =>
   Object.values(scores.value).some((s) => s.isDriving)
@@ -234,33 +275,39 @@ function toggleDriver(childId) {
   }
 }
 
-async function generateLink() {
+// `child` (optional) generates a link scoped to one differentiated child; omit it
+// for the shared single link (key "all").
+async function generateLink(child) {
   if (!activity.value) return;
-  generatingLink.value = true;
+  const key = child?.id || "all";
+  generatingKey.value = key;
   linkError.value = "";
-  playerLink.value = "";
   try {
+    const forChild = child
+      ? { id: child.id, name: child.name || child.id, level: activity.value.differentiatedLevels?.[child.id] || "" }
+      : null;
     const token = await createPlayerToken(
       auth.familyId,
       activity.value,
       activity.value.targetChildren || [],
       blockId,
       dateKey,
-      auth.user?.uid
+      auth.user?.uid,
+      forChild
     );
-    playerLink.value = `${window.location.origin}/play/${token}`;
+    playerLinks.value = { ...playerLinks.value, [key]: `${window.location.origin}/play/${token}` };
   } catch (e) {
     linkError.value = e?.message || "Failed to generate link.";
   } finally {
-    generatingLink.value = false;
+    generatingKey.value = "";
   }
 }
 
-async function copyLink() {
+async function copyLink(key) {
   try {
-    await navigator.clipboard.writeText(playerLink.value);
-    linkCopied.value = true;
-    setTimeout(() => (linkCopied.value = false), 2000);
+    await navigator.clipboard.writeText(playerLinks.value[key]);
+    copiedKey.value = key;
+    setTimeout(() => { if (copiedKey.value === key) copiedKey.value = ""; }, 2000);
   } catch { /* clipboard blocked */ }
 }
 
@@ -392,7 +439,10 @@ async function handleSubmitObservation() {
       <!-- Activity content — generated automatically when the activity is created -->
       <section class="card">
         <div class="content-head">
-          <h2 class="card-h">Activity Content — {{ contentLabel }}</h2>
+          <h2 class="card-h">
+            Activity Content — {{ contentLabel }}
+            <ProviderBadge :provider="previewProvider.provider" :model="previewProvider.model" />
+          </h2>
           <!-- Content is generated automatically when the activity is created and
                on first open; manual controls let a parent regenerate or delete it. -->
           <div class="content-actions">
@@ -452,7 +502,15 @@ async function handleSubmitObservation() {
               <strong>{{ previewChildName }}’s level:</strong> {{ previewLevel }}
             </p>
           </div>
-          <ActivityContent :key="previewChildId || 'all'" :content="previewContent" />
+          <ActivityContent
+            :key="previewChildId || 'all'"
+            :content="previewContent"
+            :audio-overrides="activity.audioOverrides || {}"
+            :can-edit-voice="true"
+            @update:override="handleVoiceOverride"
+          />
+          <p v-if="voiceSaveError" class="field-error" role="alert">{{ voiceSaveError }}</p>
+          <p v-else-if="voiceSavedAt" class="voice-saved" role="status">✓ Voice saved — this element now plays it for everyone.</p>
         </div>
         <p v-else-if="generatingContent" class="card-desc generating">
           <span class="mini-spinner" aria-hidden="true"></span>
@@ -498,19 +556,47 @@ async function handleSubmitObservation() {
       <!-- Child link -->
       <section class="card">
         <h2 class="card-h">Child Link</h2>
-        <p class="card-desc">
-          Generate a link to open this activity on the child's device. The link expires in 8 hours.
-        </p>
-        <button class="btn primary" :disabled="generatingLink" @click="generateLink">
-          {{ generatingLink ? "Generating…" : "Generate child link" }}
-        </button>
-        <p v-if="linkError" class="field-error" role="alert">{{ linkError }}</p>
-        <div v-if="playerLink" class="link-box">
-          <input class="link-input" :value="playerLink" readonly />
-          <button class="btn secondary copy-btn" @click="copyLink">
-            {{ linkCopied ? "Copied!" : "Copy" }}
+
+        <!-- Differentiated: one link per child, each at the child's own level. -->
+        <template v-if="differentiatedChildren.length">
+          <p class="card-desc">
+            This activity is differentiated — generate a separate link for each child so
+            their device shows material at their own level. Links expire in 8 hours.
+          </p>
+          <div v-for="c in differentiatedChildren" :key="c.id" class="child-link-row">
+            <div class="cl-head">
+              <span class="cl-name">{{ c.name || c.id }}</span>
+              <span v-if="activity.differentiatedLevels?.[c.id]" class="cl-level">{{ activity.differentiatedLevels[c.id] }}</span>
+              <button class="btn primary cl-gen" :disabled="generatingKey === c.id" @click="generateLink(c)">
+                {{ generatingKey === c.id ? "Generating…" : (playerLinks[c.id] ? "Regenerate" : "Generate link") }}
+              </button>
+            </div>
+            <div v-if="playerLinks[c.id]" class="link-box">
+              <input class="link-input" :value="playerLinks[c.id]" readonly />
+              <button class="btn secondary copy-btn" @click="copyLink(c.id)">
+                {{ copiedKey === c.id ? "Copied!" : "Copy" }}
+              </button>
+            </div>
+          </div>
+        </template>
+
+        <!-- Undifferentiated: a single shared link. -->
+        <template v-else>
+          <p class="card-desc">
+            Generate a link to open this activity on the child's device. The link expires in 8 hours.
+          </p>
+          <button class="btn primary" :disabled="generatingKey === 'all'" @click="generateLink()">
+            {{ generatingKey === 'all' ? "Generating…" : "Generate child link" }}
           </button>
-        </div>
+          <div v-if="playerLinks.all" class="link-box">
+            <input class="link-input" :value="playerLinks.all" readonly />
+            <button class="btn secondary copy-btn" @click="copyLink('all')">
+              {{ copiedKey === 'all' ? "Copied!" : "Copy" }}
+            </button>
+          </div>
+        </template>
+
+        <p v-if="linkError" class="field-error" role="alert">{{ linkError }}</p>
       </section>
 
       <!-- Scoring -->
@@ -679,6 +765,13 @@ async function handleSubmitObservation() {
 .link-input { flex: 1; padding: 0.4rem 0.6rem; border: 1px solid #cbd5e1; border-radius: 6px; font: inherit; font-size: 0.82rem; color: #334155; background: #f8fafc; }
 .copy-btn { white-space: nowrap; }
 
+.child-link-row { padding: 0.75rem 0; border-top: 1px solid #eef2f6; }
+.child-link-row:first-of-type { border-top: none; }
+.cl-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.cl-name { font-weight: 600; color: #0f172a; }
+.cl-level { font-size: 0.78rem; color: #475569; background: #f1f5f9; border-radius: 999px; padding: 0.1rem 0.55rem; }
+.cl-gen { margin-left: auto; }
+
 /* Scoring */
 .score-rows { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.75rem; }
 .score-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.4rem 0; }
@@ -707,4 +800,5 @@ async function handleSubmitObservation() {
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .field-error { color: #b91c1c; font-size: 0.82rem; margin: 0.4rem 0; }
 .success-msg { color: #15803d; font-size: 0.85rem; margin: 0 0 0.5rem; }
+.voice-saved { color: #6d28d9; font-size: 0.82rem; margin: 0.5rem 0 0; }
 </style>

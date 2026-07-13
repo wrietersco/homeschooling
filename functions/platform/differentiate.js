@@ -20,12 +20,12 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { resolveCaller } from "../lib/caller.js";
 import { familyPaths } from "../lib/paths.js";
-import { resolveLlm } from "../agents/agentConfig.js";
+import { resolveLlm, secretNameForProvider, resolveTextProvider } from "../agents/agentConfig.js";
 import { runAgent } from "../agents/runtime.js";
 import { describeGuardian, summarizeChildPerformance } from "../agents/grounding.js";
 import { loadSubjectPlans, buildPlanContextString } from "../agents/contentPlan.js";
 import { generateContentForActivity } from "../agents/activityContent.js";
-import { SKILL_PACED_TYPES } from "./activityAudit.js";
+import { classifyActivity } from "./activityAudit.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
 
 const str = (v) => (typeof v === "string" ? v.trim() : "");
@@ -116,9 +116,25 @@ export async function inferSubjectLevels({ subjectName, children, childPerforman
 // ─── Apply: generate per-child content for clubbed skill-paced activities ──────
 // Bounded + resumable: processes up to `limit` not-yet-differentiated activities,
 // returns how many remain so the client can call again. Best-effort per activity.
-export async function runDifferentiation({ db, familyId, uid, types = ["noorani_qaida"], limit = 6, llm, genConfig }) {
+// Should this activity get per-child differentiation? It must be flagged "clubbed"
+// by the audit (individually paced yet serving >1 child on one shared blob),
+// not already differentiated, and — when `typeSet` is non-empty — of a requested
+// type. classifyActivity() is the single source of truth for "clubbed": it honours
+// the content plan's targetingMode when set and falls back to the type+co-op
+// heuristic otherwise, so this generalises cleanly beyond the Noorani-Qaida pilot.
+// Pure + exported for tests.
+export function isDifferentiationCandidate(activity, typeSet) {
+  if (!activity || activity.contentByChild) return false;
+  const set = typeSet instanceof Set ? typeSet : new Set(typeSet || []);
+  if (set.size > 0 && !set.has(activity.type)) return false;
+  return classifyActivity(activity).clubbed === true;
+}
+
+// `types` (optional) restricts to those activity types; pass an empty array (or
+// omit) to differentiate EVERY clubbed activity the audit flags, whatever its type.
+export async function runDifferentiation({ db, familyId, uid, types = [], limit = 6, llm, genConfig }) {
   const p = familyPaths(db, familyId);
-  const typeSet = new Set(types);
+  const typeSet = new Set((types || []).filter(Boolean));
 
   const [actSnap, childSnap, guardSnap, profileSnap] = await Promise.all([
     p.activities().limit(500).get(),
@@ -140,18 +156,17 @@ export async function runDifferentiation({ db, familyId, uid, types = ["noorani_
   const guidingLight = profileSnap.exists ? (profileSnap.data().guidingLight || "") : "";
   const childPerformance = await summarizeChildPerformance(db, familyId, children);
   const plans = await loadSubjectPlans(db, familyId);
+  // Same llm client for the whole run, so provider/model is one value, computed
+  // once rather than re-derived per child.
+  const differentiatedModel = llm?.model || "";
+  const differentiatedProvider = differentiatedModel ? resolveTextProvider(undefined, differentiatedModel) : "";
 
-  // Candidates: requested type, skill-paced, not co-op, >1 target, not already
-  // differentiated. Worst (lowest rank) first so the pilot covers the basics.
+  // Candidates: any activity the audit flags as "clubbed" that isn't already
+  // differentiated — optionally narrowed to requested types. Worst (lowest rank)
+  // first so the run covers the basics before the harder material.
   const candidates = actSnap.docs
     .map((d) => ({ id: d.id, ...d.data() }))
-    .filter((a) =>
-      typeSet.has(a.type) &&
-      SKILL_PACED_TYPES.has(a.type) &&
-      !a.coopMode &&
-      Array.isArray(a.targetChildren) && a.targetChildren.filter(Boolean).length > 1 &&
-      !a.contentByChild
-    )
+    .filter((a) => isDifferentiationCandidate(a, typeSet))
     .sort((a, b) => (Number(a.complexityRank) || 1) - (Number(b.complexityRank) || 1));
 
   const totalCandidates = candidates.length;
@@ -206,6 +221,8 @@ export async function runDifferentiation({ db, familyId, uid, types = ["noorani_
           differentiatedLevels: usedLevels,
           differentiatedAt: new Date(),
           differentiatedBy: uid,
+          differentiatedProvider,
+          differentiatedModel,
           differentiationError: perChildErrors.join("; "),
         });
         items.push({
@@ -227,23 +244,28 @@ export async function runDifferentiation({ db, familyId, uid, types = ["noorani_
   return { total: totalCandidates, processed: batch.length, generated: succeeded, remaining: Math.max(0, totalCandidates - succeeded), items };
 }
 
-// Callable — owner/parent run the differentiation (pilot defaults to Noorani
-// Qaida). Bounded per call; the client re-invokes until remaining hits 0.
+// Callable — owner/parent run the differentiation. With no `types` it covers
+// EVERY clubbed activity the audit flags; pass `types` to narrow it (e.g. just
+// Noorani Qaida). Bounded per call; the client re-invokes until remaining hits 0.
 export const differentiateActivities = onCall(
-  { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 540 },
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 540 },
   async (request) => {
     const { db, uid, familyId, role } = await resolveCaller(request);
     if (!["owner", "parent"].includes(role)) {
       throw new HttpsError("permission-denied", "Only family owners or parents can differentiate activities.");
     }
     await enforceDailyLimit(db, familyId, "content"); // shares the content gen budget
-    const types = Array.isArray(request.data?.types) && request.data.types.length
+    const types = Array.isArray(request.data?.types)
       ? request.data.types.map((t) => String(t || "").trim()).filter(Boolean).slice(0, 12)
-      : ["noorani_qaida"];
+      : [];
     const limit = Math.min(8, Math.max(1, Number(request.data?.limit) || 4));
 
-    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, source: "differentiateActivities" });
-    if (!llm) return { configured: false, text: "Content generation isn't configured — set the GEMINI_API_KEY secret to enable it." };
+    const { llm, genConfig, provider } = await resolveLlm(
+      db, "content",
+      { gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY },
+      { familyId, uid, source: "differentiateActivities" }
+    );
+    if (!llm) return { configured: false, text: `Content generation isn't configured — set the ${secretNameForProvider(provider)} secret to enable it.` };
 
     const res = await runDifferentiation({ db, familyId, uid, types, limit, llm, genConfig });
     return { configured: true, ...res };

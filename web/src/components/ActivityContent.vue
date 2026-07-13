@@ -12,16 +12,47 @@
 // Reading kinds (quran/story) get an enlarge/shrink font control. Voice is
 // available at word, sentence, verse, and paragraph levels (Arabic qirat-assist
 // + other languages) via SpeakButton.
-import { ref, computed } from "vue";
+import { ref, computed, toRef, provide } from "vue";
 import SpeakButton from "@/components/SpeakButton.vue";
+import VoicePicker from "@/components/VoicePicker.vue";
+import SceneVoicePicker from "@/components/SceneVoicePicker.vue";
 import { useSpeech } from "@/composables/useSpeech";
+import { useQaidaLibrary } from "@/composables/useQaidaLibrary";
 import { buildTipsSections, tipsLangFor, tipLineId, tipSequence } from "@/lib/activityTips";
+import { TTS_OVERRIDES, overrideKey } from "@/lib/ttsOverrides";
+import { splitBismillahWords, splitBismillahText } from "@/lib/bismillah";
 
 const props = defineProps({
   content: { type: Object, required: true },
+  // Saved per-element voices, keyed by overrideKey(text, lang). Read on playback;
+  // the parent view also lets the user add to it via the voice picker.
+  audioOverrides: { type: Object, default: () => ({}) },
+  // True in the parent activity view (shows the voice picker); false in the child
+  // player (saved voices still play, but they can't be changed there).
+  canEditVoice: { type: Boolean, default: false },
+});
+const emit = defineEmits(["update:override"]);
+
+// Saved-voice context consumed by SpeakButton (and the Qaida glyph tiles below).
+const overrideFor = (text, lang) => props.audioOverrides?.[overrideKey(text, lang)] || null;
+function saveOverride(text, lang, payload) {
+  emit("update:override", { key: overrideKey(text, lang), text, lang, ...payload });
+}
+provide(TTS_OVERRIDES, {
+  overrideFor,
+  get canEditVoice() { return props.canEditVoice; },
+  saveOverride,
 });
 
+// Which Qaida glyph's voice picker is open (by overrideKey), or "" for none.
+const openGlyphPicker = ref("");
+
 const { speak, speakSequence, sequenceIndex, speakingId, playAudio, loadingId, ttsLogs, lastError } = useSpeech();
+
+// Resolve each Qaida glyph's CURRENT recording live from the shared library (by
+// materialRef), so activities pick up audio as it's voiced over time — no
+// regeneration. Falls back to the embedded snapshot, then TTS.
+const { liveAudioUrl, liveSpellScript } = useQaidaLibrary(toRef(props, "content"));
 
 const kind = computed(() => props.content?.kind || "steps");
 const primaryLang = computed(() => props.content?.primaryLang || "en");
@@ -53,13 +84,61 @@ function fontClassFor(lang) {
   return "";
 }
 
+// The verified source fuses the Bismillah onto the Arabic text of a surah's
+// first ayah (Uthmani mushaf convention). Peel it off per row so the reading
+// view can show it as its own centered line, separate from the ayah — and so
+// the "Recite ayah" button / word taps only cover the real ayah, not a repeat
+// of the Bismillah. `vi` indexes the flat verses array, which may span more
+// than one surah (e.g. a combined Al-Ikhlas + An-Nas activity), so "first ayah
+// of its surah" is re-checked at every row, not just vi === 0.
+const quranRows = computed(() => {
+  const verses = props.content?.quran?.verses || [];
+  return verses.map((original, vi) => {
+    const isFirstOfSurah = vi === 0 || verses[vi - 1]?.surah !== original.surah;
+    let bismillah = null;
+    let v = original;
+    if (isFirstOfSurah) {
+      if (original.words?.length) {
+        const { bismillahWords, verseWords } = splitBismillahWords(original.words);
+        if (bismillahWords.length) {
+          bismillah = { arabic: bismillahWords.map((w) => w.arabic).join(" ") };
+          v = { ...original, words: verseWords, arabic: verseWords.map((w) => w.arabic).join(" ") };
+        }
+      } else {
+        const { bismillah: text, verse: rest } = splitBismillahText(original.arabic);
+        if (text) { bismillah = { arabic: text }; v = { ...original, arabic: rest }; }
+      }
+    }
+    return { v, vi, bismillah };
+  });
+});
+
 // Recite a single Quran word — real qirat audio if present, else TTS.
 function reciteWord(w) {
   if (w.audioUrl) {
-    playAudio(w.audioUrl, { onError: () => speak(w.arabic, "ar", { rate: 0.75 }) });
+    playAudio(w.audioUrl, { onError: () => speak(w.arabic, "ar", { rate: 0.75, contentKind: "quran" }) });
   } else {
-    speak(w.arabic, "ar", { rate: 0.75 });
+    speak(w.arabic, "ar", { rate: 0.75, contentKind: "quran" });
   }
+}
+
+// Recite a Qaida glyph — a saved custom voice (from the voice picker) wins; else the
+// curated spell-out recording from the shared nooraniQaida library (resolved LIVE by
+// materialRef, so it appears as soon as the platform voices it); else TTS of the raw
+// glyph.
+function reciteGlyph(it, lang) {
+  const url = overrideFor(it.text, lang)?.url || liveAudioUrl(it);
+  if (url) {
+    playAudio(url, { onError: () => speak(it.text, lang, { rate: 0.8, contentKind: "qaida" }) });
+  } else {
+    speak(it.text, lang, { rate: 0.8, contentKind: "qaida" });
+  }
+}
+
+// Save an accepted voice for a glyph and close its picker.
+function onGlyphVoice(it, lang, payload) {
+  saveOverride(it.text, lang, payload);
+  openGlyphPicker.value = "";
 }
 
 // Professional Arabic now comes from Gemini TTS (server), so we no longer warn
@@ -106,15 +185,37 @@ const dialogueVoices = computed(() => {
   return map;
 });
 function voiceForTurn(t) { return dialogueVoices.value[t.speaker || t.role || "?"] || ""; }
+// "Play whole scene" must sound the same as tapping each line individually — a
+// turn with a saved custom voice (from that line's caret) plays it here too,
+// instead of always falling back to the default per-character palette voice.
 function playScene() {
   const turns = (props.content?.dialogue?.turns || []).map((t, i) => ({
     text: t.text,
     lang: dialogueLang.value,
     voiceName: voiceForTurn(t),
+    audioUrl: overrideFor(t.text, dialogueLang.value)?.url || "",
     id: `turn-${i}`,
     rate: 0.95,
+    contentKind: "dialogue",
   }));
   speakSequence(turns);
+}
+
+// Scene-wide voice picker ("Play whole scene" caret): lets a parent choose one
+// voice per CHARACTER and generate + save every line that character speaks in
+// one action, instead of opening each line's own picker individually.
+const sceneVoicePickerOpen = ref(false);
+const dialogueTurnsForPicker = computed(() =>
+  (props.content?.dialogue?.turns || []).map((t) => ({
+    speaker: t.speaker || t.role || "?",
+    text: t.text,
+    lang: dialogueLang.value,
+  }))
+);
+function onSceneVoicesAccepted(items) {
+  for (const item of items) {
+    saveOverride(item.text, item.lang, { provider: item.provider, model: item.model, voiceName: item.voiceName, url: item.url });
+  }
 }
 
 // ─── Flashcards (legacy) ──────────────────────────────────────────────────────
@@ -169,7 +270,15 @@ const tipsDiscussion = computed(() =>
   (props.content?.tips?.discussionQuestions || []).filter((q) => typeof q === "string" && q.trim())
 );
 function lineId(text) { return tipLineId(tipsLang.value, text); }
-function playSection(items) { speakSequence(tipSequence(tipsLang.value, items)); }
+// Same as playScene: a line with a saved custom voice plays it here too, not
+// just when tapped individually.
+function playSection(items) {
+  const turns = tipSequence(tipsLang.value, items).map((t) => ({
+    ...t,
+    audioUrl: overrideFor(t.text, tipsLang.value)?.url || "",
+  }));
+  speakSequence(turns);
+}
 </script>
 
 <template>
@@ -214,34 +323,40 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
       </div>
       <p class="ac-hint">Tap any word to hear it recited, or use “Recite ayah” for the whole verse.</p>
 
-      <div v-for="(v, vi) in content.quran.verses" :key="vi" class="ayah">
-        <div class="ayah-tools">
-          <span class="ayah-num">{{ vi + 1 }}</span>
-          <SpeakButton :text="v.arabic" lang="ar" :audio-url="v.audioUrl" size="md" label="Recite ayah" :rate="0.8" />
+      <template v-for="row in quranRows" :key="row.vi">
+        <div v-if="row.bismillah" class="bismillah-line">
+          <SpeakButton :text="row.bismillah.arabic" lang="ar" size="sm" label="Bismillah" content-kind="quran" />
+          <p class="bismillah-arabic font-arabic" :style="{ fontSize: (1.5 * fontScale) + 'rem' }">{{ row.bismillah.arabic }}</p>
         </div>
-        <p class="ayah-arabic font-arabic" :style="{ fontSize: (2 * fontScale) + 'rem' }">
-          <template v-if="v.words && v.words.length">
-            <span
-              v-for="(w, wi) in v.words"
-              :key="wi"
-              class="ayah-word"
-              :class="{ 'with-gloss': showMeaning }"
-              :title="w.transliteration ? `${w.transliteration} — tap to recite` : 'tap to recite'"
-              @click="reciteWord(w)"
-            >
-              <span class="aw-ar">{{ w.arabic }}</span>
-              <span v-if="showMeaning" class="aw-gloss">
-                <span v-if="w.transliteration" class="aw-tr">{{ w.transliteration }}</span>
-                <span v-if="w.en" class="aw-en">{{ w.en }}</span>
-                <span v-if="w.ur" class="aw-ur font-urdu">{{ w.ur }}</span>
+        <div class="ayah">
+          <div class="ayah-tools">
+            <span class="ayah-num">{{ row.v.ayah || row.vi + 1 }}</span>
+            <SpeakButton :text="row.v.arabic" lang="ar" :audio-url="row.v.audioUrl" size="md" label="Recite ayah" :rate="0.8" content-kind="quran" />
+          </div>
+          <p class="ayah-arabic font-arabic" :style="{ fontSize: (2 * fontScale) + 'rem' }">
+            <template v-if="row.v.words && row.v.words.length">
+              <span
+                v-for="(w, wi) in row.v.words"
+                :key="wi"
+                class="ayah-word"
+                :class="{ 'with-gloss': showMeaning }"
+                :title="w.transliteration ? `${w.transliteration} — tap to recite` : 'tap to recite'"
+                @click="reciteWord(w)"
+              >
+                <span class="aw-ar">{{ w.arabic }}</span>
+                <span v-if="showMeaning" class="aw-gloss">
+                  <span v-if="w.transliteration" class="aw-tr">{{ w.transliteration }}</span>
+                  <span v-if="w.en" class="aw-en">{{ w.en }}</span>
+                  <span v-if="w.ur" class="aw-ur font-urdu">{{ w.ur }}</span>
+                </span>
               </span>
-            </span>
-          </template>
-          <template v-else>{{ v.arabic }}</template>
-        </p>
-        <p v-if="v.transliteration" class="ayah-translit" :style="{ fontSize: (0.95 * fontScale) + 'rem' }">{{ v.transliteration }}</p>
-        <p v-if="v.translation" class="ayah-translation" :style="{ fontSize: (1 * fontScale) + 'rem' }">{{ v.translation }}</p>
-      </div>
+            </template>
+            <template v-else>{{ row.v.arabic }}</template>
+          </p>
+          <p v-if="row.v.transliteration" class="ayah-translit" :style="{ fontSize: (0.95 * fontScale) + 'rem' }">{{ row.v.transliteration }}</p>
+          <p v-if="row.v.translation" class="ayah-translation" :style="{ fontSize: (1 * fontScale) + 'rem' }">{{ row.v.translation }}</p>
+        </div>
+      </template>
     </div>
 
     <!-- ─── QAIDA EXERCISES ────────────────────────────────────────── -->
@@ -250,21 +365,40 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
         <h3 class="qaida-title">{{ ex.title }}</h3>
         <p class="qaida-instruction">{{ ex.instruction }}</p>
         <div class="glyph-grid">
-          <button
-            v-for="(it, ii) in ex.items"
-            :key="ii"
-            type="button"
-            class="glyph"
-            :title="it.hint || it.transliteration || 'Recite'"
-            @click="speak(it.text, ex.lang || primaryLang, { rate: 0.8 })"
-          >
-            <img v-if="it.image && it.image.url" :src="it.image.url" :alt="it.image.alt || it.text" class="glyph-pic" loading="lazy" />
-            <span class="glyph-text" :class="fontClassFor(ex.lang || primaryLang)" :style="{ fontSize: (1.8 * fontScale) + 'rem' }">{{ it.text }}</span>
-            <span v-if="it.transliteration" class="glyph-translit">{{ it.transliteration }}</span>
-            <span v-if="showMeaning && it.en" class="glyph-en">{{ it.en }}</span>
-            <span v-if="showMeaning && it.ur" class="glyph-ur font-urdu">{{ it.ur }}</span>
-            <span class="glyph-ico">🔊</span>
-          </button>
+          <div v-for="(it, ii) in ex.items" :key="ii" class="glyph-cell">
+            <button
+              type="button"
+              class="glyph"
+              :class="{ 'glyph-lib': liveAudioUrl(it), 'glyph-saved': overrideFor(it.text, ex.lang || primaryLang) }"
+              :title="liveSpellScript(it) || it.hint || it.transliteration || 'Recite'"
+              @click="reciteGlyph(it, ex.lang || primaryLang)"
+            >
+              <img v-if="it.image && it.image.url" :src="it.image.url" :alt="it.image.alt || it.text" class="glyph-pic" loading="lazy" />
+              <span class="glyph-text" :class="fontClassFor(ex.lang || primaryLang)" :style="{ fontSize: (1.8 * fontScale) + 'rem' }">{{ it.text }}</span>
+              <span v-if="it.transliteration" class="glyph-translit">{{ it.transliteration }}</span>
+              <span v-if="liveSpellScript(it)" class="glyph-spell">{{ liveSpellScript(it) }}</span>
+              <span v-if="showMeaning && it.en" class="glyph-en">{{ it.en }}</span>
+              <span v-if="showMeaning && it.ur" class="glyph-ur font-urdu">{{ it.ur }}</span>
+              <span class="glyph-ico">{{ overrideFor(it.text, ex.lang || primaryLang) ? '🎙️' : (liveAudioUrl(it) ? '🎧' : '🔊') }}</span>
+            </button>
+            <button
+              v-if="canEditVoice && it.text"
+              type="button"
+              class="glyph-voice"
+              :aria-label="`Change voice for: ${it.text}`"
+              :aria-expanded="openGlyphPicker === overrideKey(it.text, ex.lang || primaryLang)"
+              title="Change voice"
+              @click.stop="openGlyphPicker = openGlyphPicker === overrideKey(it.text, ex.lang || primaryLang) ? '' : overrideKey(it.text, ex.lang || primaryLang)"
+            >▾</button>
+            <VoicePicker
+              v-if="openGlyphPicker === overrideKey(it.text, ex.lang || primaryLang)"
+              :text="it.text"
+              :lang="ex.lang || primaryLang"
+              content-kind="qaida"
+              @accept="onGlyphVoice(it, ex.lang || primaryLang, $event)"
+              @close="openGlyphPicker = ''"
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -273,7 +407,25 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
     <div v-else-if="kind === 'dialogue' && content.dialogue" class="dialogue">
       <div class="dialogue-head">
         <h3 class="dialogue-title">{{ content.dialogue.title }}</h3>
-        <button type="button" class="scene-btn" @click="playScene">▶ Play whole scene</button>
+        <div class="scene-actions">
+          <button type="button" class="scene-btn" @click="playScene">▶ Play whole scene</button>
+          <button
+            v-if="canEditVoice"
+            type="button"
+            class="scene-voice-btn"
+            aria-label="Choose voices for the whole scene"
+            :aria-expanded="sceneVoicePickerOpen"
+            title="Choose voices for the whole scene"
+            @click.stop="sceneVoicePickerOpen = !sceneVoicePickerOpen"
+          >▾</button>
+          <SceneVoicePicker
+            v-if="sceneVoicePickerOpen"
+            :turns="dialogueTurnsForPicker"
+            content-kind="dialogue"
+            @accept="onSceneVoicesAccepted"
+            @close="sceneVoicePickerOpen = false"
+          />
+        </div>
       </div>
       <p v-if="content.dialogue.scenario" class="dialogue-scenario">{{ content.dialogue.scenario }}</p>
       <p class="ac-hint">Each character has its own voice — tap a line to hear it, or play the whole scene.</p>
@@ -289,7 +441,7 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
           <div class="turn-bubble">
             <div class="turn-line" :class="{ rtl: isRtlLang(content.dialogue.lang || primaryLang) }">
               <p class="turn-text" :class="fontClassFor(content.dialogue.lang || primaryLang)" :style="{ fontSize: (1.1 * fontScale) + 'rem' }">{{ t.text }}</p>
-              <SpeakButton :text="t.text" :lang="content.dialogue.lang || primaryLang" :voice-name="voiceForTurn(t)" size="sm" label="Play" />
+              <SpeakButton :text="t.text" :lang="content.dialogue.lang || primaryLang" :voice-name="voiceForTurn(t)" size="sm" label="Play" content-kind="dialogue" />
             </div>
             <p v-if="t.transliteration" class="turn-tr">{{ t.transliteration }}</p>
             <p v-if="showMeaning && t.en" class="turn-en">{{ t.en }}</p>
@@ -303,7 +455,7 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
     <div v-else-if="(kind === 'story' || kind === 'reading') && content.story" class="story">
       <div class="story-head">
         <h3 class="story-title">{{ content.story.title }}</h3>
-        <SpeakButton :text="content.story.paragraphs.join(' ')" :lang="content.story.lang || primaryLang" size="md" label="Read whole story" :rate="0.9" />
+        <SpeakButton :text="content.story.paragraphs.join(' ')" :lang="content.story.lang || primaryLang" size="md" label="Read whole story" :rate="0.9" content-kind="story" />
       </div>
 
       <img
@@ -326,8 +478,13 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
               loading="lazy"
             />
             <div class="vocab-text">
-              <SpeakButton :text="v.word" :lang="content.story.lang || primaryLang" size="sm" />
-              <strong class="vocab-word">{{ v.word }}</strong>
+              <SpeakButton :text="v.word" :lang="content.story.lang || primaryLang" size="sm" content-kind="vocab" />
+              <strong
+                class="vocab-word"
+                :class="fontClassFor(content.story.lang || primaryLang)"
+                :dir="isRtlLang(content.story.lang || primaryLang) ? 'rtl' : 'ltr'"
+                :style="{ fontSize: (1.4 * fontScale) + 'rem' }"
+              >{{ v.word }}</strong>
               <span class="vocab-meaning">— {{ v.meaning }}</span>
             </div>
           </li>
@@ -337,17 +494,17 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
       <div class="passage" :class="[fontClassFor(content.story.lang || primaryLang), { rtl: /^(ar|ur|fa)/.test((content.story.lang || primaryLang).toLowerCase()) }]">
         <div v-for="(para, pi) in storyParagraphs" :key="pi" class="para">
           <div class="para-tools">
-            <SpeakButton :text="para.text" :lang="content.story.lang || primaryLang" size="md" label="Paragraph" :rate="0.9" />
+            <SpeakButton :text="para.text" :lang="content.story.lang || primaryLang" size="md" label="Paragraph" :rate="0.9" content-kind="story" />
           </div>
           <p class="para-body" :style="{ fontSize: (1.15 * fontScale) + 'rem' }">
             <span v-for="(sent, si) in para.sentences" :key="si" class="sentence">
-              <SpeakButton :text="sent.text" :lang="content.story.lang || primaryLang" size="sm" :rate="0.85" />
+              <SpeakButton :text="sent.text" :lang="content.story.lang || primaryLang" size="sm" :rate="0.85" content-kind="story" />
               <span
                 v-for="(word, wi) in sent.words"
                 :key="wi"
                 class="word"
                 :title="`Tap to hear: ${word}`"
-                @click="speak(word, content.story.lang || primaryLang, { rate: 0.8 })"
+                @click="speak(word, content.story.lang || primaryLang, { rate: 0.8, contentKind: 'story' })"
               >{{ word }}</span>
             </span>
           </p>
@@ -372,8 +529,8 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
       <ol class="problem-list">
         <li v-for="(p, pi) in content.problems" :key="pi" class="problem">
           <div class="problem-q-row">
-            <span class="problem-q">{{ p.question }}</span>
-            <SpeakButton :text="p.question" :lang="primaryLang" size="sm" />
+            <span class="problem-q" :class="{ 'problem-q-vertical': p.question.includes('\n') }">{{ p.question }}</span>
+            <SpeakButton :text="p.question" :lang="primaryLang" size="sm" content-kind="instructional" />
           </div>
           <div class="problem-actions">
             <button v-if="p.hint" type="button" class="mini-btn" @click="revealHint[pi] = !revealHint[pi]">
@@ -408,7 +565,7 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
         <li v-for="(s, si) in content.worksheet.steps" :key="si" class="ws-step">
           <div class="ws-step-row">
             <span class="ws-step-text">{{ s.instruction }}</span>
-            <SpeakButton :text="s.instruction" :lang="primaryLang" size="sm" />
+            <SpeakButton :text="s.instruction" :lang="primaryLang" size="sm" content-kind="instructional" />
           </div>
           <p v-if="s.detail" class="ws-step-detail">{{ s.detail }}</p>
         </li>
@@ -430,7 +587,7 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
           <div class="fc-inner">
             <div class="fc-face fc-front">
               <div class="fc-top-tools" @click.stop>
-                <SpeakButton :text="card.front" :lang="card.frontLang || primaryLang" size="md" label="Listen" />
+                <SpeakButton :text="card.front" :lang="card.frontLang || primaryLang" size="md" label="Listen" content-kind="vocab" />
               </div>
               <p class="fc-front-text" :class="[fontClassFor(card.frontLang || primaryLang), { rtl: /^(ar|ur|fa)/.test((card.frontLang || primaryLang).toLowerCase()) }]">{{ card.front }}</p>
               <p v-if="card.transliteration" class="fc-translit">{{ card.transliteration }}</p>
@@ -438,7 +595,7 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
             </div>
             <div class="fc-face fc-back">
               <div class="fc-top-tools" @click.stop>
-                <SpeakButton :text="card.back" :lang="card.backLang || 'en'" size="md" label="Listen" />
+                <SpeakButton :text="card.back" :lang="card.backLang || 'en'" size="md" label="Listen" content-kind="vocab" />
               </div>
               <p class="fc-back-text">{{ card.back }}</p>
               <p v-if="card.note" class="fc-note">💡 {{ card.note }}</p>
@@ -455,12 +612,12 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
       <div v-if="tipsStory" class="tips-story">
         <div class="story-head">
           <h3 class="story-title" :class="fontClassFor(tipsStory.lang || tipsLang)">{{ tipsStory.title || "Story" }}</h3>
-          <SpeakButton :text="tipsStoryReadText" :lang="tipsStory.lang || tipsLang" size="md" label="Read aloud" :rate="0.9" />
+          <SpeakButton :text="tipsStoryReadText" :lang="tipsStory.lang || tipsLang" size="md" label="Read aloud" :rate="0.9" content-kind="story" />
         </div>
         <div class="passage" :class="[fontClassFor(tipsStory.lang || tipsLang), { rtl: isRtlLang(tipsStory.lang || tipsLang) }]">
           <div v-for="(para, pi) in tipsStory.paragraphs" :key="pi" class="para">
             <div class="para-tools">
-              <SpeakButton :text="para" :lang="tipsStory.lang || tipsLang" size="sm" label="Paragraph" :rate="0.9" />
+              <SpeakButton :text="para" :lang="tipsStory.lang || tipsLang" size="sm" label="Paragraph" :rate="0.9" content-kind="story" />
             </div>
             <p class="para-body" :style="{ fontSize: (1.15 * fontScale) + 'rem' }">{{ para }}</p>
           </div>
@@ -477,7 +634,7 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
         </div>
         <ul class="tips-list" :class="[fontClassFor(tipsLang), { rtl: isRtlLang(tipsLang) }]">
           <li v-for="(q, i) in tipsDiscussion" :key="i" class="tip-line" :class="{ speaking: speakingId === lineId(q) }">
-            <SpeakButton :text="q" :lang="tipsLang" size="sm" class="tip-speak" />
+            <SpeakButton :text="q" :lang="tipsLang" size="sm" class="tip-speak" content-kind="tips" />
             <span class="tip-text">{{ q }}</span>
           </li>
         </ul>
@@ -501,7 +658,7 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
             class="tip-line"
             :class="{ speaking: speakingId === lineId(t) }"
           >
-            <SpeakButton :text="t" :lang="tipsLang" size="sm" class="tip-speak" />
+            <SpeakButton :text="t" :lang="tipsLang" size="sm" class="tip-speak" content-kind="tips" />
             <span class="tip-text">{{ t }}</span>
           </li>
         </ul>
@@ -591,6 +748,10 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
 .quran-ref { font-size: 0.85rem; color: #64748b; }
 .quran-verified { font-size: 0.72rem; font-weight: 700; color: #166534; background: #dcfce7; padding: 0.1rem 0.5rem; border-radius: 999px; }
 .quran-unverified { font-size: 0.72rem; font-weight: 700; color: #9a3412; background: #ffedd5; padding: 0.1rem 0.5rem; border-radius: 999px; }
+/* Bismillah — shown as its own centered line, separate from the ayah it's
+   textually fused to in the verified source, with no ayah number of its own. */
+.bismillah-line { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; margin-bottom: 0.6rem; }
+.bismillah-arabic { direction: rtl; text-align: center; color: #14532d; font-weight: 600; margin: 0; }
 .ayah { background: rgba(255,255,255,0.7); border: 1px solid #dcfce7; border-radius: 14px; padding: 1rem 1.1rem; margin-bottom: 0.9rem; }
 .ayah-tools { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; }
 .ayah-num { display: inline-flex; align-items: center; justify-content: center; min-width: 1.5rem; height: 1.5rem; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 0.75rem; font-weight: 700; }
@@ -605,19 +766,48 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
 .qaida-title { font-size: 1rem; color: #1e3a5f; margin: 0 0 0.25rem; }
 .qaida-instruction { font-size: 0.9rem; color: #475569; margin: 0 0 0.75rem; line-height: 1.5; }
 .glyph-grid { display: flex; flex-wrap: wrap; gap: 0.6rem; }
-.glyph { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; min-width: 64px; padding: 0.6rem 0.8rem; border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; cursor: pointer; transition: background 0.12s, transform 0.08s; }
+/* Cell wraps the glyph button so the voice caret + picker can anchor to it (a button
+   can't nest another button). */
+.glyph-cell { position: relative; display: inline-flex; }
+.glyph { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; min-width: 64px; max-width: 140px; padding: 0.6rem 0.8rem; border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; cursor: pointer; transition: background 0.12s, transform 0.08s; }
+/* A glyph with a saved custom voice — violet accent, like SpeakButton.saved. */
+.glyph-saved { border-color: #c4b5fd; }
+.glyph-saved:hover { background: #f5f3ff; }
+.glyph-voice {
+  position: absolute; top: -0.4rem; right: -0.4rem; z-index: 2;
+  width: 1.3rem; height: 1.3rem; padding: 0; border-radius: 999px;
+  border: 1px solid #cbd5e1; background: #fff; color: #64748b;
+  font-size: 0.65rem; line-height: 1; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 1px 3px rgba(15,23,42,0.12); transition: background 0.12s, border-color 0.12s;
+}
+.glyph-voice:hover { background: #f5f3ff; border-color: #c4b5fd; color: #6d28d9; }
 .glyph:hover { background: #eff6ff; }
 .glyph:active { transform: scale(0.95); }
+/* Linked to the shared library (curated spell-out recording) — subtle accent. */
+.glyph-lib { border-color: #93c5fd; }
+.glyph-lib:hover { background: #eaf2ff; }
 .glyph-pic { width: 84px; height: 84px; object-fit: cover; border-radius: 10px; background: #f1f5f9; margin-bottom: 0.15rem; }
 .glyph-text { font-size: 1.8rem; font-weight: 700; color: #0f172a; }
 .glyph-translit { font-size: 0.72rem; color: #64748b; }
+.glyph-spell { font-size: 0.66rem; color: #2563eb; text-align: center; line-height: 1.25; }
 .glyph-ico { font-size: 0.75rem; opacity: 0.6; }
 
 /* Dialogue / conversation */
 .dialogue-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
 .dialogue-title { font-size: 1.2rem; color: #0f172a; margin: 0; }
+.scene-actions { position: relative; display: flex; align-items: center; gap: 0.4rem; }
 .scene-btn { border: 1px solid #0b1f3a; background: #0b1f3a; color: #fff; border-radius: 999px; padding: 0.35rem 0.85rem; font-size: 0.82rem; font-weight: 600; cursor: pointer; }
 .scene-btn:hover { background: #13294d; }
+/* The ▾ caret that opens the scene-wide voice picker (parent view only). */
+.scene-voice-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid #cbd5e1; background: #fff; color: #64748b;
+  border-radius: 999px; cursor: pointer; line-height: 1; font-size: 0.7rem;
+  width: 1.6rem; height: 1.6rem; padding: 0;
+  transition: background 0.12s, border-color 0.12s;
+}
+.scene-voice-btn:hover { background: #f5f3ff; border-color: #c4b5fd; color: #6d28d9; }
 .dialogue-scenario { font-size: 0.92rem; color: #475569; font-style: italic; margin: 0.4rem 0 0; }
 .turns { display: flex; flex-direction: column; gap: 0.7rem; margin-top: 0.75rem; }
 .turn { max-width: 88%; }
@@ -669,6 +859,7 @@ function playSection(items) { speakSequence(tipSequence(tipsLang.value, items));
 .problem { background: rgba(255,255,255,0.7); border: 1px solid #f3e8ff; border-radius: 12px; padding: 0.8rem 0.9rem; }
 .problem-q-row { display: flex; align-items: center; gap: 0.5rem; justify-content: space-between; }
 .problem-q { font-size: 1.2rem; color: #0f172a; font-weight: 600; }
+.problem-q-vertical { white-space: pre; font-family: "Courier New", ui-monospace, monospace; line-height: 1.3; display: inline-block; }
 .problem-actions { display: flex; gap: 0.5rem; margin-top: 0.6rem; }
 .mini-btn { border: 1px solid #cbd5e1; background: #fff; color: #475569; border-radius: 999px; padding: 0.25rem 0.8rem; font-size: 0.8rem; cursor: pointer; }
 .mini-btn.primary { background: #4a1d96; border-color: #4a1d96; color: #fff; }

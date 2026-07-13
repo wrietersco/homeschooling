@@ -84,6 +84,17 @@ service cloud.firestore {
       allow write: if isSuperAdmin();
     }
 
+    // Shared Noorani Qaida corpus (top-level): PUBLICLY readable. The unauthenticated
+    // child player resolves each drill glyph's current recording live from here (by
+    // materialRef) so activities pick up audio as it's generated over time. The
+    // content is standard, non-sensitive Qaida letters + already-public Storage audio
+    // URLs, and replaying cached audio costs nothing — so open read is acceptable.
+    // Imported, audio-generated, and audited only by the superadmin.
+    match /nooraniQaida/{doc=**} {
+      allow read: if true;
+      allow write: if isSuperAdmin();
+    }
+
     match /families/{familyId} {
       // Family creation/deletion is server-side only (callables w/ Admin SDK).
       allow read: if canRead(familyId);

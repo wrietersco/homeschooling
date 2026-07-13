@@ -22,12 +22,19 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { resolveCaller } from "../lib/caller.js";
 import { runAgent } from "./runtime.js";
-import { resolveLlm, loadAgentConfig } from "./agentConfig.js";
+import { resolveLlm, loadAgentConfig, secretNameForProvider, resolveTextProvider } from "./agentConfig.js";
 import { describeGuardian, summarizeChildPerformance } from "./grounding.js";
 import { enrichQuranContent } from "./quranSource.js";
+import { enrichQaidaContent } from "./qaidaLibrary.js";
 import { generateActivityImage, generateObjectImages } from "./imageGen.js";
 import { loadSubjectPlans, buildPlanContextString } from "./contentPlan.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
+
+// The three text-provider API keys, read fresh each call so a resolveLlm() can
+// route to whichever provider the "content" agent is configured for.
+function providerKeys() {
+  return { gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY };
+}
 
 // Map an activity type to the content kind the child actually performs. NOTE:
 // `quran_reading` is reachable ONLY from type `quran` — Arabic literacy never
@@ -198,7 +205,7 @@ const SAVE_CONTENT_DECLARATION = {
         items: {
           type: "object",
           properties: {
-            question: { type: "string", description: "The problem to solve, e.g. '7 + 5 = ?' or a word problem." },
+            question: { type: "string", description: "A CALCULATION the child performs on given numbers using ONE clear operation (+, -, ×, ÷, or a fraction/decimal equivalent). Vary the FORMAT across the set: (a) a plain horizontal equation, e.g. '7 + 5 = ?'; (b) a vertical/column sum in the traditional stacked layout, written as a multi-line string with a newline before each row and a dashed line before the total, e.g. '  7\\n+ 2\\n———' (right-align the digits with leading spaces); (c) a short word-problem scenario with the concrete numbers/operation still spelled out, e.g. 'Ali has 7 apples and buys 5 more. How many apples does he have now?'. Include all three formats across the set, not just one. NEVER a vague narrative with no numbers, and NEVER a recognition/identification/multiple-choice question that asks the child to pick or name a pre-stated option (e.g. 'Is each piece 1/2 or 1/4?', 'Which is bigger, 3 or 5?') — the child must CALCULATE the answer from the given numbers, not select one." },
             answer: { type: "string", description: "The correct answer." },
             hint: { type: "string", description: "A hint if the child is stuck. Optional." },
             working: { type: "string", description: "Step-by-step solution to reveal after. Optional." },
@@ -307,7 +314,7 @@ function buildSystemPrompt({ activity, kind, guidingLight, children, guardians =
     tips:
       "This activity is parent-led, so provide EVERYTHING the parent needs to run it RIGHT NOW with nothing to prepare or look up. Never tell the parent to 'find', 'select', 'choose', 'pick', or 'prepare' a story or material — if the activity revolves around a story, scenario, role-play, worked example, or reflection, YOU must write that material out IN FULL in the `story` field (a complete, original, age-appropriate narrative with a real beginning, middle, and end). For Islamic character / empathy / seerah lessons, base it on authentic seerah, sahaba, or prophetic narratives and reflect the guiding light. Even if the activity's plan says to 'choose a story', you choose it and write the whole thing here. Add 3-5 `discussionQuestions` to draw out the lesson, then fill `tips`, `watchFor`, and `encourage` for facilitation. Set `lang` to the activity's language (e.g. 'ur'). Do NOT invent Qur'anic verses or Qaida drills.",
     problems:
-      "Produce 5-10 problem sums matched to the activity's complexity rank. Each problem has the question to solve, the correct answer, an optional hint, and optional step-by-step working. Progress from easier to harder within the set.",
+      "Produce 5-10 REAL mathematics problems matched to the activity's complexity rank — actual numbers and an operation the child COMPUTES (e.g. '2 + 2 = ?', '13 - 6 = ?', '4 x 3 = ?', '1/2 + 1/4 = ?'), not vague narrative descriptions with no numbers, and NOT a recognition/identification/multiple-choice question that just asks the child to pick or name something already stated (e.g. 'Is each piece 1/2 or 1/4?', 'Which fraction is bigger, 1/2 or 1/4?', 'Is 7 more or less than 5?' are all WRONG — none require a calculation). Every single problem must require the child to CALCULATE a result from given numbers using one clear operation. MIX THE FORMAT across the set — include all three: (1) plain horizontal equations ('2 + 2 = ?'); (2) traditional VERTICAL/COLUMN sums, written as a multi-line question string with each row on its own line and a dashed line before the total, digits right-aligned, e.g. '  7\\n+ 2\\n———' (this is the classic written-arithmetic layout, not just a horizontal equation); (3) short real-world word problems with the concrete numbers/operation spelled out (e.g. 'Sara has 6 sweets and eats 2. How many are left?', 'A pizza is cut into 4 equal slices; Sara eats 1 slice — what fraction of the pizza is left?'). Don't rely on only one format — a good set has a few of each. The concrete numbers and the single operation to perform must always be spelled out so the child can see exactly what to calculate, and the answer must be the computed result (a number or fraction), never a restated option. Match operations to the rank (counting/addition/subtraction for early ranks, multiplication/division/simple fraction or decimal arithmetic for later ones). Each problem has the question to solve, the correct answer, an optional hint, and optional step-by-step working. Progress from easier to harder within the set.",
     steps:
       "Break this activity into a clear, ordered worksheet the child can follow: a one-line goal, the materials needed, 4-8 numbered steps (each a concrete action, with optional detail/example), and 2-3 'check' questions to confirm it worked.",
     dialogue:
@@ -498,6 +505,37 @@ function sanitizeContent(kind, raw, type) {
   return out;
 }
 
+// A recognition/identification/multiple-choice question restates the options
+// the child picks from instead of asking them to calculate — e.g.
+// "(1/2 ya 1/4?)" or "(A or B?)". This is the one concrete failure mode we've
+// seen the model produce despite the prompt's instructions, so it's checked for
+// explicitly (language-agnostic: catches the English "or" and the Urdu "ya").
+const MULTIPLE_CHOICE_PATTERN = /\([^)]*\b(or|ya)\b[^)]*\)/i;
+
+// Does a math "problems" question read like a real calculation? Requires at
+// least two numeric quantities (ints, decimals, or fractions like "1/2") to
+// combine — deliberately loose on HOW they combine (word problems like "Ali has
+// 7 apples and buys 5 more" carry no explicit "+" symbol but are still valid) —
+// and rejects the multiple-choice pattern above. Exported for tests.
+export function looksLikeComputationProblem(question) {
+  const q = String(question || "");
+  const numbers = q.match(/\d+(?:\.\d+)?(?:\/\d+)?/g) || [];
+  if (numbers.length < 2) return false;
+  if (MULTIPLE_CHOICE_PATTERN.test(q)) return false;
+  return true;
+}
+
+// For a "problems" payload, does at least half the set read like real
+// calculations? A one-off vague problem isn't worth discarding a whole batch
+// over, but a majority-recognition-question set is exactly the failure this
+// guards against. Non-"problems" content (or an empty problems array — caught
+// separately by isContentEmpty) always passes.
+export function hasEnoughComputationProblems(content) {
+  if (!content || content.kind !== "problems" || !content.problems?.length) return true;
+  const passing = content.problems.filter((p) => looksLikeComputationProblem(p.question)).length;
+  return passing >= Math.ceil(content.problems.length / 2);
+}
+
 // Did the model actually fill the payload, or call save_content with a hollow
 // shell? Forced function calling guarantees the *call* happens, so we must check
 // the *content* ourselves — an empty payload should retry / fail loudly rather
@@ -599,12 +637,22 @@ export async function generateContentForActivity({ activity, children = [], guar
   // calling means save_content always fires, so the real failure now is a hollow
   // call (usually the args were truncated). Drop it so the retry can refill.
   if (captured && isContentEmpty(captured)) captured = null;
+  // A "problems" set that's mostly recognition/multiple-choice questions isn't
+  // usable even though save_content fired with a well-formed payload — treat it
+  // like a failed attempt too, so the retry gets a chance to fix it.
+  const badMathProblems = captured && !hasEnoughComputationProblems(captured);
+  if (badMathProblems) captured = null;
   // Retry once on failure — give it a bigger output budget (truncation is the
   // most common cause) and an explicit nudge to keep the payload within limits.
   if (!captured) {
     const retryConfig = { ...baseConfig, maxOutputTokens: Math.max(8192, Number(baseConfig.maxOutputTokens) || 0) };
-    result = await attempt(retryConfig, " Be concise and stay within the output limit so the JSON is complete.");
+    const mathNudge = badMathProblems
+      ? " IMPORTANT: your last attempt asked the child to pick/identify a pre-stated option instead of calculating — every problem must give numbers and require an actual calculation (e.g. '1/2 + 1/4 = ?'), never a recognition or multiple-choice question (e.g. never '(1/2 or 1/4?)')."
+      : "";
+    result = await attempt(retryConfig, " Be concise and stay within the output limit so the JSON is complete." + mathNudge);
     if (captured && isContentEmpty(captured)) captured = null;
+    // Accept the retry's problems even if still imperfect — a degraded-but-real
+    // activity beats no content at all; only emptiness fails a retried attempt.
   }
   const reason = captured
     ? ""
@@ -620,6 +668,18 @@ export async function generateContentForActivity({ activity, children = [], guar
     } catch (e) {
       console.warn(`[content] quran enrichment failed for "${activity.title}": ${e?.message || e}`);
       if (captured.quran) captured.quran.textSource = "ai_unverified";
+    }
+  }
+
+  // Noorani Qaida drills: link each glyph to the shared platform library so the
+  // child hears the curated spell-out recording (and sees the canonical script)
+  // instead of TTS-ing the raw glyph. Best-effort; never throws.
+  if (captured && captured.kind === "qaida_exercise" && db) {
+    try {
+      const { linked, total } = await enrichQaidaContent(captured, { db });
+      if (total) console.log(`[content] qaida library link: ${linked}/${total} glyphs matched for "${activity.title}"`);
+    } catch (e) {
+      console.warn(`[content] qaida library link failed for "${activity.title}": ${e?.message || e}`);
     }
   }
 
@@ -679,7 +739,14 @@ export async function generateContentForActivity({ activity, children = [], guar
     delete captured.usedPassages;
   }
 
-  return { kind, content: captured, reason };
+  // Which provider/model actually produced this content, so the UI can show
+  // "generated by Claude Sonnet 5" etc. on the activity wherever it appears.
+  // Derived from the client that ran (not a separately-tracked variable) so it
+  // can never drift from what actually executed.
+  const model = llm?.model || "";
+  const provider = model ? resolveTextProvider(undefined, model) : "";
+
+  return { kind, content: captured, reason, provider, model };
 }
 
 // Load the family context (children + guardians + guiding light) for generation.
@@ -712,7 +779,7 @@ export async function runGenerateContent({ db, familyId, activityId, uid, llm, g
   const plans = await loadSubjectPlans(db, familyId);
   const planContext = activity.subjectId ? buildPlanContextString(plans.get(activity.subjectId), activityId) : "";
 
-  const { kind, content, reason } = await generateContentForActivity({
+  const { kind, content, reason, provider, model } = await generateContentForActivity({
     activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db,
     geminiApiKey: process.env.GEMINI_API_KEY || "",
     storagePrefix: familyId,
@@ -724,8 +791,11 @@ export async function runGenerateContent({ db, familyId, activityId, uid, llm, g
     throw new HttpsError("internal", reason || "The content generator did not return any content. Please try again.");
   }
 
-  await activityRef.update({ content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "" });
-  return { kind, content };
+  await activityRef.update({
+    content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "",
+    contentProvider: provider || "", contentModel: model || "",
+  });
+  return { kind, content, provider, model };
 }
 
 // ─── Backfill — generate content for every activity that lacks it ─────────────
@@ -770,7 +840,7 @@ export async function runBackfill({ db, familyId, uid, llm, genConfig, limit, sh
     try {
       const activity = { id: d.id, ...d.data() };
       const planContext = activity.subjectId ? buildPlanContextString(plans.get(activity.subjectId), activity.id) : "";
-      const { content, reason } = await generateContentForActivity({
+      const { content, reason, provider, model } = await generateContentForActivity({
         activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db,
         geminiApiKey: process.env.GEMINI_API_KEY || "",
         storagePrefix: familyId,
@@ -778,7 +848,10 @@ export async function runBackfill({ db, familyId, uid, llm, genConfig, limit, sh
         guidance,
       });
       if (content) {
-        await d.ref.update({ content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "", ...stamp });
+        await d.ref.update({
+          content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "",
+          contentProvider: provider || "", contentModel: model || "", ...stamp,
+        });
         processed++;
         advanced++;
       } else {
@@ -799,7 +872,7 @@ export async function runBackfill({ db, familyId, uid, llm, genConfig, limit, sh
 
 // ─── Callable ─────────────────────────────────────────────────────────────────
 export const generateActivityContent = onCall(
-  { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 120 },
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 120 },
   async (request) => {
     const { db, uid, familyId } = await resolveCaller(request);
     const activityId = String(request.data?.activityId || "").trim();
@@ -808,13 +881,13 @@ export const generateActivityContent = onCall(
     const guidance = clampGuidance(request.data?.guidance);
     await enforceDailyLimit(db, familyId, "content"); // audit #12
 
-    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, activityId, source: "generateActivityContent" });
+    const { llm, genConfig, provider } = await resolveLlm(db, "content", providerKeys(), { familyId, uid, activityId, source: "generateActivityContent" });
     if (!llm) {
-      return { configured: false, text: "Content generation isn't configured — set the GEMINI_API_KEY secret to enable it." };
+      return { configured: false, text: `Content generation isn't configured — set the ${secretNameForProvider(provider)} secret to enable it.` };
     }
 
-    const { kind, content } = await runGenerateContent({ db, familyId, activityId, uid, llm, genConfig, guidance });
-    return { configured: true, kind, content };
+    const gen = await runGenerateContent({ db, familyId, activityId, uid, llm, genConfig, guidance });
+    return { configured: true, kind: gen.kind, content: gen.content, contentProvider: gen.provider, contentModel: gen.model };
   }
 );
 
@@ -837,6 +910,8 @@ export const deleteActivityContent = onCall({ timeoutSeconds: 30 }, async (reque
     content: FieldValue.delete(),
     contentGeneratedAt: FieldValue.delete(),
     contentBy: FieldValue.delete(),
+    contentProvider: FieldValue.delete(),
+    contentModel: FieldValue.delete(),
     contentError: "",
   });
   return { ok: true };
@@ -844,10 +919,10 @@ export const deleteActivityContent = onCall({ timeoutSeconds: 30 }, async (reque
 
 // Bulk backfill — fills content for all activities missing it, a batch at a time.
 export const backfillActivityContent = onCall(
-  { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 540 },
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 540 },
   async (request) => {
     const { db, uid, familyId } = await resolveCaller(request);
-    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, source: "backfillActivityContent" });
+    const { llm, genConfig } = await resolveLlm(db, "content", providerKeys(), { familyId, uid, source: "backfillActivityContent" });
     if (!llm) return { configured: false, total: 0, processed: 0, remaining: 0 };
 
     const limit = Math.min(12, Math.max(1, Number(request.data?.limit) || 6));
@@ -861,7 +936,7 @@ export const backfillActivityContent = onCall(
 // quickly before committing to a full backfill. Uses the subject plan as context
 // so even a 2-week sample reads as the coherent opening of the full arc.
 export const requestContentSample = onCall(
-  { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 540 },
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 540 },
   async (request) => {
     const { db, uid, familyId, role } = await resolveCaller(request);
     if (!["owner", "parent"].includes(role)) {
@@ -872,8 +947,8 @@ export const requestContentSample = onCall(
     const limit = Math.min(8, Math.max(1, Number(request.data?.limit) || 6));
     const guidance = clampGuidance(request.data?.guidance);
 
-    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, source: "requestContentSample" });
-    if (!llm) return { configured: false, text: "Content generation isn't configured — set the GEMINI_API_KEY secret to enable it." };
+    const { llm, genConfig, provider } = await resolveLlm(db, "content", providerKeys(), { familyId, uid, source: "requestContentSample" });
+    if (!llm) return { configured: false, text: `Content generation isn't configured — set the ${secretNameForProvider(provider)} secret to enable it.` };
 
     const actSnap = await db.collection("families").doc(familyId)
       .collection("activities").where("subjectId", "==", subjectId).get();
@@ -893,7 +968,7 @@ export const requestContentSample = onCall(
       const aRef = db.collection("families").doc(familyId).collection("activities").doc(activity.id);
       try {
         const planContext = buildPlanContextString(plan, activity.id);
-        const { kind, content, reason } = await generateContentForActivity({
+        const { kind, content, reason, provider, model } = await generateContentForActivity({
           activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db,
           geminiApiKey: process.env.GEMINI_API_KEY || "",
           storagePrefix: familyId,
@@ -901,7 +976,10 @@ export const requestContentSample = onCall(
           guidance,
         });
         if (content) {
-          await aRef.update({ content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "" });
+          await aRef.update({
+            content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "",
+            contentProvider: provider || "", contentModel: model || "",
+          });
         } else {
           // Persist the reason so it's visible on the activity, not just in the sample.
           await aRef.update({ contentError: reason || "No content produced." });
@@ -924,7 +1002,7 @@ export const requestContentSample = onCall(
 // the user can click again to chip away at a large backlog. Optionally scoped to
 // one subject.
 export const regenerateFailedContent = onCall(
-  { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 540 },
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 540 },
   async (request) => {
     const { db, uid, familyId, role } = await resolveCaller(request);
     if (!["owner", "parent"].includes(role)) {
@@ -934,8 +1012,8 @@ export const regenerateFailedContent = onCall(
     const limit = Math.min(15, Math.max(1, Number(request.data?.limit) || 10));
     const guidance = clampGuidance(request.data?.guidance);
 
-    const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, source: "regenerateFailedContent" });
-    if (!llm) return { configured: false, text: "Content generation isn't configured — set the GEMINI_API_KEY secret to enable it." };
+    const { llm, genConfig, provider } = await resolveLlm(db, "content", providerKeys(), { familyId, uid, source: "regenerateFailedContent" });
+    if (!llm) return { configured: false, text: `Content generation isn't configured — set the ${secretNameForProvider(provider)} secret to enable it.` };
 
     const snap = await db.collection("families").doc(familyId).collection("activities").limit(500).get();
     let failed = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((a) => a.contentError && !a.content);
@@ -954,7 +1032,7 @@ export const regenerateFailedContent = onCall(
       const aRef = db.collection("families").doc(familyId).collection("activities").doc(activity.id);
       try {
         const planContext = activity.subjectId ? buildPlanContextString(plans.get(activity.subjectId), activity.id) : "";
-        const { kind, content, reason } = await generateContentForActivity({
+        const { kind, content, reason, provider, model } = await generateContentForActivity({
           activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db,
           geminiApiKey: process.env.GEMINI_API_KEY || "",
           storagePrefix: familyId,
@@ -962,7 +1040,10 @@ export const regenerateFailedContent = onCall(
           guidance,
         });
         if (content) {
-          await aRef.update({ content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "" });
+          await aRef.update({
+            content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "",
+            contentProvider: provider || "", contentModel: model || "",
+          });
         } else {
           await aRef.update({ contentError: reason || "No content produced." });
           console.warn(`[content] retry still failed for ${activity.id} (${activity.type}): ${reason}`);
@@ -1056,10 +1137,10 @@ export async function runContentBackfillQueuePass({ db, limit = 2 } = {}) {
     .get();
   if (queuedSnap.empty) return { processed: 0 };
 
-  const { llm, genConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY);
+  const { llm, genConfig, provider } = await resolveLlm(db, "content", providerKeys());
   if (!llm) {
     for (const q of queuedSnap.docs) {
-      const msg = "Content generation isn't configured — set the GEMINI_API_KEY secret to enable it.";
+      const msg = `Content generation isn't configured — set the ${secretNameForProvider(provider)} secret to enable it.`;
       await q.ref.set({ status: "error", error: msg, updatedAt: new Date() }, { merge: true });
       await backfillMetaRef(db, q.id).set({ status: "error", error: msg, updatedAt: new Date() }, { merge: true });
     }
@@ -1082,7 +1163,7 @@ export async function runContentBackfillQueuePass({ db, limit = 2 } = {}) {
     // Re-resolve a per-family metered client so each drained family's cost is
     // attributed correctly (the pass-level client above is family-agnostic).
     const { llm: familyLlm, genConfig: familyGenConfig } =
-      await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId, uid, source: "contentBackfillWorker" });
+      await resolveLlm(db, "content", providerKeys(), { familyId, uid, source: "contentBackfillWorker" });
     try {
       await backfillMetaRef(db, familyId).set({ status: "running", updatedAt: new Date() }, { merge: true });
       // Cancellation check (the parent's "Stop" button): re-read the queue row
@@ -1146,7 +1227,7 @@ export async function runContentBackfillQueuePass({ db, limit = 2 } = {}) {
 
 // Scheduled drain — the server-side engine, identical cadence to syllabusWorker.
 export const contentBackfillWorker = onSchedule(
-  { schedule: "every 1 minutes", timeoutSeconds: 540, secrets: ["GEMINI_API_KEY"], maxInstances: 1 },
+  { schedule: "every 1 minutes", timeoutSeconds: 540, secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], maxInstances: 1 },
   async () => {
     await runContentBackfillQueuePass({ db: getFirestore(), limit: 2 });
   }

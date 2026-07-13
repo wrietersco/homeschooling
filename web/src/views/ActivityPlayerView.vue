@@ -4,7 +4,7 @@
 // content aloud with the child, recording completion scores and observations.
 // This is the authed, parent-facing counterpart to the link-scoped child view.
 import { ref, computed, watch, onMounted } from "vue";
-import { collection, query, orderBy, getDocs, doc, getDoc } from "firebase/firestore";
+import { collection, query, orderBy, getDocs, doc, getDoc, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuthStore } from "@/stores/auth";
 import { submitScore, addObservation, updateBlockStatus } from "@/services/player";
@@ -12,6 +12,7 @@ import { getActivityJourney } from "@/services/brief";
 import ActivityContent from "@/components/ActivityContent.vue";
 import SpeakButton from "@/components/SpeakButton.vue";
 import GuideChat from "@/components/GuideChat.vue";
+import ProviderBadge from "@/components/ProviderBadge.vue";
 
 const auth = useAuthStore();
 
@@ -60,14 +61,17 @@ const nativeInstructions = computed(() =>
 const hasNativeInstructions = computed(() => Boolean(nativeInstructions.value));
 const nativeIsScript = computed(() => Boolean(currentActivity.value?.parentInstructionsNative));
 
-// Resolve the children this activity is for. The stored targetChildren may be
-// empty OR contain stale/garbage ids that don't match any current child — in
-// either case we fall back to ALL children so the parent can always record who
-// took part (and always sees a name), never a dead-end "No children assigned".
+// Resolve the children this activity is for. The BLOCK's targetChildren win when
+// present — a per-child scheduled session (scheduler forChildId) scopes the block
+// to one child so the player shows that child's differentiated variant — else we
+// use the activity's. The stored ids may be empty OR contain stale/garbage ids
+// that don't match any current child; in either case we fall back to ALL children
+// so the parent can always record who took part, never a dead-end.
 const targetChildren = computed(() => {
   const a = currentActivity.value;
-  if (!a && !currentBlock.value) return [];
-  const ids = (a?.targetChildren?.length ? a.targetChildren : currentBlock.value?.targetChildren) || [];
+  const b = currentBlock.value;
+  if (!a && !b) return [];
+  const ids = (b?.targetChildren?.length ? b.targetChildren : a?.targetChildren) || [];
   const matched = ids.length ? children.value.filter((c) => ids.includes(c.id)) : [];
   return matched.length ? matched : children.value;
 });
@@ -199,6 +203,42 @@ const activeContent = computed(() => {
   }
   return a.content || null;
 });
+
+// Which provider/model wrote the CURRENTLY ACTIVE content — mirrors activeContent's
+// shared-vs-per-child choice above.
+const activeProvider = computed(() => {
+  const a = currentActivity.value;
+  if (!a) return { provider: "", model: "" };
+  const byChild = a.contentByChild;
+  if (perChild.value && byChild && activeChildId.value && byChild[activeChildId.value]) {
+    return { provider: a.differentiatedProvider || "", model: a.differentiatedModel || "" };
+  }
+  return { provider: a.contentProvider || "", model: a.contentModel || "" };
+});
+
+// Persist an accepted per-element voice on the activity (keyed by overrideKey), so it
+// replays for everyone and is never re-charged. Mirrors ActivityView's handler.
+const voiceSaveError = ref("");
+const voiceSavedAt = ref(0);
+async function handleVoiceOverride({ key, provider, model, voiceName, url }) {
+  const b = currentBlock.value;
+  const entry = b && activityCache.value[b.id];
+  const a = entry?.activity;
+  if (!a || !key || !url) return;
+  const payload = { url, provider, model, voiceName };
+  voiceSaveError.value = "";
+  // Optimistic local update (reassign so the activeContent computed re-reads).
+  activityCache.value[b.id] = { ...entry, activity: { ...a, audioOverrides: { ...(a.audioOverrides || {}), [key]: payload } } };
+  try {
+    await updateDoc(
+      doc(db, "families", auth.familyId, "activities", a.id),
+      { [`audioOverrides.${key}`]: payload }
+    );
+    voiceSavedAt.value = Date.now();
+  } catch (e) {
+    voiceSaveError.value = e?.message || "Couldn't save the voice.";
+  }
+}
 
 async function saveScores() {
   const b = currentBlock.value;
@@ -370,6 +410,7 @@ watch(dateKey, () => loadDay());
               <span class="meta-chip">{{ currentBlock.subject }}</span>
               <span class="meta-chip">{{ currentBlock.scheduledTime }} · {{ currentBlock.durationMinutes }} min</span>
               <span v-if="blockDone[currentBlock.id]" class="meta-chip done-chip">Done ✓</span>
+              <ProviderBadge :provider="activeProvider.provider" :model="activeProvider.model" />
             </div>
             <!-- Unique id + a stable, shareable link to this activity's own page,
                  where a guardian can view/edit it per their permissions. -->
@@ -455,7 +496,15 @@ watch(dateKey, () => loadDay());
                re-mounts it (resets per-run UI state like reveals / font size). -->
           <div v-if="activityCache[currentBlock.id]?.loading" class="state">Loading activity…</div>
           <div v-else-if="activeContent" class="content-box">
-            <ActivityContent :key="perChild ? activeChildId : 'all'" :content="activeContent" />
+            <ActivityContent
+              :key="perChild ? activeChildId : 'all'"
+              :content="activeContent"
+              :audio-overrides="currentActivity?.audioOverrides || {}"
+              :can-edit-voice="true"
+              @update:override="handleVoiceOverride"
+            />
+            <p v-if="voiceSaveError" class="state muted" role="alert">{{ voiceSaveError }}</p>
+            <p v-else-if="voiceSavedAt" class="voice-saved" role="status">✓ Voice saved — this element now plays it for everyone.</p>
           </div>
           <p v-else class="state muted">
             No interactive content for this activity yet — follow the instructions above.
@@ -566,6 +615,7 @@ watch(dateKey, () => loadDay());
 .state { padding: 2rem 0; color: #94a3b8; }
 .state.empty { display: flex; flex-direction: column; gap: 1rem; align-items: flex-start; }
 .muted { color: #94a3b8; }
+.voice-saved { color: #6d28d9; font-size: 0.82rem; margin: 0.5rem 0 0; }
 
 .strip { display: flex; gap: 0.4rem; overflow-x: auto; padding: 0.25rem 0 0.75rem; }
 .strip-item { position: relative; display: flex; flex-direction: column; align-items: center; gap: 0.1rem; min-width: 60px; padding: 0.45rem 0.5rem; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; cursor: pointer; font-size: 0.7rem; color: #64748b; }

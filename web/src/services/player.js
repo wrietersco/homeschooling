@@ -6,9 +6,25 @@
 import { collection, addDoc, doc, setDoc, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 
-export async function createPlayerToken(familyId, activity, targetChildren, blockId, dateKey, createdBy) {
+// `forChild` (optional) scopes the link to a single child and embeds that child's
+// differentiated content variant (activities/{id}.contentByChild[childId]) when one
+// exists. Without it, the link carries the shared blob for all target children.
+// Shape: { id, name, level }. Differentiated, level-paced activities (e.g. Noorani
+// Qaida) generate one link per child so each device shows material at its own level.
+export async function createPlayerToken(familyId, activity, targetChildren, blockId, dateKey, createdBy, forChild) {
   const tokenId = crypto.randomUUID();
   const expiresAtMs = Date.now() + 8 * 60 * 60 * 1000;
+
+  // Resolve the content variant: prefer the named child's variant, else shared.
+  const byChild = activity.contentByChild || null;
+  const childVariant = forChild?.id && byChild?.[forChild.id] ? byChild[forChild.id] : null;
+  const content = childVariant || activity.content || null;
+  // Which provider/model wrote the content the child is about to see — the
+  // differentiated pass's provider when this link carries a per-child variant,
+  // else the shared generation's provider.
+  const contentProvider = childVariant ? (activity.differentiatedProvider || "") : (activity.contentProvider || "");
+  const contentModel = childVariant ? (activity.differentiatedModel || "") : (activity.contentModel || "");
+
   await setDoc(doc(db, "families", familyId, "playerTokens", tokenId), {
     activityId: activity.id,
     activityTitle: activity.title,
@@ -17,10 +33,21 @@ export async function createPlayerToken(familyId, activity, targetChildren, bloc
     complexityRank: activity.complexityRank || 1,
     parentInstructions: activity.parentInstructions || "",
     exampleWalkthrough: activity.exampleWalkthrough || "",
-    content: activity.content || null,
+    content,
+    contentProvider,
+    contentModel,
+    // Saved per-element voices travel with the link so the child player plays them
+    // (read-only there). Activity-level + keyed by text, so they apply across the
+    // shared blob and every child's variant alike.
+    audioOverrides: activity.audioOverrides || {},
     durationMinutes: activity.durationMinutes || 30,
     coopMode: Boolean(activity.coopMode),
-    targetChildren: targetChildren || activity.targetChildren || [],
+    // A child-scoped link targets only that child; otherwise all target children.
+    targetChildren: forChild?.id ? [forChild.id] : (targetChildren || activity.targetChildren || []),
+    // Differentiation metadata so the child view can show whose level this is.
+    forChildId: forChild?.id || null,
+    forChildName: forChild?.name || null,
+    differentiatedLevel: childVariant ? (forChild?.level || activity.differentiatedLevels?.[forChild.id] || "") : "",
     blockId: blockId || null,
     dateKey: dateKey || null,
     familyId,

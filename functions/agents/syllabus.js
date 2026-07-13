@@ -14,11 +14,17 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { getFirestore } from "firebase-admin/firestore";
 import { resolveCaller } from "../lib/caller.js";
 import { runAgent } from "./runtime.js";
-import { resolveLlm } from "./agentConfig.js";
+import { resolveLlm, secretNameForProvider } from "./agentConfig.js";
 import { loadPlatformInstructions, describeGuardian, summarizeChildPerformance } from "./grounding.js";
 import { generateContentForActivity } from "./activityContent.js";
 import { regenerateBriefSafe } from "./knowledgeBrief.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
+
+// The three text-provider API keys, read fresh each call so a resolveLlm() can
+// route to whichever provider the "syllabus"/"content" agent is configured for.
+function providerKeys() {
+  return { gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY };
+}
 
 const DEFAULT_ACTIVITIES_PER_SUBJECT = 48;
 const DEFAULT_BATCH_ACTIVITIES = 4;
@@ -145,7 +151,7 @@ const CREATE_ACTIVITY_DECLARATION = {
 };
 
 // ─── Worker system prompt ─────────────────────────────────────────────────────
-function buildWorkerSystemPrompt({ subjectName, macroGoals, contentOutline, instructionApproach, assessmentMethod, children, guardians, guidingLight, motherTongue = "", childPerformance = "", platformInstructions, existingTitles, activitiesNeeded = 5, targetActivityCount = 4 }) {
+function buildWorkerSystemPrompt({ subjectName, macroGoals, contentOutline, instructionApproach, assessmentMethod, children, guardians, guidingLight, motherTongue = "", childPerformance = "", platformInstructions, existingTitles, activitiesNeeded = 5, targetActivityCount = 4, onlyTypes = [] }) {
   const lines = [
     platformInstructions || "",
     platformInstructions ? "" : "",
@@ -174,6 +180,9 @@ function buildWorkerSystemPrompt({ subjectName, macroGoals, contentOutline, inst
     existingTitles.length ? `Already created for this subject: ${existingTitles.length}.` : "",
     existingTitles.length
       ? "You are filling a partial/resumed syllabus. Do not recreate existing activities; create only the missing next activities."
+      : "",
+    onlyTypes.length
+      ? `Only create activities of these type(s): ${onlyTypes.join(", ")}. Do not create any other type.`
       : "",
     "  Rank 1 — introductory: first 2 weeks, minimal prerequisites.",
     "  Rank 2 — basic: consolidation, builds on rank 1.",
@@ -214,6 +223,7 @@ export async function runSyllabusWorker({
   db, familyId, curriculumId, subjectId, uid, llm, genConfig, contentLlm, contentGenConfig,
   targetActivitiesPerSubject = DEFAULT_ACTIVITIES_PER_SUBJECT,
   batchActivities = DEFAULT_BATCH_ACTIVITIES,
+  onlyTypes = [],
 }) {
   // Load subject data from the curriculum's subjects subcollection.
   const subjectSnap = await db
@@ -272,7 +282,10 @@ export async function runSyllabusWorker({
   // Tool: create_activity — writes directly to Firestore.
   const tools = {
     async create_activity({ title, type, complexityRank, coopMode, targetChildren, parentInstructions, parentInstructionsTranslit, parentInstructionsNative, exampleWalkthrough, durationMinutes }) {
-      const resolvedType = ACTIVITY_TYPES.includes(type) ? type : "teaching";
+      const fallbackType = onlyTypes.length ? onlyTypes[0] : "teaching";
+      const resolvedType = ACTIVITY_TYPES.includes(type) && (!onlyTypes.length || onlyTypes.includes(type))
+        ? type
+        : fallbackType;
       const activityDoc = {
         title: String(title || "Untitled"),
         type: resolvedType,
@@ -300,7 +313,7 @@ export async function runSyllabusWorker({
       // never block activity creation.
       if (contentLlm) {
         try {
-          const { kind, content } = await generateContentForActivity({
+          const { kind, content, provider, model } = await generateContentForActivity({
             activity: activityDoc, children, guardians, guidingLight, childPerformance,
             llm: contentLlm,
             genConfig: contentGenConfig,
@@ -311,6 +324,8 @@ export async function runSyllabusWorker({
           if (content) {
             activityDoc.content = content;
             activityDoc.contentGeneratedAt = new Date();
+            activityDoc.contentProvider = provider || "";
+            activityDoc.contentModel = model || "";
           } else {
             activityDoc.contentKind = kind; // record intended kind even if generation came back empty
           }
@@ -340,6 +355,7 @@ export async function runSyllabusWorker({
     existingTitles,
     activitiesNeeded,
     targetActivityCount,
+    onlyTypes,
   });
 
   const result = await runAgent({
@@ -347,7 +363,7 @@ export async function runSyllabusWorker({
     system,
     toolDeclarations: [CREATE_ACTIVITY_DECLARATION],
     tools,
-    userMessage: `Generate the missing activity series items for "${subject.name || subjectId}" now. Call create_activity exactly ${activitiesNeeded} time${activitiesNeeded === 1 ? "" : "s"}, progressing toward complexity rank 5 (mastery) without duplicating existing activities.`,
+    userMessage: `Generate the missing activity series items for "${subject.name || subjectId}" now. Call create_activity exactly ${activitiesNeeded} time${activitiesNeeded === 1 ? "" : "s"}, progressing toward complexity rank 5 (mastery) without duplicating existing activities.${onlyTypes.length ? ` Only create activities of type: ${onlyTypes.join(", ")}.` : ""}`,
     maxSteps: Math.max(6, activitiesNeeded + 4),
     generationConfig: genConfig,
   });
@@ -420,6 +436,96 @@ export async function startSyllabusRun({
   return { runId: runRef.id, totalSubjects: subjectsSnap.size, status: "queued", done: false };
 }
 
+// ─── "Generate more activities" (type-scoped top-up) ──────────────────────────
+// Reuses the same agentRuns/syllabusQueue/syllabusWorker machinery as a full
+// syllabus build (see startSyllabusRun above), so it gets live progress, retry,
+// and stop/cancel for free. The only difference is per-subject scoping: instead
+// of building every subject toward a flat target, this only touches subjects
+// that already contain the requested type(s), and seeds each one's
+// targetActivityCount as "current total + addCount" so the existing gap-based
+// logic in runSyllabusWorker creates exactly addCount new activities, then stops.
+export async function startActivityTopUp({
+  db, familyId, curriculumId, uid, role = "owner", onlyTypes, addCount,
+}) {
+  const types = Array.isArray(onlyTypes) ? onlyTypes.filter((t) => ACTIVITY_TYPES.includes(t)) : [];
+  if (!types.length) throw new HttpsError("invalid-argument", "onlyTypes must include at least one valid activity type.");
+  const count = Math.min(12, Math.max(1, Number(addCount) || DEFAULT_BATCH_ACTIVITIES));
+
+  const subjectsSnap = await db
+    .collection("families").doc(familyId)
+    .collection("curriculum").doc(curriculumId)
+    .collection("subjects").get();
+  if (subjectsSnap.empty) throw new Error("No subjects found in this curriculum — add subjects first.");
+
+  const activitiesSnap = await db
+    .collection("families").doc(familyId)
+    .collection("activities")
+    .where("curriculumId", "==", curriculumId).get();
+  const countsBySubject = {};   // subjectId -> total activity count (any type)
+  const hasTypeBySubject = {};  // subjectId -> true if it has >=1 activity of a requested type
+  for (const d of activitiesSnap.docs) {
+    const a = d.data();
+    countsBySubject[a.subjectId] = (countsBySubject[a.subjectId] || 0) + 1;
+    if (types.includes(a.type)) hasTypeBySubject[a.subjectId] = true;
+  }
+
+  // Build the subjects map: only subjects that already have a matching-type
+  // activity get a real target; the rest are pre-marked "done" so the existing
+  // per-subject loop in continueSyllabusRun skips them with no extra code path.
+  const subjectsMap = {};
+  let matchingSubjects = 0;
+  for (const d of subjectsSnap.docs) {
+    const existing = countsBySubject[d.id] || 0;
+    const matches = Boolean(hasTypeBySubject[d.id]);
+    if (matches) matchingSubjects += 1;
+    subjectsMap[d.id] = {
+      name: d.data().name || d.id,
+      status: matches ? "pending" : "done",
+      activityCount: existing,
+      targetActivityCount: matches ? existing + count : existing,
+      // Lets the client distinguish "matched this top-up, finished" from
+      // "never targeted" once both end up with activityCount === target.
+      matched: matches,
+    };
+  }
+  if (!matchingSubjects) {
+    throw new HttpsError(
+      "failed-precondition",
+      "None of the existing subjects have an activity of the selected type(s) yet — generate the syllabus first."
+    );
+  }
+
+  const runRef = db.collection("families").doc(familyId).collection("agentRuns").doc();
+  await runRef.set({
+    type: "syllabus",
+    mode: "topup",
+    onlyTypes: types,
+    addCount: count,
+    uid,
+    role,
+    curriculumId,
+    status: "queued",
+    subjects: subjectsMap,
+    totalSubjects: subjectsSnap.size,
+    completedSubjects: subjectsSnap.size - matchingSubjects,
+    totalActivities: Object.values(subjectsMap).reduce((sum, s) => sum + Number(s.activityCount || 0), 0),
+    targetActivitiesPerSubject: count,
+    batchActivities: count,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  await db.collection(QUEUE_COLLECTION).doc(runRef.id).set({
+    familyId,
+    runId: runRef.id,
+    status: "queued",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  return { runId: runRef.id, totalSubjects: subjectsSnap.size, matchingSubjects, status: "queued", done: false };
+}
+
 function summarizeSubjects(subjects) {
   const values = Object.values(subjects || {});
   return {
@@ -460,6 +566,7 @@ export async function continueSyllabusRun({
   let processed = 0;
   const targetActivitiesPerSubject = Math.max(1, Number(run.targetActivitiesPerSubject) || DEFAULT_ACTIVITIES_PER_SUBJECT);
   const batchActivities = Math.max(1, Number(run.batchActivities) || DEFAULT_BATCH_ACTIVITIES);
+  const onlyTypes = Array.isArray(run.onlyTypes) ? run.onlyTypes : [];
 
   // Process each subject sequentially, updating progress after each.
   for (const subjectDoc of subjectsSnap.docs) {
@@ -484,6 +591,7 @@ export async function continueSyllabusRun({
         db, familyId, curriculumId, subjectId, uid, role, llm, genConfig, contentLlm, contentGenConfig,
         targetActivitiesPerSubject: subjectTarget,
         batchActivities,
+        onlyTypes,
       });
       const subjectDone = totalSubjectActivities >= subjectTarget;
       subjects[subjectId] = {
@@ -612,8 +720,8 @@ export async function runSyllabusQueuePass({ db, limit = 2 } = {}) {
     .get();
   if (queuedSnap.empty) return { processed: 0 };
 
-  const { llm, genConfig } = await resolveLlm(db, "syllabus", process.env.GEMINI_API_KEY);
-  const { llm: contentLlm, genConfig: contentGenConfig } = await resolveLlm(db, "content", process.env.GEMINI_API_KEY);
+  const { llm, genConfig } = await resolveLlm(db, "syllabus", providerKeys());
+  const { llm: contentLlm, genConfig: contentGenConfig } = await resolveLlm(db, "content", providerKeys());
   if (!llm) {
     for (const q of queuedSnap.docs) {
       await q.ref.set({
@@ -654,9 +762,17 @@ export async function runSyllabusQueuePass({ db, limit = 2 } = {}) {
       const runUid = run.uid || claimed.uid || "system";
       const runId = claimed.runId;
       const { llm: famLlm, genConfig: famGenConfig } =
-        await resolveLlm(db, "syllabus", process.env.GEMINI_API_KEY, { familyId: claimed.familyId, uid: runUid, runId, source: "syllabusWorker" });
+        await resolveLlm(db, "syllabus", providerKeys(), { familyId: claimed.familyId, uid: runUid, runId, source: "syllabusWorker" });
       const { llm: famContentLlm, genConfig: famContentGenConfig } =
-        await resolveLlm(db, "content", process.env.GEMINI_API_KEY, { familyId: claimed.familyId, uid: runUid, runId, source: "syllabusWorker" });
+        await resolveLlm(db, "content", providerKeys(), { familyId: claimed.familyId, uid: runUid, runId, source: "syllabusWorker" });
+      // "Generate more activities" (type top-up) should feel noticeably more
+      // creative than a standard syllabus build — floor the temperature rather
+      // than offsetting it, so this holds even if the base syllabus temperature
+      // is tuned down later.
+      const baseGenConfig = famGenConfig || genConfig;
+      const runGenConfig = run.mode === "topup"
+        ? { ...baseGenConfig, temperature: Math.max(0.65, Number(baseGenConfig?.temperature) || 0.4) }
+        : baseGenConfig;
       await continueSyllabusRun({
         db,
         familyId: claimed.familyId,
@@ -664,7 +780,7 @@ export async function runSyllabusQueuePass({ db, limit = 2 } = {}) {
         uid: runUid,
         role: run.role || "owner",
         llm: famLlm || llm,
-        genConfig: famGenConfig || genConfig,
+        genConfig: runGenConfig,
         contentLlm: famContentLlm || contentLlm,
         contentGenConfig: famContentGenConfig || contentGenConfig,
         subjectLimit: 1,
@@ -683,7 +799,7 @@ export async function runSyllabusQueuePass({ db, limit = 2 } = {}) {
 }
 
 export const syllabusWorker = onSchedule(
-  { schedule: "every 1 minutes", timeoutSeconds: 540, secrets: ["GEMINI_API_KEY"], maxInstances: 1 },
+  { schedule: "every 1 minutes", timeoutSeconds: 540, secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], maxInstances: 1 },
   async () => {
     await runSyllabusQueuePass({ db: getFirestore(), limit: 2 });
   }
@@ -691,18 +807,18 @@ export const syllabusWorker = onSchedule(
 
 // ─── Callable ─────────────────────────────────────────────────────────────────
 export const generateSyllabus = onCall(
-  { secrets: ["GEMINI_API_KEY"], timeoutSeconds: 540 },
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 540 },
   async (request) => {
     const { db, uid, familyId, role } = await resolveCaller(request);
     const runId = String(request.data?.runId || "").trim();
     const curriculumId = String(request.data?.curriculumId || "").trim();
     if (!runId && !curriculumId) throw new HttpsError("invalid-argument", "curriculumId or runId is required.");
 
-    const { llm } = await resolveLlm(db, "syllabus", process.env.GEMINI_API_KEY, { familyId, uid, runId, source: "generateSyllabus" });
+    const { llm, provider } = await resolveLlm(db, "syllabus", providerKeys(), { familyId, uid, runId, source: "generateSyllabus" });
     if (!llm) {
       return {
         configured: false,
-        text: "The syllabus agent isn't configured yet — set the GEMINI_API_KEY secret to enable it.",
+        text: `The syllabus agent isn't configured yet — set the ${secretNameForProvider(provider)} secret to enable it.`,
       };
     }
     if (!runId) {
@@ -717,6 +833,54 @@ export const generateSyllabus = onCall(
     const runSnap = await runRef.get();
     if (!runSnap.exists) throw new HttpsError("not-found", "Syllabus run not found.");
     const run = runSnap.data();
+    // Never resurrect a run the parent explicitly stopped.
+    if (run.status !== "done" && run.status !== "running" && run.status !== "cancelled") {
+      await runRef.set({ status: "queued", updatedAt: new Date() }, { merge: true });
+      await db.collection(QUEUE_COLLECTION).doc(runId).set({
+        familyId,
+        runId,
+        status: "queued",
+        updatedAt: new Date(),
+      }, { merge: true });
+    }
+    return { configured: true, runId, status: run.status, done: run.status === "done" };
+  }
+);
+
+// Callable — "Generate more activities": create brand-new activities of the
+// selected type(s), scoped to subjects that already have that type. Rides the
+// same agentRuns/syllabusQueue/syllabusWorker machinery as generateSyllabus
+// (see startActivityTopUp), so progress/resume/stop all work identically.
+export const requestActivityTopUp = onCall(
+  { secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 540 },
+  async (request) => {
+    const { db, uid, familyId, role } = await resolveCaller(request);
+    const runId = String(request.data?.runId || "").trim();
+    const curriculumId = String(request.data?.curriculumId || "").trim();
+    if (!runId && !curriculumId) throw new HttpsError("invalid-argument", "curriculumId or runId is required.");
+
+    const { llm, provider } = await resolveLlm(db, "syllabus", providerKeys(), { familyId, uid, runId, source: "requestActivityTopUp" });
+    if (!llm) {
+      return {
+        configured: false,
+        text: `The syllabus agent isn't configured yet — set the ${secretNameForProvider(provider)} secret to enable it.`,
+      };
+    }
+    if (!runId) {
+      // Only count when STARTING a new top-up (polling via runId is free), same
+      // bucket as syllabus generation since it's the same cost class.
+      await enforceDailyLimit(db, familyId, "syllabus");
+      const onlyTypes = Array.isArray(request.data?.onlyTypes) ? request.data.onlyTypes.map((t) => String(t || "").trim()) : [];
+      const addCount = Math.min(12, Math.max(1, Number(request.data?.addCount) || DEFAULT_BATCH_ACTIVITIES));
+      const started = await startActivityTopUp({ db, familyId, curriculumId, uid, role, onlyTypes, addCount });
+      return { configured: true, ...started };
+    }
+
+    const runRef = db.collection("families").doc(familyId).collection("agentRuns").doc(runId);
+    const runSnap = await runRef.get();
+    if (!runSnap.exists) throw new HttpsError("not-found", "Activity top-up run not found.");
+    const run = runSnap.data();
+    if (run.mode !== "topup") throw new HttpsError("failed-precondition", "This is not a top-up run.");
     // Never resurrect a run the parent explicitly stopped.
     if (run.status !== "done" && run.status !== "running" && run.status !== "cancelled") {
       await runRef.set({ status: "queued", updatedAt: new Date() }, { merge: true });
