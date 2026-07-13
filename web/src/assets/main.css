@@ -45,10 +45,9 @@ a { color: var(--primary); }
    public/fonts/OFL.txt) with generous line-height so harakat/tashkeel never clip;
    Urdu uses a Nastaliq face which needs even more vertical room.
 
-   To switch to a true Indo-Pak Mushaf hand: drop the replacement .woff2 into
-   public/fonts/ and repoint the `src` below — no other code change needed. */
-/* Indo-Pak Naskh (Lateef, SIL OFL) — South-Asian Mushaf hand, the primary face
-   for Arabic. Scheherazade New stays as the "Quran Naskh" fallback below. */
+   Scheherazade New (the "Quran Naskh" face) is the primary Arabic face — its
+   traditional Mushaf-style strokes read as far more "Quran.com"-beautiful than
+   the plainer Indo-Pak Naskh (Lateef), which stays loaded as a fallback. */
 @font-face {
   font-family: "Indo-Pak Naskh";
   src: url("/fonts/lateef-400.woff2") format("woff2");
@@ -90,11 +89,13 @@ a { color: var(--primary); }
   unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+200C-200E, U+2010-2011, U+FB50-FDFF, U+FE70-FEFC;
 }
 .font-arabic {
-  font-family: "Indo-Pak Naskh", "Lateef", "Quran Naskh", "Scheherazade New", "Amiri", serif;
-  line-height: 2.4;
+  font-family: "Quran Naskh", "Scheherazade New", "Indo-Pak Naskh", "Lateef", "Amiri", serif;
+  font-weight: 700;
+  line-height: 2.5;
+  letter-spacing: 0.01em;
 }
 .font-urdu {
-  font-family: "Noto Nastaliq Urdu", "Indo-Pak Naskh", "Quran Naskh", serif;
+  font-family: "Noto Nastaliq Urdu", "Quran Naskh", "Indo-Pak Naskh", serif;
   line-height: 2.8;
 }
 

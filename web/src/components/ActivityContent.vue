@@ -326,14 +326,14 @@ function playSection(items) {
       <template v-for="row in quranRows" :key="row.vi">
         <div v-if="row.bismillah" class="bismillah-line">
           <SpeakButton :text="row.bismillah.arabic" lang="ar" size="sm" label="Bismillah" content-kind="quran" />
-          <p class="bismillah-arabic font-arabic" :style="{ fontSize: (1.5 * fontScale) + 'rem' }">{{ row.bismillah.arabic }}</p>
+          <p class="bismillah-arabic font-arabic" :style="{ fontSize: (2.2 * fontScale) + 'rem' }">{{ row.bismillah.arabic }}</p>
         </div>
         <div class="ayah">
           <div class="ayah-tools">
             <span class="ayah-num">{{ row.v.ayah || row.vi + 1 }}</span>
             <SpeakButton :text="row.v.arabic" lang="ar" :audio-url="row.v.audioUrl" size="md" label="Recite ayah" :rate="0.8" content-kind="quran" />
           </div>
-          <p class="ayah-arabic font-arabic" :style="{ fontSize: (2 * fontScale) + 'rem' }">
+          <p class="ayah-arabic font-arabic" :style="{ fontSize: (2.8 * fontScale) + 'rem' }">
             <template v-if="row.v.words && row.v.words.length">
               <span
                 v-for="(w, wi) in row.v.words"
@@ -374,7 +374,7 @@ function playSection(items) {
               @click="reciteGlyph(it, ex.lang || primaryLang)"
             >
               <img v-if="it.image && it.image.url" :src="it.image.url" :alt="it.image.alt || it.text" class="glyph-pic" loading="lazy" />
-              <span class="glyph-text" :class="fontClassFor(ex.lang || primaryLang)" :style="{ fontSize: (1.8 * fontScale) + 'rem' }">{{ it.text }}</span>
+              <span class="glyph-text" :class="fontClassFor(ex.lang || primaryLang)" :style="{ fontSize: (2.2 * fontScale) + 'rem' }">{{ it.text }}</span>
               <span v-if="it.transliteration" class="glyph-translit">{{ it.transliteration }}</span>
               <span v-if="liveSpellScript(it)" class="glyph-spell">{{ liveSpellScript(it) }}</span>
               <span v-if="showMeaning && it.en" class="glyph-en">{{ it.en }}</span>
@@ -440,7 +440,7 @@ function playSection(items) {
           <div class="turn-speaker">{{ t.speaker }}</div>
           <div class="turn-bubble">
             <div class="turn-line" :class="{ rtl: isRtlLang(content.dialogue.lang || primaryLang) }">
-              <p class="turn-text" :class="fontClassFor(content.dialogue.lang || primaryLang)" :style="{ fontSize: (1.1 * fontScale) + 'rem' }">{{ t.text }}</p>
+              <p class="turn-text" :class="fontClassFor(content.dialogue.lang || primaryLang)" :style="{ fontSize: (1.6 * fontScale) + 'rem' }">{{ t.text }}</p>
               <SpeakButton :text="t.text" :lang="content.dialogue.lang || primaryLang" :voice-name="voiceForTurn(t)" size="sm" label="Play" content-kind="dialogue" />
             </div>
             <p v-if="t.transliteration" class="turn-tr">{{ t.transliteration }}</p>
@@ -483,7 +483,7 @@ function playSection(items) {
                 class="vocab-word"
                 :class="fontClassFor(content.story.lang || primaryLang)"
                 :dir="isRtlLang(content.story.lang || primaryLang) ? 'rtl' : 'ltr'"
-                :style="{ fontSize: (1.4 * fontScale) + 'rem' }"
+                :style="{ fontSize: (2 * fontScale) + 'rem' }"
               >{{ v.word }}</strong>
               <span class="vocab-meaning">— {{ v.meaning }}</span>
             </div>
@@ -496,7 +496,7 @@ function playSection(items) {
           <div class="para-tools">
             <SpeakButton :text="para.text" :lang="content.story.lang || primaryLang" size="md" label="Paragraph" :rate="0.9" content-kind="story" />
           </div>
-          <p class="para-body" :style="{ fontSize: (1.15 * fontScale) + 'rem' }">
+          <p class="para-body" :style="{ fontSize: (1.7 * fontScale) + 'rem' }">
             <span v-for="(sent, si) in para.sentences" :key="si" class="sentence">
               <SpeakButton :text="sent.text" :lang="content.story.lang || primaryLang" size="sm" :rate="0.85" content-kind="story" />
               <span
@@ -619,7 +619,7 @@ function playSection(items) {
             <div class="para-tools">
               <SpeakButton :text="para" :lang="tipsStory.lang || tipsLang" size="sm" label="Paragraph" :rate="0.9" content-kind="story" />
             </div>
-            <p class="para-body" :style="{ fontSize: (1.15 * fontScale) + 'rem' }">{{ para }}</p>
+            <p class="para-body" :style="{ fontSize: (1.7 * fontScale) + 'rem' }">{{ para }}</p>
           </div>
         </div>
         <p v-if="tipsStory.moral" class="tips-moral" :class="[fontClassFor(tipsStory.lang || tipsLang), { rtl: isRtlLang(tipsStory.lang || tipsLang) }]">
