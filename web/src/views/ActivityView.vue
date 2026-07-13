@@ -1,12 +1,15 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { useRoute } from "vue-router";
-import { doc, getDoc, collection, getDocs } from "firebase/firestore";
+import { doc, getDoc, collection, getDocs, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuthStore } from "@/stores/auth";
 import { createPlayerToken, submitScore, addObservation, updateBlockStatus } from "@/services/player";
-import { generateActivityContent } from "@/services/activityContent";
+import { generateActivityContent, deleteActivityContent } from "@/services/activityContent";
+import { getActivityJourney } from "@/services/brief";
 import ActivityContent from "@/components/ActivityContent.vue";
+import SpeakButton from "@/components/SpeakButton.vue";
+import ProviderBadge from "@/components/ProviderBadge.vue";
 
 const route = useRoute();
 const auth = useAuthStore();
@@ -19,6 +22,18 @@ const activity = ref(null);
 const children = ref([]);
 const loading = ref(true);
 const notFound = ref(false);
+
+// Parent instructions are shown in the guardian's native language first — their
+// mother tongue in native script (e.g. Urdu Nastaliq), falling back to the roman
+// transliteration when no native script was generated. The English version is
+// kept as a collapsible secondary. When no mother-tongue version exists at all,
+// English is shown plainly as the headline.
+const nativeInstructions = computed(() =>
+  activity.value?.parentInstructionsNative || activity.value?.parentInstructionsTranslit || ""
+);
+const hasNativeInstructions = computed(() => Boolean(nativeInstructions.value));
+// Render in Nastaliq + RTL only when showing actual native script (not roman).
+const nativeIsScript = computed(() => Boolean(activity.value?.parentInstructionsNative));
 
 // Scoring
 const scores = ref({});     // { childId: { completed: bool, isDriving: bool } }
@@ -35,17 +50,48 @@ const obsSaved = ref(false);
 
 // Learning content (flashcards / qaida / story)
 const generatingContent = ref(false);
+const deletingContent = ref(false);
 const contentError = ref("");
+// Optional parent direction for a regeneration — why, and what to change/fix.
+// Threaded into the generator's prompt. Capped to match the server (6000 chars).
+const GUIDANCE_MAX = 6000;
+const regenGuidance = ref("");
+
+// Parent "where this fits in the plan" journey — lazy-loaded on expand.
+const journeyOpen = ref(false);
+const journeyLoading = ref(false);
+const journeyText = ref("");
+const journeyError = ref("");
+async function toggleJourney() {
+  journeyOpen.value = !journeyOpen.value;
+  if (journeyOpen.value && !journeyText.value && !journeyLoading.value) {
+    journeyLoading.value = true;
+    journeyError.value = "";
+    try {
+      const res = await getActivityJourney(activityId);
+      if (res?.configured === false) journeyError.value = "The plan brief isn't available yet.";
+      else journeyText.value = res?.text || "No journey information yet.";
+    } catch (e) {
+      journeyError.value = e?.message || "Could not load the plan context.";
+    } finally {
+      journeyLoading.value = false;
+    }
+  }
+}
 
 const CONTENT_KIND_LABEL = {
   quran: "Quran verses",
   noorani_qaida: "Qaida exercises",
+  arabic_reading: "Arabic reading",
+  urdu_reading: "Urdu reading",
+  english_reading: "Reading",
   story_reading: "Story passage",
+  conversation: "Conversation",
   mathematics: "Problem sums",
   computer: "Worksheet",
   ai_robotics: "Worksheet",
   physical: "Worksheet",
-  teaching: "Worksheet",
+  teaching: "Parent tips",
 };
 const contentLabel = computed(() =>
   CONTENT_KIND_LABEL[activity.value?.type] || "Activity content"
@@ -56,12 +102,19 @@ async function handleGenerateContent() {
   generatingContent.value = true;
   contentError.value = "";
   try {
-    const res = await generateActivityContent(activity.value.id);
+    const res = await generateActivityContent(activity.value.id, regenGuidance.value.trim());
     if (res?.configured === false) {
       contentError.value = res.text || "Content generation isn't configured yet.";
       return;
     }
-    if (res?.content) activity.value.content = res.content;
+    if (res?.content) {
+      activity.value.content = res.content;
+      // No live Firestore listener on this page (just a one-time getDoc in
+      // onMounted), so the provider badge needs an explicit local patch — the
+      // callable now echoes back what it just persisted.
+      activity.value.contentProvider = res.contentProvider || "";
+      activity.value.contentModel = res.contentModel || "";
+    }
   } catch (e) {
     contentError.value = e?.message || "Failed to generate content.";
   } finally {
@@ -69,15 +122,77 @@ async function handleGenerateContent() {
   }
 }
 
-// Child link
-const generatingLink = ref(false);
-const playerLink = ref("");
+// Delete the generated content for this activity, returning it to the empty
+// state. We do NOT auto-regenerate afterwards — the parent chose to remove it
+// and can rebuild it with the Generate button when ready.
+async function handleDeleteContent() {
+  if (!activity.value?.content || deletingContent.value) return;
+  if (!window.confirm("Delete the generated content for this activity? You can regenerate it afterwards.")) return;
+  deletingContent.value = true;
+  contentError.value = "";
+  try {
+    await deleteActivityContent(activity.value.id);
+    activity.value.content = null;
+  } catch (e) {
+    contentError.value = e?.message || "Failed to delete content.";
+  } finally {
+    deletingContent.value = false;
+  }
+}
+
+// Saved per-element voices. When a parent accepts a regenerated clip in the voice
+// picker, persist it on the activity (keyed by overrideKey) so it replays for everyone
+// — shared content, every child's variant, and child-player links — without being
+// charged again (the backend TTS cache already dedupes identical selections).
+const voiceSaveError = ref("");
+const voiceSavedAt = ref(0); // bumped on a successful save to flash a confirmation
+async function handleVoiceOverride({ key, provider, model, voiceName, url }) {
+  if (!activity.value || !key || !url) return;
+  const payload = { url, provider, model, voiceName };
+  voiceSaveError.value = "";
+  // Optimistic local update so the element plays the new voice immediately.
+  activity.value.audioOverrides = { ...(activity.value.audioOverrides || {}), [key]: payload };
+  try {
+    await updateDoc(
+      doc(db, "families", auth.familyId, "activities", activity.value.id),
+      { [`audioOverrides.${key}`]: payload }
+    );
+    voiceSavedAt.value = Date.now();
+  } catch (e) {
+    voiceSaveError.value = e?.message || "Couldn't save the voice.";
+  }
+}
+
+// Child link. Differentiated activities generate one link per child (keyed by
+// child id); undifferentiated ones use the single "all" key.
+const generatingKey = ref("");      // which link is currently generating
+const playerLinks = ref({});        // { [childId | "all"]: url }
 const linkError = ref("");
-const linkCopied = ref(false);
+const copiedKey = ref("");           // which link was just copied
+
+// Shareable activity URL — the per-activity page itself. Any guardian in the
+// same family can open it and view/edit per their permissions, so this is the
+// link a parent hands to a partner guardian (or the guide quotes on a call).
+const shareLink = computed(() =>
+  activity.value ? `${window.location.origin}/activity/${activity.value.id}` : ""
+);
+const shareCopied = ref(false);
+const uidCopied = ref(false);
+
+async function copyToClipboard(text, flag) {
+  try {
+    await navigator.clipboard.writeText(text);
+    flag.value = true;
+    setTimeout(() => (flag.value = false), 2000);
+  } catch { /* clipboard blocked */ }
+}
+const copyShareLink = () => copyToClipboard(shareLink.value, shareCopied);
+const copyUid = () => copyToClipboard(activity.value?.id || "", uidCopied);
 
 const TYPE_ICONS = {
-  quran: "📖", noorani_qaida: "🔤", story_reading: "📚", mathematics: "🔢",
-  computer: "💻", ai_robotics: "🤖", physical: "🏃", teaching: "📝",
+  quran: "📖", noorani_qaida: "🔤",
+  arabic_reading: "📗", urdu_reading: "📙", english_reading: "📘", story_reading: "📚", conversation: "💬",
+  mathematics: "🔢", computer: "💻", ai_robotics: "🤖", physical: "🏃", teaching: "📝",
 };
 const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Advanced", 5: "Mastery" };
 
@@ -119,6 +234,37 @@ const targetChildren = computed(() => {
   return children.value.filter((c) => ids.includes(c.id));
 });
 
+// Per-child differentiated content (content.byChild). When present, the parent can
+// flip between each child's level-paced version here, mirroring the player.
+const previewChildId = ref("");
+const byChildMap = computed(() => activity.value?.contentByChild || null);
+const differentiatedChildren = computed(() => {
+  const m = byChildMap.value;
+  if (!m) return [];
+  return targetChildren.value.filter((c) => m[c.id]);
+});
+watch(differentiatedChildren, (kids) => {
+  if (kids.length && !kids.some((c) => c.id === previewChildId.value)) previewChildId.value = kids[0].id;
+}, { immediate: true });
+const previewContent = computed(() => {
+  const m = byChildMap.value;
+  if (m && previewChildId.value && m[previewChildId.value]) return m[previewChildId.value];
+  return activity.value?.content || null;
+});
+const previewChildName = computed(() =>
+  children.value.find((c) => c.id === previewChildId.value)?.name || previewChildId.value
+);
+const previewLevel = computed(() => activity.value?.differentiatedLevels?.[previewChildId.value] || "");
+// Which provider/model wrote the CURRENTLY PREVIEWED content — the differentiated
+// pass's provider when a per-child variant is shown, else the shared generation's.
+const previewProvider = computed(() => {
+  const m = byChildMap.value;
+  if (m && previewChildId.value && m[previewChildId.value]) {
+    return { provider: activity.value?.differentiatedProvider || "", model: activity.value?.differentiatedModel || "" };
+  }
+  return { provider: activity.value?.contentProvider || "", model: activity.value?.contentModel || "" };
+});
+
 const hasCoopDriver = computed(() =>
   Object.values(scores.value).some((s) => s.isDriving)
 );
@@ -129,33 +275,39 @@ function toggleDriver(childId) {
   }
 }
 
-async function generateLink() {
+// `child` (optional) generates a link scoped to one differentiated child; omit it
+// for the shared single link (key "all").
+async function generateLink(child) {
   if (!activity.value) return;
-  generatingLink.value = true;
+  const key = child?.id || "all";
+  generatingKey.value = key;
   linkError.value = "";
-  playerLink.value = "";
   try {
+    const forChild = child
+      ? { id: child.id, name: child.name || child.id, level: activity.value.differentiatedLevels?.[child.id] || "" }
+      : null;
     const token = await createPlayerToken(
       auth.familyId,
       activity.value,
       activity.value.targetChildren || [],
       blockId,
       dateKey,
-      auth.user?.uid
+      auth.user?.uid,
+      forChild
     );
-    playerLink.value = `${window.location.origin}/play/${token}`;
+    playerLinks.value = { ...playerLinks.value, [key]: `${window.location.origin}/play/${token}` };
   } catch (e) {
     linkError.value = e?.message || "Failed to generate link.";
   } finally {
-    generatingLink.value = false;
+    generatingKey.value = "";
   }
 }
 
-async function copyLink() {
+async function copyLink(key) {
   try {
-    await navigator.clipboard.writeText(playerLink.value);
-    linkCopied.value = true;
-    setTimeout(() => (linkCopied.value = false), 2000);
+    await navigator.clipboard.writeText(playerLinks.value[key]);
+    copiedKey.value = key;
+    setTimeout(() => { if (copiedKey.value === key) copiedKey.value = ""; }, 2000);
   } catch { /* clipboard blocked */ }
 }
 
@@ -240,14 +392,42 @@ async function handleSubmitObservation() {
             <span class="meta-chip">{{ activity.subject }}</span>
             <span class="meta-chip">{{ activity.durationMinutes }} min</span>
             <span v-if="activity.coopMode" class="meta-chip co-op">Co-op</span>
+            <button
+              class="uid-chip"
+              :title="uidCopied ? 'Copied!' : 'Activity ID — click to copy'"
+              @click="copyUid"
+            >
+              <span class="uid-label">ID</span>
+              <span class="uid-value">{{ activity.id }}</span>
+              <span class="uid-copy">{{ uidCopied ? "✓" : "⧉" }}</span>
+            </button>
           </div>
         </div>
       </div>
 
-      <!-- Instructions -->
+      <!-- Instructions — shown in the guardian's native language first -->
       <section class="card">
         <h2 class="card-h">Parent Instructions</h2>
-        <p class="instructions">{{ activity.parentInstructions || "No instructions provided." }}</p>
+
+        <template v-if="hasNativeInstructions">
+          <div class="pi-head">
+            <SpeakButton
+              :text="activity.parentInstructionsNative || activity.parentInstructionsTranslit"
+              size="sm"
+              label="Listen"
+            />
+          </div>
+          <p
+            class="instructions pi-native"
+            :class="{ 'font-urdu': nativeIsScript, rtl: nativeIsScript }"
+          >{{ nativeInstructions }}</p>
+          <details v-if="activity.parentInstructions" class="pi-english">
+            <summary>In English</summary>
+            <p class="instructions">{{ activity.parentInstructions }}</p>
+          </details>
+        </template>
+
+        <p v-else class="instructions">{{ activity.parentInstructions || "No instructions provided." }}</p>
       </section>
 
       <!-- Walkthrough -->
@@ -259,48 +439,164 @@ async function handleSubmitObservation() {
       <!-- Activity content — generated automatically when the activity is created -->
       <section class="card">
         <div class="content-head">
-          <h2 class="card-h">Activity Content — {{ contentLabel }}</h2>
+          <h2 class="card-h">
+            Activity Content — {{ contentLabel }}
+            <ProviderBadge :provider="previewProvider.provider" :model="previewProvider.model" />
+          </h2>
           <!-- Content is generated automatically when the activity is created and
-               on first open; the only manual control is a subtle Regenerate. -->
-          <button
-            v-if="activity.content"
-            class="btn secondary regen-btn"
-            :disabled="generatingContent"
-            @click="handleGenerateContent"
-          >
-            {{ generatingContent ? "Working…" : "Regenerate" }}
-          </button>
+               on first open; manual controls let a parent regenerate or delete it. -->
+          <div class="content-actions">
+            <button
+              v-if="activity.content"
+              class="btn ghost danger del-btn"
+              :disabled="generatingContent || deletingContent"
+              @click="handleDeleteContent"
+            >
+              {{ deletingContent ? "Deleting…" : "Delete" }}
+            </button>
+            <button
+              class="btn secondary regen-btn"
+              :disabled="generatingContent || deletingContent"
+              @click="handleGenerateContent"
+            >
+              {{ generatingContent ? "Working…" : (activity.content ? "Regenerate" : "Generate") }}
+            </button>
+          </div>
+        </div>
+        <!-- Optional direction for the generator: what's wrong with the current
+             content, or the angle/perspective to take this (re)generation. Fed
+             into the generator's prompt. -->
+        <div class="regen-guidance">
+          <label for="regen-guidance" class="rg-label">
+            Direction for the generator <span class="rg-optional">(optional)</span>
+          </label>
+          <textarea
+            id="regen-guidance"
+            v-model="regenGuidance"
+            class="rg-input"
+            :maxlength="GUIDANCE_MAX"
+            rows="3"
+            :disabled="generatingContent || deletingContent"
+            placeholder="What should change this time? e.g. the previous version was too hard — use simpler words; focus more on…; avoid…; add more worked examples."
+          ></textarea>
+          <span class="rg-count">{{ regenGuidance.length }} / {{ GUIDANCE_MAX }}</span>
         </div>
         <p v-if="contentError" class="field-error" role="alert">{{ contentError }}</p>
 
-        <div v-if="activity.content" class="content-preview">
-          <ActivityContent :content="activity.content" />
+        <div v-if="activity.content || differentiatedChildren.length" class="content-preview">
+          <!-- Per-child differentiated versions: flip between each child's
+               level-paced content. Falls back to the shared blob below. -->
+          <div v-if="differentiatedChildren.length" class="bychild">
+            <div class="bychild-bar">
+              <span class="bychild-label">Per-child version:</span>
+              <button
+                v-for="c in differentiatedChildren"
+                :key="c.id"
+                type="button"
+                class="bychild-tab"
+                :class="{ active: c.id === previewChildId }"
+                @click="previewChildId = c.id"
+              >{{ c.name || c.id }}</button>
+            </div>
+            <p v-if="previewLevel" class="bychild-level">
+              <strong>{{ previewChildName }}’s level:</strong> {{ previewLevel }}
+            </p>
+          </div>
+          <ActivityContent
+            :key="previewChildId || 'all'"
+            :content="previewContent"
+            :audio-overrides="activity.audioOverrides || {}"
+            :can-edit-voice="true"
+            @update:override="handleVoiceOverride"
+          />
+          <p v-if="voiceSaveError" class="field-error" role="alert">{{ voiceSaveError }}</p>
+          <p v-else-if="voiceSavedAt" class="voice-saved" role="status">✓ Voice saved — this element now plays it for everyone.</p>
         </div>
         <p v-else-if="generatingContent" class="card-desc generating">
           <span class="mini-spinner" aria-hidden="true"></span>
           Building the {{ contentLabel.toLowerCase() }} automatically…
         </p>
         <p v-else class="card-desc">
-          Preparing the {{ contentLabel.toLowerCase() }} automatically…
+          No {{ contentLabel.toLowerCase() }} yet — use Generate to create it.
         </p>
+      </section>
+
+      <!-- Where this fits in the plan (parent journey) -->
+      <section class="card">
+        <button class="journey-toggle" @click="toggleJourney" :aria-expanded="journeyOpen">
+          <span>🧭 Where this fits in the plan</span>
+          <span class="chev">{{ journeyOpen ? "▲" : "▼" }}</span>
+        </button>
+        <div v-if="journeyOpen" class="journey-body">
+          <p v-if="journeyLoading" class="card-desc generating">
+            <span class="mini-spinner" aria-hidden="true"></span> Reading the plan…
+          </p>
+          <p v-else-if="journeyError" class="field-error">{{ journeyError }}</p>
+          <p v-else class="journey-text">{{ journeyText }}</p>
+        </div>
+      </section>
+
+      <!-- Share with a guardian — the per-activity page URL. A partner guardian
+           in the same family can open it to view (or edit, if their rights
+           permit) using the options on this page. Handy on a call with the guide. -->
+      <section class="card">
+        <h2 class="card-h">Share Activity</h2>
+        <p class="card-desc">
+          Send this link to a partner guardian. They can open this activity to view
+          it — and edit it if their permissions allow — using the options on this page.
+        </p>
+        <div class="link-box">
+          <input class="link-input" :value="shareLink" readonly @focus="$event.target.select()" />
+          <button class="btn secondary copy-btn" @click="copyShareLink">
+            {{ shareCopied ? "Copied!" : "Copy link" }}
+          </button>
+        </div>
       </section>
 
       <!-- Child link -->
       <section class="card">
         <h2 class="card-h">Child Link</h2>
-        <p class="card-desc">
-          Generate a link to open this activity on the child's device. The link expires in 8 hours.
-        </p>
-        <button class="btn primary" :disabled="generatingLink" @click="generateLink">
-          {{ generatingLink ? "Generating…" : "Generate child link" }}
-        </button>
-        <p v-if="linkError" class="field-error" role="alert">{{ linkError }}</p>
-        <div v-if="playerLink" class="link-box">
-          <input class="link-input" :value="playerLink" readonly />
-          <button class="btn secondary copy-btn" @click="copyLink">
-            {{ linkCopied ? "Copied!" : "Copy" }}
+
+        <!-- Differentiated: one link per child, each at the child's own level. -->
+        <template v-if="differentiatedChildren.length">
+          <p class="card-desc">
+            This activity is differentiated — generate a separate link for each child so
+            their device shows material at their own level. Links expire in 8 hours.
+          </p>
+          <div v-for="c in differentiatedChildren" :key="c.id" class="child-link-row">
+            <div class="cl-head">
+              <span class="cl-name">{{ c.name || c.id }}</span>
+              <span v-if="activity.differentiatedLevels?.[c.id]" class="cl-level">{{ activity.differentiatedLevels[c.id] }}</span>
+              <button class="btn primary cl-gen" :disabled="generatingKey === c.id" @click="generateLink(c)">
+                {{ generatingKey === c.id ? "Generating…" : (playerLinks[c.id] ? "Regenerate" : "Generate link") }}
+              </button>
+            </div>
+            <div v-if="playerLinks[c.id]" class="link-box">
+              <input class="link-input" :value="playerLinks[c.id]" readonly />
+              <button class="btn secondary copy-btn" @click="copyLink(c.id)">
+                {{ copiedKey === c.id ? "Copied!" : "Copy" }}
+              </button>
+            </div>
+          </div>
+        </template>
+
+        <!-- Undifferentiated: a single shared link. -->
+        <template v-else>
+          <p class="card-desc">
+            Generate a link to open this activity on the child's device. The link expires in 8 hours.
+          </p>
+          <button class="btn primary" :disabled="generatingKey === 'all'" @click="generateLink()">
+            {{ generatingKey === 'all' ? "Generating…" : "Generate child link" }}
           </button>
-        </div>
+          <div v-if="playerLinks.all" class="link-box">
+            <input class="link-input" :value="playerLinks.all" readonly />
+            <button class="btn secondary copy-btn" @click="copyLink('all')">
+              {{ copiedKey === 'all' ? "Copied!" : "Copy" }}
+            </button>
+          </div>
+        </template>
+
+        <p v-if="linkError" class="field-error" role="alert">{{ linkError }}</p>
       </section>
 
       <!-- Scoring -->
@@ -389,6 +685,18 @@ async function handleSubmitObservation() {
 .activity-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .meta-chip { font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 999px; background: #f1f5f9; color: #475569; }
 .meta-chip.co-op { background: #e0f2fe; color: #0369a1; }
+/* Activity unique identifier — small, monospace, click-to-copy. Not meant to be
+   pretty, just always visible and copyable for support / sharing. */
+.uid-chip {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 999px;
+  background: #f8fafc; color: #64748b; border: 1px solid #e2e8f0;
+  cursor: pointer; font-family: inherit;
+}
+.uid-chip:hover { background: #f1f5f9; color: #334155; }
+.uid-label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.uid-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.uid-copy { color: #94a3b8; }
 .rank-badge { font-size: 0.72rem; font-weight: 700; padding: 0.15rem 0.5rem; border-radius: 999px; }
 .rank-1 { background: #dcfce7; color: #166534; }
 .rank-2 { background: #dbeafe; color: #1e40af; }
@@ -404,19 +712,65 @@ async function handleSubmitObservation() {
 
 .content-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem; }
 .content-head .card-h { margin: 0; }
+.content-actions { display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; }
+.regen-guidance { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.6rem 0 0.2rem; }
+.rg-label { font-size: 0.82rem; font-weight: 600; color: #334155; }
+.rg-optional { font-weight: 400; color: #94a3b8; }
+.rg-input {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 3.2rem;
+  font: inherit; font-size: 0.86rem; line-height: 1.4; color: #0f172a;
+  padding: 0.5rem 0.6rem; border: 1px solid #cbd5e1; border-radius: 0.5rem;
+}
+.rg-input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.15); }
+.rg-input:disabled { background: #f1f5f9; color: #94a3b8; }
+.rg-count { align-self: flex-end; font-size: 0.72rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
 .regen-btn { font-size: 0.8rem; padding: 0.3rem 0.8rem; flex-shrink: 0; }
+.del-btn { font-size: 0.8rem; padding: 0.3rem 0.8rem; flex-shrink: 0; }
+.btn.ghost { background: transparent; color: #475569; border: 1px solid #cbd5e1; }
+.btn.ghost.danger { color: #b91c1c; border-color: #fca5a5; }
+.btn.ghost.danger:hover:not(:disabled) { background: #fef2f2; border-color: #f87171; }
 .content-preview { margin-top: 0.75rem; }
+.bychild { margin-bottom: 0.85rem; }
+.bychild-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+.bychild-label { font-size: 0.82rem; font-weight: 600; color: #64748b; margin-right: 0.2rem; }
+.bychild-tab { font: inherit; font-size: 0.85rem; font-weight: 600; padding: 0.3rem 0.8rem; border-radius: 999px; border: 1px solid #d8b4fe; background: #fff; color: #7c3aed; cursor: pointer; }
+.bychild-tab.active { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+.bychild-level { margin: 0.5rem 0 0; padding: 0.5rem 0.7rem; background: #faf5ff; border: 1px solid #ede9fe; border-radius: 8px; font-size: 0.85rem; color: #475569; }
 .generating { display: flex; align-items: center; gap: 0.5rem; color: #475569; }
 .mini-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #cbd5e1; border-top-color: #0b1f3a; animation: spin 0.7s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.journey-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; background: none; border: none; cursor: pointer; font: inherit; font-size: 0.95rem; font-weight: 600; color: #334155; padding: 0; }
+.journey-toggle .chev { color: #94a3b8; font-size: 0.8rem; }
+.journey-body { margin-top: 0.75rem; }
+.journey-text { white-space: pre-wrap; color: #1e293b; line-height: 1.7; margin: 0; }
+
 .instructions, .walkthrough { white-space: pre-wrap; color: #1e293b; line-height: 1.7; margin: 0; }
 .walkthrough { color: #475569; font-style: italic; }
+
+/* Mother-tongue (transliterated + spoken) parent instructions */
+/* Native-language parent instructions (primary). Nastaliq needs extra size and
+   vertical room to read beautifully; RTL for native scripts. */
+.pi-head { display: flex; justify-content: flex-end; margin-bottom: 0.35rem; }
+.pi-native { color: #1e293b; }
+.pi-native.font-urdu { font-size: 1.3rem; line-height: 2.6; }
+.pi-native.rtl { direction: rtl; text-align: right; }
+/* English fallback, demoted to a collapsible secondary block. */
+.pi-english { margin-top: 0.85rem; padding-top: 0.75rem; border-top: 1px dashed #e2e8f0; }
+.pi-english summary { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; cursor: pointer; }
+.pi-english .instructions { margin-top: 0.5rem; }
 
 /* Child link */
 .link-box { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
 .link-input { flex: 1; padding: 0.4rem 0.6rem; border: 1px solid #cbd5e1; border-radius: 6px; font: inherit; font-size: 0.82rem; color: #334155; background: #f8fafc; }
 .copy-btn { white-space: nowrap; }
+
+.child-link-row { padding: 0.75rem 0; border-top: 1px solid #eef2f6; }
+.child-link-row:first-of-type { border-top: none; }
+.cl-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.cl-name { font-weight: 600; color: #0f172a; }
+.cl-level { font-size: 0.78rem; color: #475569; background: #f1f5f9; border-radius: 999px; padding: 0.1rem 0.55rem; }
+.cl-gen { margin-left: auto; }
 
 /* Scoring */
 .score-rows { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.75rem; }
@@ -446,4 +800,5 @@ async function handleSubmitObservation() {
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .field-error { color: #b91c1c; font-size: 0.82rem; margin: 0.4rem 0; }
 .success-msg { color: #15803d; font-size: 0.85rem; margin: 0 0 0.5rem; }
+.voice-saved { color: #6d28d9; font-size: 0.82rem; margin: 0.5rem 0 0; }
 </style>

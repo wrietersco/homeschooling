@@ -8,7 +8,8 @@ import { resolveCaller } from "../lib/caller.js";
 import { buildGroundedSystemPrompt } from "./grounding.js";
 import { createTools, filterDeclarations, READ_ONLY_TOOL_NAMES } from "./tools.js";
 import { runAgent } from "./runtime.js";
-import { resolveLlm } from "./agentConfig.js";
+import { resolveLlm, secretNameForProvider } from "./agentConfig.js";
+import { regenerateBriefSafe } from "./knowledgeBrief.js";
 
 const CURRICULUM_BASE_PROMPT = [
   "You are the Dar-al-Hikmah curriculum architect for this family.",
@@ -40,6 +41,10 @@ const CURRICULUM_BASE_PROMPT = [
   "  targetChildren (child IDs from the family data).",
   "- Keep scope realistic: 4-7 subjects for 6 months.",
   "- Note co-op opportunities (siblings learning together) explicitly.",
+  "- Treat each reading LANGUAGE as its own subject/strand (Arabic reading, Urdu reading,",
+  "  English reading) with its own pedagogy — do not merge languages into a single 'Reading'.",
+  "- Keep Qur'an (recitation/memorisation of actual verses) SEPARATE from Arabic literacy",
+  "  (letters/phonics/words). They are different competencies.",
   "",
   "IMPORTANT: Do not call finalize_curriculum until you know: (a) which subjects to cover,",
   "(b) approximate levels for each child, and (c) the family's teaching preferences.",
@@ -174,26 +179,55 @@ export async function runCurriculum({ db, familyId, uid, role, message, history 
     { merge: true }
   );
 
-  return { text: result.text, runId: runRef.id, steps: result.steps, curriculum: curriculumCreated };
+  // A new curriculum changes the plan → refresh the shared brief.
+  if (curriculumCreated) await regenerateBriefSafe(db, familyId);
+
+  return {
+    text: result.text,
+    runId: runRef.id,
+    steps: result.steps,
+    curriculum: curriculumCreated,
+    stoppedAt: result.stoppedAt,
+    finishReason: result.finishReason || null,
+  };
 }
 
-export const askCurriculum = onCall({ secrets: ["GEMINI_API_KEY"] }, async (request) => {
+export const askCurriculum = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"] }, async (request) => {
   const { db, uid, familyId, role } = await resolveCaller(request);
   const message = String(request.data?.message || "").trim().slice(0, 4000);
   if (!message) throw new HttpsError("invalid-argument", "Send a message to the curriculum agent.");
   const history = Array.isArray(request.data?.history) ? request.data.history : [];
 
-  const { llm, genConfig } = await resolveLlm(db, "curriculum", process.env.GEMINI_API_KEY);
+  const { llm, genConfig, provider } = await resolveLlm(
+    db, "curriculum",
+    { gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY },
+    { familyId, uid, source: "askCurriculum" }
+  );
   if (!llm) {
     return {
-      text: "The curriculum agent isn't configured yet — set the GEMINI_API_KEY secret to enable it.",
+      text: `The curriculum agent isn't configured yet — set the ${secretNameForProvider(provider)} secret to enable it.`,
       configured: false,
     };
   }
 
-  const { text, runId, curriculum } = await runCurriculum({
-    db, familyId, uid, role, message, history, llm, genConfig,
-  });
+  let result;
+  try {
+    result = await runCurriculum({ db, familyId, uid, role, message, history, llm, genConfig });
+  } catch (e) {
+    // A raw thrown error reaches the client as an opaque code:"internal" /
+    // message:"INTERNAL" — the user just sees the agent go silent. Re-throw as an
+    // HttpsError (whose message IS delivered) so the real reason is visible, and
+    // log the full error server-side for the Cloud Functions logs.
+    console.error(`[askCurriculum] run failed for family ${familyId}:`, e);
+    throw new HttpsError("internal", `The curriculum agent failed: ${e?.message || e}`);
+  }
 
-  return { text, runId, configured: true, curriculum: curriculum || null };
+  return {
+    text: result.text,
+    runId: result.runId,
+    configured: true,
+    curriculum: result.curriculum || null,
+    stoppedAt: result.stoppedAt,
+    finishReason: result.finishReason,
+  };
 });

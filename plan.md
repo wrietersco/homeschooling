@@ -170,6 +170,129 @@ The 10 phases roll up into **4 approval checkpoints** so you approve 4 times, no
 
 ---
 
+## Epic 2 — Quran taxonomy grounding & platform library (started 2026-06-17)
+
+All work on branch `epic2-quran-taxonomy-grounding`. Deployed to https://homeschooling-b3e57.web.app. **Do NOT push to GitHub** (user instruction).
+
+### E2-A: 8-request Arabic/content feature batch — DONE & DEPLOYED 2026-06-18
+
+1. **Per-agent LLM config** — `functions/agents/agentConfig.js`; `loadAgentConfig(db,key)` deep-merges defaults ⊕ stored; agents now actually read config (was `process.env.GEMINI_MODEL`); PlatformView LLM tab rebuilt.
+2. **Gemini TTS** — `functions/agents/tts.js`; `synthesizeSpeech` callable; PCM→WAV; Storage `tts-cache/{sha}.wav`; `useSpeech.js` server-first with browser fallback.
+3. **Indo-Pak Arabic font** — Scheherazade New self-hosted (`public/fonts/`); `.font-arabic` class.
+4. **Word-click TTS bug fix** — removed per-text `serverFailed` blacklist; transient errors now fall back for that tap only.
+5. **Word-by-word EN/UR glosses** — `en`/`ur` on qaida + quran word objects; "Show meaning" toggle in ActivityContent.vue.
+6. **Dialogue content type** — `conversation` activity type; `dialogue` content kind; chat-bubble renderer; per-speaker voice palette; `speakSequence`.
+7. **Anti-repetition** — `usedPassages` ledger in `meta/contentUsage.recent`; VARIETY system prompt block.
+8. **Mother-tongue parent instructions** — `parentInstructionsTranslit`/`parentInstructionsNative` on activities; "In your language" block in ActivityView + ActivityPlayerView.
+9. **Per-child performance in grounding** — `summarizeChildPerformance` (scores + observations) injected into all agents and syllabus/content workers.
+10. **Player child-attribution** — ActivityPlayerView shows "For \<child chips\>" row.
+11. **Planner search/filters** — search box + type + child dropdowns in PlannerView pool.
+12. **Syllabus progression flowchart** — per-subject rank-ordered horizontal flow in SyllabusView.
+13. **Auto-schedule agent** — `functions/agents/scheduler.js`; `autoSchedule` callable; guardian availability (weekday ranges); PlannerView "✨ Schedule via agent".
+14. **Lifecycle deletes** — `deleteCurriculum`/`deleteSyllabus` callables; delete buttons in CurriculumView, SyllabusView, PlatformView.
+15. **Guide agent on Activity Player** — floating dock FAB in ActivityPlayerView; per-guardian sessions (`intercom/{uid}/messages`); `context` param; `GuideChat.vue` reusable component.
+
+### E2-B: Stability hardening pass (18 audit fixes) — DONE & DEPLOYED 2026-06-19
+
+Removed `testImageGen`/Phase-0 `agent` endpoint; `quranSource.js` per-surah bundle cache; syllabus failure-loop fix (`MAX_SUBJECT_ATTEMPTS=3`); disabled-family enforcement; player token expiry (Firestore rule + `maintenance.js` reaper); `llm.js` retry/backoff; rate limiting (`rateLimit.js`); `FieldValue.serverTimestamp()` → `new Date()` fix; Storage bucket default fix; TTS inline cap (1.5 MB); contextual console.warn.
+
+### E2-C: Content management — DONE & DEPLOYED 2026-06-19–21
+
+- **Stop buttons** — `stopContentBackfill`/`stopSyllabus` callables; Stop/Resume UI on ContentBackfill.vue and SyllabusView.
+- **Picture-naming images** — `generateObjectImages` in `imageGen.js`; `imageSubject` on vocab/qaida items; object-style image gen; picture card grid renderer.
+- **Embedded stories** — `tips` kind rewritten to emit full `story`/`discussionQuestions` (never tell parent to "find a story"); tips renderer in ActivityContent.vue.
+- **Force regenerate** — `requestContentBackfill({force, subjectId, types})`; `forceToken` convergence; "Regenerate all" + "Regenerate by type" chips in SyllabusView.
+
+### E2-D: Activity differentiation — DONE & DEPLOYED 2026-06-25
+
+- **Audit** — read-only `auditActivityDifferentiation` callable; "Differentiation audit" section in SyllabusView. Result on live data: 341 activities → 43 split + 46 review.
+- **Per-child variants** — `differentiateActivities` callable (`functions/platform/differentiate.js`); `contentByChild[childId]` field; `differentiatedLevels`; LLM infers level from strengths/weaknesses/scores. Parent ActivityPlayerView renders `contentByChild[activeChildId]` with fallback to shared `content`.
+- **Child share-page differentiation (DONE 2026-06-25):** `createPlayerToken` (`web/src/services/player.js`) takes an optional `forChild` ({id,name,level}); when the activity has `contentByChild[forChild.id]` it embeds that child's variant + `forChildId`/`forChildName`/`differentiatedLevel` and scopes `targetChildren` to that child. ActivityView "Child Link" section now renders one Generate/Copy link **per differentiated child** (`differentiatedChildren`), falling back to the single shared link for undifferentiated activities. ChildPlayerView shows a "For \<name\>" + level badge under the title. Build clean; both views render without console errors. NOT yet emulator/E2E-exercised (needs seeded differentiated activity).
+
+### E2-E: Super Admin platform tooling — DONE & DEPLOYED 2026-06-25
+
+- **Model tooling** — `getModelCatalog`/`previewModel`/`testAllModels` callables; "Models" tab in PlatformView.
+- **Cost metering** — `functions/lib/costMeter.js`; per-call cost events (`costEvents/{path}`); family + platform rollups (`costRollups/{path}`, `platformCostRollups/{period}`); `getCostOverview`/`getFamilyCostDetail` callables; "Costs" tab in PlatformView.
+- **Knowledge brief** — `functions/agents/knowledgeBrief.js`; `rebuildKnowledgeBrief`/`getActivityJourney` callables; triggers on activities/curriculum/blocks; `meta/knowledge_brief`.
+- **Skill mapping** — `functions/agents/skillMap.js`; `requestSkillMap` callable; links children ↔ skills ↔ activities; repairs activity→child bindings.
+- **Content planning agent** — `functions/agents/contentPlan.js`; `requestContentPlanning`; per-subject learning arc at `subjectPlans/{subjectId}`.
+- **Guide chat history clear** — `clearGuideHistory` callable.
+
+### E2-F: Quran + Noorani Qaida platform library — DONE & DEPLOYED 2026-06-25
+
+- **Full-Quran import** — `functions/platform/quranImport.js`; `importQuran`/`getQuranStatus` callables; shared `quran/{surah}` collection; superadmin-only write; any signed-in read.
+- **Noorani Qaida corpus** — `functions/agents/qaidaCorpus.js`; 449 items / 12 lessons (letters, joined, zabar/zer/pesh, tanween, madd, khari-harakat, leen, jazm, tashdeed, tashdeed-combos); `functions/agents/qaidaSpell.js` deterministic spell-out engine with Madd fusion + standing harakat; shared `nooraniQaida/{lessonId}` collection.
+- **Qaida import + audio** — `functions/platform/qaidaImport.js`; `importQaida`/`getQaidaStatus` (idempotent, prunes orphans, preserves audio by glyph+script); `requestQaidaAudio`/`stopQaidaAudio`/`qaidaAudioWorker` (background job, concurrency=1, batch=15, quota-aware); `regenerateQaidaWord`; `deleteQaidaLibrary`/`deleteQaidaAudio`. Audio reuses `tts-cache/{sha}.wav`.
+- **TTS quota** — `functions/platform/quota.js`; `DEFAULT_QUOTA` (RPD per model); `platformBudget`/`familyBudget` allocation; `enforceFamilyTtsQuota` + `platformTtsRemaining`; `getQuotaConfig`/`setQuotaConfig` callables; "Quota" tab in PlatformView. Wired into `synthesizeSpeech` (family) + `qaidaAudioWorker` (platform reserve).
+- **Usage dashboard** — `functions/platform/usageDashboard.js`; `getUsageDashboard` callable; TTS daily counter (`platform/usage/daily/{day}`); alerts (danger/warn/ok); 14-day trend; Qaida job state; monthly cost rollup; "Usage" tab in PlatformView.
+- **Qaida job UX** — live onSnapshot on `platform/qaidaAudioJob`; "paused" state after 3 quota-walled passes; "Restart audio" / "Delete audio" buttons; amber pause indicator.
+- **Firestore rules** — `nooraniQaida/{doc=**}` signedIn-read/superadmin-write; `platform/quota` superadmin read/write.
+- **Test counts after E2-F:** 160 functions-unit + 26 web vitest green.
+
+### E2-L: Live Qaida audio resolution (auto-attach over time) — DONE & DEPLOYED 2026-06-26
+
+Made qaida activities pick up recordings as the platform voices them over days/weeks, with **zero regeneration** — closing the gap that embedded audio was a snapshot frozen at content-generation time.
+- **`firestore.rules`** — `nooraniQaida/{doc=**}` read is now **public** (`if true`), so the unauthenticated child player can resolve audio live. User-approved: standard non-sensitive Qaida content + already-public Storage audio URLs, and replaying cached audio is free.
+- **`web/src/composables/useQaidaLibrary.js`** (new) — given qaida content, collects distinct `materialRef.lessonId`s, fetches those `nooraniQaida/{lessonId}` docs once (session-cached), and exposes `liveAudioUrl(it)` / `liveSpellScript(it)` that prefer the library's CURRENT recording, falling back to the embedded snapshot, then TTS. Best-effort (silent fallback on any read failure).
+- **`web/src/components/ActivityContent.vue`** — the qaida renderer (`reciteGlyph`, `.glyph-lib` accent, 🎧/🔊 icon, spell-script caption) now uses the live resolvers. Same component serves parent + child players, so both auto-upgrade.
+- **Effect:** regenerating the syllabus is now decoupled from audio timing — content can be (re)generated any time (audio mostly TTS at first), and each glyph silently switches to its recording the moment the platform voices it, no further processing. Only activities generated since E2-G carry `materialRef`, so a one-time syllabus/content regen seeds the references.
+- **Tests:** ActivityContent.qaida.test.js (+1 auto-upgrade case via mocked live resolver). **194 functions-unit + 32 web vitest green, web build clean.**
+- **Deployed 2026-06-26:** firestore:rules + hosting (no functions change — `materialRef` already embedded since E2-G).
+
+### E2-K: Qaida audio self-pacing (never throttle, auto-resume) — DONE & DEPLOYED 2026-06-26
+
+The audio worker was crawling into Google's free-tier TTS wall (100 RPD / 10 RPM; user hit 114/100 + 14/10) then hard-pausing for a manual restart. Replaced with a self-managed rate limiter.
+- **`functions/platform/qaidaImport.js`** — `VOICE_BATCH=4` real syntheses per pass, `PASS_INTERVAL_MS=2h` between passes (~`SAFE_DAILY_TARGET≈48`/day), `PER_CALL_DELAY_MS=3000`. Pure exported `gentlePassDue(job, nowMs)` is the limiter; the every-1-min scheduled worker claims only when a pass is due, else no-ops. `synthToStorage` returns `{url, cached}` so cached scripts apply free and don't consume the batch. `runQaidaAudioPass` ALWAYS re-queues (removed `paused`/`MAX_QUOTA_PASSES`/`MAX_STALL_PASSES`) so it auto-resumes across days with no restart; platform-reserve-exhausted backs off one interval instead of erroring. `recordTtsUsage` now logs real API calls (not free cache hits). "Restart audio" resets the pacing timer and voices a 4-clip primer immediately.
+- **`web/src/views/PlatformView.vue`** — active message shows `qaidaJob.pacing`; helper text explains ~48/day auto-resume, no restart needed.
+- **Tests:** qaidaAudio.test.js (+3 `gentlePassDue`). **189 functions-unit green, web build clean.**
+- **Deployed 2026-06-26:** functions qaidaAudioWorker, requestQaidaAudio, regenerateQaidaWord + hosting. 449 clips fully voice in ~9-10 days, automatically.
+
+### E2-J: Differentiation generalised beyond the Qaida pilot — DONE & DEPLOYED 2026-06-26
+
+The differentiation apply phase now covers EVERY clubbed activity (using E2-H's authoritative `targetingMode`), not just Noorani Qaida by type.
+- **`functions/platform/differentiate.js`** — candidate selection replaced the hand-rolled `type+skillPaced+!coop` filter with the pure, exported `isDifferentiationCandidate(activity, typeSet)` = `!contentByChild && (typeSet empty || matches type) && classifyActivity(activity).clubbed`. `classifyActivity` honours the content plan's `targetingMode` when set (heuristic otherwise), so a `teaching` activity the old filter ignored is now differentiated when the plan marks it individual. `runDifferentiation` + the callable now default `types` to `[]` (all flagged) instead of `["noorani_qaida"]`.
+- **`web/src/views/SyllabusView.vue`** — refactored `differentiateQaida` into a generic `differentiate(types, label)`; added a **"Differentiate all flagged (N)"** primary button (covers every clubbed activity, count from `auditPlan.summary.toSplit`, disabled when zero) beside a **"Noorani Qaida only"** secondary button.
+- **Tests:** `functions/test/differentiate.test.js` (new, 8 — covers type filter, already-differentiated skip, single-child skip, `targetingMode` individual/shared override, null-safety). **186 functions-unit + 31 web vitest green, web build clean.**
+- **Deployed 2026-06-26:** function differentiateActivities + hosting. CAVEAT: `targetingMode`-driven candidates only appear after a content-planning re-run (else the type+co-op heuristic still applies, which is the prior pilot behavior). Each differentiated activity is per-child content + image gen (slow) — the client loops one-per-call.
+
+### E2-I: Scheduler consumes the material meta — DONE & DEPLOYED 2026-06-26
+
+The auto-scheduler now reads each activity's `plan.material` (from E2-H) to place repeatable work multiple times and split individually-paced work per child.
+- **`functions/agents/scheduler.js`** — pure `weeklyRepeatTarget(material)` (daily→5 weekday placements, weekly/biweekly/monthly/non-repeatable→1) + `describeMaterialForPool(material)` append a `· repeat daily (aim ~5×/week) · individual — one session per child` suffix to each pool line. New SCHEDULING-PRINCIPLES block tells the agent to place repeatable items ~N×/week (the "⚠ already scheduled" caution doesn't apply to them) and to place a SEPARATE block per child for `individual` activities. `schedule_block` gains an optional `forChildId`: when the activity targets that child (or everyone), the block is scoped to `targetChildren:[forChildId]` + records `forChildId`, creating a per-child session.
+- **`web/src/views/ActivityPlayerView.vue`** — `targetChildren` now prefers the BLOCK's `targetChildren` over the activity's (was the reverse), so a per-child scheduled block shows just that child and renders their `contentByChild` variant. Closes the differentiation loop: plan marks individual → scheduler makes per-child blocks → player shows the per-child content + per-child link. Stale/garbage ids still fall back to all children.
+- **Tests:** scheduler.test.js (+2: `weeklyRepeatTarget`, `describeMaterialForPool`). **178 functions-unit + 31 web vitest green, web build clean.**
+- **Deployed 2026-06-26:** function autoSchedule + hosting. CAVEAT: per-child/repetition behavior is agent-driven off the pool hints, and only kicks in for activities whose plan carries material meta (re-run content planning first). Repetition counts are guidance (`aim ~N×`), not hard-enforced.
+
+### E2-H: Creative-tier material meta on the content plan — DONE & DEPLOYED 2026-06-26
+
+The content-planning agent now decides each activity's **material meta** — the missing input the scheduler (repetition counts) and differentiation (individual-vs-shared) always needed.
+- **`functions/agents/contentPlan.js`** — `record_subject_plan` schema gains per-activity `repeatable` / `repeatFrequency` / `complexity` / `targetingMode`; `sanitizeSubjectPlan` normalizes them into a `material` block (case-insensitive, `repeatFrequency`∈{daily,weekly,biweekly,monthly,once}, `complexity` 1-5 falling back to the activity rank, `targetingMode`∈{individual,shared} else "" so a hallucination doesn't override the audit heuristic; a repeatable item with no frequency defaults to daily). The `material` block is stamped onto `activities/{id}.plan.material` and surfaced in the content-worker canvas (`buildPlanContextString`) as a repeatable/individually-paced hint. Prompt instructs the agent to set it.
+- **`functions/platform/activityAudit.js`** — `classifyActivity` now treats `plan.material.targetingMode` as **authoritative** for the individual-vs-shared axis when set (coopMode is set inconsistently by the syllabus agent, so the type+coop heuristic is only the fallback). Report adds `pacedSource` ("plan"|"heuristic") + `targetingMode`; the split rationale notes when the plan drove it. This lets the differentiation audit trust a deliberate decision instead of guessing — e.g. a `teaching` activity the heuristic keeps shared is correctly clubbed→split when the plan marks it individual.
+- **Tests:** contentPlan.test.js (+4 material-meta cases) + activityAudit.test.js (+3 targetingMode-override cases). **176 functions-unit green.**
+- **Deployed 2026-06-26:** functions requestContentPlanning, auditActivityDifferentiation. No web changes (audit UI renders the improved rationale/recommendation automatically). CAVEAT: material meta populates only on the NEXT content-planning run (existing plans lack it → audit falls back to the heuristic until re-planned). Scheduler does not yet READ `repeatable`/`repeatFrequency` for repetition counts — that's the next consumer.
+
+### E2-G: Qaida library wiring (first `materialRef`) — DONE & DEPLOYED 2026-06-26
+
+The first activity↔material link: `qaida_exercise` drill items now reference the shared `nooraniQaida` library and consume its curated spell-out recording + canonical script instead of TTS-ing the raw glyph.
+- **`functions/agents/qaidaLibrary.js`** (new) — `normalizeGlyph` (NFC + trim, harakat-sensitive), `buildGlyphMap` (normalized-glyph → library item, earliest lesson wins duplicates), `linkQaidaItem` (attaches `materialRef={collection,lessonId,glyph}` + denormalizes `spellScript`/`audioUrl`, backfills blank translit), `enrichQaidaContent(content,{db|glyphMap})` (5-min TTL module cache, best-effort, never throws). Content still **embeds** the audio/script (offline + token player keep working); `materialRef` records the linkage for the future full split.
+- **`functions/agents/activityContent.js`** — `enrichQaidaContent` runs after capture (mirrors the `quran_reading` enrichment block), before the image step. Composes across all 3 generation paths (inline syllabus `create_activity`, on-demand regenerate/backfill, per-child `differentiateActivities`) — all route through `generateContentForActivity` and pass `db`.
+- **`web/src/components/ActivityContent.vue`** — `reciteGlyph(it,lang)`: `playAudio(it.audioUrl)` (curated recording) with TTS `onError` fallback; renders `it.spellScript` caption; linked glyphs get `.glyph-lib` accent + 🎧 icon (vs 🔊 for TTS-only).
+- **Tests:** `functions/test/qaidaLibrary.test.js` (9) + `web/src/components/ActivityContent.qaida.test.js` (5). **169 functions-unit + 31 web vitest green, web build clean.**
+- **Deployed 2026-06-26:** functions generateActivityContent, backfillActivityContent, requestContentBackfill, contentBackfillWorker, requestContentSample, regenerateFailedContent, generateSyllabus, syllabusWorker, differentiateActivities + hosting (also ships the E2-D `contentByChild` child-link web changes). Users hard-refresh once (SPA-cache).
+- **CAVEAT:** linking happens at generation time → only NEW/regenerated qaida content is linked (existing activities need Regenerate/backfill). A glyph plays a recording only once the superadmin has run the Qaida audio job for that glyph (else it matches script-only and still TTS-falls-back). Matching is exact-normalized & harakat-sensitive — a drill glyph not in the standard corpus stays TTS.
+
+### Open / deferred after E2-F
+
+| Item | Status |
+|---|---|
+| ChildPlayerView + token embed render `contentByChild` (not shared `content`) | ✅ DONE 2026-06-25 — per-child child links + "For \<name\>" badge |
+| Wire `qaida_exercise` activity renderer to pull from `nooraniQaida` library (materialRef) | ✅ DONE 2026-06-26 — glyph→library link, curated spell-out audio + script in player |
+| Creative-tier material meta (`repeatable`, `repeatFrequency`, `complexity`, `targetingMode`) on `contentPlan.js` | ✅ DONE & DEPLOYED 2026-06-26 — plan emits material meta; audit consumes `targetingMode` authoritatively |
+| Superadmin runs import → generate audio → audits voice quality | ⬜ Operational — audio worker now SELF-PACES (~48/day) under the free TTS limit and auto-resumes across days (E2-K), so ~449 clips fully voice in ~9-10 days with no restart; no billing upgrade required |
+| Activity Qaida renderer in ChildPlayerView uses shared audio clips from `nooraniQaida` | ✅ DONE 2026-06-26 — same `ActivityContent` renderer + token embed carry the denormalized library audio |
+
+---
+
 ## 7. Testing strategy
 
 - **Unit (`node --test`)** — pure logic: agent tools, query-plan builder, scoring rules (completion + co-op/driving), complexity ordering, date/timezone utils, guiding-light prompt assembly, Arabic/Quran/Noorani helpers.

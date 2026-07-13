@@ -36,8 +36,9 @@ test("edit family profile (guiding light + goal mode persists)", async ({ page }
 
   // Reload → values persisted from Firestore.
   await page.reload();
-  await expect(page.getByLabel("Main guiding light")).toHaveValue("The Quran and the Sunnah, above all.");
-  await expect(page.getByLabel("Combined for all children")).toBeChecked();
+  await expect(page.getByLabel("Main guiding light"))
+    .toHaveValue("The Quran and the Sunnah, above all.", { timeout: 10_000 });
+  await expect(page.getByLabel("Combined for all children")).toBeChecked({ timeout: 10_000 });
 });
 
 test("add a guardian and a child", async ({ page }) => {

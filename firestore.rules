@@ -57,9 +57,15 @@ service cloud.firestore {
       allow read, write: if signedIn() && request.auth.uid == uid;
     }
 
-    // Platform config: superadmin only.
+    // Platform config (incl. platform/pricing): superadmin only.
     match /platform/{doc=**} {
       allow read, write: if isSuperAdmin();
+    }
+
+    // Platform-wide cost rollups: superadmin read; written server-side (Admin SDK).
+    match /platformCostRollups/{period} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
     }
 
     // Global skill registry (top-level collection): readable by any signed-in
@@ -68,6 +74,24 @@ service cloud.firestore {
     // (Admin SDK), so clients never write arbitrary global data directly.
     match /skillRegistry/{skillId} {
       allow read: if signedIn();
+      allow write: if isSuperAdmin();
+    }
+
+    // Shared Quran corpus (top-level): readable by any signed-in user; imported
+    // and maintained only by the superadmin via the importQuran callable.
+    match /quran/{doc=**} {
+      allow read: if signedIn();
+      allow write: if isSuperAdmin();
+    }
+
+    // Shared Noorani Qaida corpus (top-level): PUBLICLY readable. The unauthenticated
+    // child player resolves each drill glyph's current recording live from here (by
+    // materialRef) so activities pick up audio as it's generated over time. The
+    // content is standard, non-sensitive Qaida letters + already-public Storage audio
+    // URLs, and replaying cached audio costs nothing — so open read is acceptable.
+    // Imported, audio-generated, and audited only by the superadmin.
+    match /nooraniQaida/{doc=**} {
+      allow read: if true;
       allow write: if isSuperAdmin();
     }
 
@@ -104,6 +128,17 @@ service cloud.firestore {
         allow write: if isSuperAdmin();
       }
 
+      // Cost metering (Phase A) — deep per-call log + rollups. Superadmin-only:
+      // families do not see dollar figures. Written server-side (Admin SDK).
+      match /costEvents/{path=**} {
+        allow read: if isSuperAdmin();
+        allow write: if false;
+      }
+      match /costRollups/{path=**} {
+        allow read: if isSuperAdmin();
+        allow write: if false;
+      }
+
       // Member-read / parent-write content (each match also covers the group's
       // nested subcollections via {path=**}).
       match /profile/{path=**}      { allow read: if canRead(familyId); allow write: if writable(familyId); }
@@ -113,11 +148,22 @@ service cloud.firestore {
       match /skills/{path=**}       { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /curriculum/{path=**}   { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /activities/{path=**}   { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      // Per-subject content plans (the "canvas"): written server-side by the
+      // planning agent (Admin SDK); members read to review the arc before/after
+      // generating content.
+      match /subjectPlans/{path=**} { allow read: if canRead(familyId); allow write: if isSuperAdmin(); }
       match /calendarDays/{path=**}        { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /scheduleTemplates/{path=**}  { allow read: if canRead(familyId); allow write: if writable(familyId); }
       // Player tokens are publicly readable — the token ID is an unguessable UUID
-      // that functions as a capability credential for the child's unauthenticated device.
-      match /playerTokens/{tokenId}        { allow read: if true; allow write: if writable(familyId); }
+      // that functions as a capability credential for the child's unauthenticated
+      // device. Expiry is enforced server-side here (audit #6): a token with an
+      // expiresAtMs in the past is no longer readable. Tokens written before this
+      // field existed (no expiresAtMs) remain readable for backward compatibility.
+      match /playerTokens/{tokenId} {
+        allow read: if !('expiresAtMs' in resource.data) ||
+          resource.data.expiresAtMs > request.time.toMillis();
+        allow write: if writable(familyId);
+      }
       match /scores/{path=**}       { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /exposures/{path=**}    { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /contentStats/{path=**} { allow read: if canRead(familyId); allow write: if writable(familyId); }

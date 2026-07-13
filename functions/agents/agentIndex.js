@@ -12,6 +12,31 @@ export const TRACKED_COLLECTIONS = [
   "activities", "observations", "scores",
 ];
 
+// Reconcile the cached _agent_index counts against ground truth for one family
+// (audit #15). Trigger-maintained increments can drift over time (at-least-once
+// delivery, partial failures); this recomputes the true count per tracked
+// collection with an aggregation query and overwrites it. Best-effort per
+// collection. Returns a map of { collection: count }.
+export async function reconcileFamilyIndex(db, familyId) {
+  const out = {};
+  for (const collection of TRACKED_COLLECTIONS) {
+    try {
+      const agg = await db
+        .collection("families").doc(familyId)
+        .collection(collection).count().get();
+      const count = agg.data().count;
+      await db
+        .collection("families").doc(familyId)
+        .collection("_agent_index").doc(collection)
+        .set({ collection, count, reconciledAt: new Date() }, { merge: true });
+      out[collection] = count;
+    } catch (e) {
+      console.warn(`[agentIndex] reconcile ${familyId}/${collection} failed: ${e?.message || e}`);
+    }
+  }
+  return out;
+}
+
 // Build one trigger per tracked collection. Exported and spread into index.js.
 export function buildIndexTriggers() {
   const triggers = {};
@@ -31,7 +56,7 @@ export function buildIndexTriggers() {
           .collection("families").doc(familyId)
           .collection("_agent_index").doc(collection);
 
-        const patch = { collection, updatedAt: FieldValue.serverTimestamp() };
+        const patch = { collection, updatedAt: new Date() };
         if (created) patch.count = FieldValue.increment(1);
         if (deleted) patch.count = FieldValue.increment(-1);
         if (after && after.exists) {

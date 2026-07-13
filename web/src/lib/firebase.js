@@ -15,10 +15,25 @@ const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "demo-api-key",
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || `${PROJECT_ID}.firebaseapp.com`,
   projectId: PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || `${PROJECT_ID}.appspot.com`,
+  // Must match the Admin SDK's default bucket (functions/index.js initializeApp):
+  // Firebase's modern default bucket is <project>.firebasestorage.app. Using the
+  // legacy .appspot.com name here pointed the client at a different bucket than
+  // where functions write images/audio (audit #7).
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || `${PROJECT_ID}.firebasestorage.app`,
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "0",
   appId: import.meta.env.VITE_FIREBASE_APP_ID || "demo-app-id",
 };
+
+// In a real production build (not the emulator), shipping the demo placeholders
+// means auth/Firestore will fail with opaque errors. Fail loudly instead (audit #16).
+const _isProdBuild = import.meta.env.PROD && import.meta.env.VITE_USE_EMULATORS !== "true";
+if (_isProdBuild && (firebaseConfig.apiKey === "demo-api-key" || firebaseConfig.appId === "demo-app-id")) {
+  // eslint-disable-next-line no-console
+  console.error(
+    "[firebase] PRODUCTION build is missing VITE_FIREBASE_API_KEY / VITE_FIREBASE_APP_ID. " +
+    "The app will not connect to the live project. Set the VITE_FIREBASE_* env vars before building."
+  );
+}
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);

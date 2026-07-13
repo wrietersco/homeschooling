@@ -19,7 +19,6 @@
     "trailingSlash": false,
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "rewrites": [
-      { "source": "/api/agent", "function": "agent" },
       { "source": "**", "destination": "/index.html" }
     ],
     "headers": [

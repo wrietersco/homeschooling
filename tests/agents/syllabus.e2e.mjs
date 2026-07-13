@@ -16,6 +16,7 @@ before(async () => {
   db = admin.firestore();
 
   const root = db.collection("families").doc(FAM);
+  await db.recursiveDelete(root).catch(() => {});
   await root.set({ name: "Syllabus Test Family" });
   await root.collection("profile").doc("family").set({
     familyName: "Syllabus Test Family",
@@ -128,11 +129,62 @@ test("runSyllabusWorker respects complexity rank 1-5 and type validation", async
   assert.equal(data.type, "teaching"); // fallback from invalid_type
 });
 
+test("runSyllabusWorker does not overrun a subject that already reached a large target", async () => {
+  const FAM3 = "syllabusFam3";
+  const CURR3 = "currForSyllabus3";
+  const root3 = db.collection("families").doc(FAM3);
+  await db.recursiveDelete(root3).catch(() => {});
+  await root3.set({ name: "Large Syllabus Test" });
+  await root3.collection("profile").doc("family").set({ guidingLight: "Steady growth." });
+  await root3.collection("children").doc("c1").set({ name: "Hana" });
+  const curr3Ref = root3.collection("curriculum").doc(CURR3);
+  await curr3Ref.set({ title: "Large Curriculum", status: "active", subjectCount: 1, createdAt: new Date() });
+  await curr3Ref.collection("subjects").doc("large").set({
+    name: "Language",
+    macroGoals: ["Read fluently"],
+    contentOutline: "Six-month practice sequence",
+    instructionApproach: "Daily short sessions",
+    assessmentMethod: "Completion",
+  });
+  const batch = db.batch();
+  for (let i = 1; i <= 48; i++) {
+    const ref = root3.collection("activities").doc(`existing-${i}`);
+    batch.set(ref, {
+      title: `Existing Activity ${i}`,
+      type: "teaching",
+      subject: "Language",
+      subjectId: "large",
+      curriculumId: CURR3,
+      complexityRank: Math.min(5, Math.ceil(i / 10)),
+      status: "available",
+      createdAt: new Date(),
+    });
+  }
+  await batch.commit();
+
+  const result = await runSyllabusWorker({
+    db,
+    familyId: FAM3,
+    curriculumId: CURR3,
+    subjectId: "large",
+    uid: "ownerA",
+    role: "owner",
+    llm: makeFakeLlm("Language", 4),
+    targetActivitiesPerSubject: 48,
+  });
+
+  assert.equal(result.activitiesCreated.length, 0);
+  assert.equal(result.totalSubjectActivities, 48);
+  const snap = await root3.collection("activities").where("subjectId", "==", "large").get();
+  assert.equal(snap.size, 48);
+});
+
 test("runSyllabus master creates run doc, processes all subjects, marks done", async () => {
   // Use a fresh family to avoid cross-test activity count contamination.
   const FAM2 = "syllabusFam2";
   const CURR2 = "currForSyllabus2";
   const root2 = db.collection("families").doc(FAM2);
+  await db.recursiveDelete(root2).catch(() => {});
   await root2.set({ name: "Syllabus Master Test" });
   await root2.collection("profile").doc("family").set({
     familyName: "Syllabus Master Test",
@@ -153,15 +205,18 @@ test("runSyllabus master creates run doc, processes all subjects, marks done", a
   let callCount = 0;
   const multiplexLlm = {
     generate: async (req) => {
-      // Detect which subject by checking the system prompt.
+      // Detect which subject by the bolded subject name in the worker prompt.
+      // (Match the specific "**Science**" marker — the prompt's generic guidance
+      // also mentions "Arabic", so a bare substring check is ambiguous.)
       const sys = req.system || "";
-      const subject = sys.includes("Arabic") ? "sA" : "sB";
+      const subject = sys.includes("**Science**") ? "sB" : "sA";
       return scripts[subject].generate(req);
     },
   };
 
   const result = await runSyllabus({
     db, familyId: FAM2, curriculumId: CURR2, uid: "ownerA", role: "owner", llm: multiplexLlm,
+    targetActivitiesPerSubject: 3,
   });
 
   assert.ok(result.runId);

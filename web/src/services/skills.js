@@ -47,3 +47,12 @@ export async function bindSkillToChild(familyId, childId, skill) {
 export async function unbindSkillFromChild(familyId, childId, skillId) {
   await deleteDoc(doc(db, ...fam(familyId), "children", childId, "skills", skillId));
 }
+
+// Kick off the server-side skill-mapping agent. Runs inline (the promise resolves
+// when the whole map is built), but writes live progress to agentRuns as it goes,
+// so the caller subscribes to the latest skillmap run for a live picture.
+export async function requestSkillMap() {
+  const call = httpsCallable(functions, "requestSkillMap", { timeout: 540000 });
+  const res = await call({});
+  return res.data;
+}

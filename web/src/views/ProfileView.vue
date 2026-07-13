@@ -20,6 +20,10 @@ const goalCombined = ref(false);
 const saving = ref(false);
 const saved = ref(false);
 const error = ref("");
+// True once the user has edited the form. While dirty, the live family.profile
+// listener must NOT overwrite the in-progress edits (an incoming snapshot used
+// to clobber the user's input mid-edit). Cleared after a successful save.
+const dirty = ref(false);
 
 function goalModeToFlags(mode) {
   return { individual: mode === "individual" || mode === "both", combined: mode === "combined" || mode === "both" };
@@ -33,6 +37,7 @@ function flagsToGoalMode() {
 watch(
   () => family.profile,
   (p) => {
+    if (dirty.value) return; // don't stomp the user's unsaved edits
     familyName.value = family.family?.name || p?.familyName || "";
     guidingLight.value = p?.guidingLight || "";
     const flags = goalModeToFlags(p?.goalMode || "individual");
@@ -56,6 +61,7 @@ async function save() {
       auth.user?.uid
     );
     saved.value = true;
+    dirty.value = false; // saved values now match the store; let the listener sync again
   } catch (e) {
     error.value = e?.message || "Could not save.";
   } finally {
@@ -122,7 +128,7 @@ function formatExpiry(ts) {
     <h1>Family profile</h1>
 
     <!-- Profile form -->
-    <form class="card" @submit.prevent="save">
+    <form class="card" @submit.prevent="save" @input="dirty = true" @change="dirty = true">
       <label>
         Family name
         <input v-model="familyName" type="text" :disabled="!canEdit()" />

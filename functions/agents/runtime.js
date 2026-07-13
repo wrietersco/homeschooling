@@ -3,6 +3,7 @@
 // dispatched, its result fed back, and the loop repeats until the model returns
 // a final text answer or the step budget is exhausted. Every step is recorded
 // for the audit trail.
+import { withCurrentDate } from "../lib/dateContext.js";
 
 export async function runAgent({
   llm,
@@ -14,17 +15,28 @@ export async function runAgent({
   maxSteps = 8,
   generationConfig,
   onStep,
+  // Optional forced-tool config (Gemini functionCallingConfig). When set, the
+  // model is REQUIRED to call a tool each turn instead of being free to reply
+  // with prose — pair with `stopAfterTool` so the loop ends as soon as the
+  // terminal tool fires (otherwise mode:"ANY" would force a redundant re-call).
+  toolConfig = null,
+  stopAfterTool = null,
 }) {
   const contents = [...history, { role: "user", parts: [{ text: userMessage }] }];
   const steps = [];
+  const config = toolConfig ? { ...generationConfig, toolConfig } : generationConfig;
+  // Every agent always knows today's date — embedded once at the top of its
+  // system instructions so date/scheduling/age reasoning is never guessed.
+  const datedSystem = withCurrentDate(system);
 
   for (let i = 0; i < maxSteps; i++) {
-    const res = await llm.generate({ system, contents, toolDeclarations, config: generationConfig });
+    const res = await llm.generate({ system: datedSystem, contents, toolDeclarations, config });
 
     if (res.functionCalls && res.functionCalls.length) {
       contents.push({ role: "model", parts: res.functionCalls.map((fc) => ({ functionCall: fc })) });
 
       const responseParts = [];
+      let hitStopTool = false;
       for (const fc of res.functionCalls) {
         const tool = tools[fc.name];
         let result;
@@ -37,10 +49,27 @@ export async function runAgent({
         steps.push(step);
         if (onStep) await onStep(step);
         responseParts.push({ functionResponse: { name: fc.name, response: { result } } });
+        if (stopAfterTool && fc.name === stopAfterTool) hitStopTool = true;
       }
       // Gemini expects function responses in a user turn.
       contents.push({ role: "user", parts: responseParts });
+      // The terminal tool fired — its handler captured what we needed, so end
+      // here rather than letting a forced-mode loop request a redundant call.
+      if (hitStopTool) return { text: "", steps, contents, stoppedAt: "tool" };
       continue;
+    }
+
+    // No function call this turn. If the response was filtered by a safety /
+    // recitation block, surface that explicitly instead of returning an empty
+    // string that looks like the model "chose" to say nothing.
+    if (res.blockReason && !res.text) {
+      return {
+        text: "I couldn't complete that request because the response was filtered. Please rephrase or try a different passage.",
+        steps,
+        contents,
+        stoppedAt: "blocked",
+        blockReason: res.blockReason,
+      };
     }
 
     // No function call this turn. If the model hit the output-token ceiling,
@@ -57,7 +86,27 @@ export async function runAgent({
       };
     }
 
-    return { text: res.text || "", steps, contents, stoppedAt: "final" };
+    // The model ended its turn with neither a tool call nor any visible text —
+    // an empty candidate (finishReason STOP with no parts). Returning "" here
+    // hands the UI a blank bubble that looks like the agent "fell asleep". Surface
+    // what happened instead, with the finishReason so it is debuggable in logs.
+    const finalText = (res.text || "").trim();
+    if (!finalText) {
+      console.warn(
+        `[runAgent] empty final response (finishReason=${res.finishReason || "none"}, steps=${steps.length})`
+      );
+      return {
+        text:
+          "I couldn't generate a reply that time — the model returned an empty response. " +
+          "Please try again; rephrasing or shortening your message usually helps.",
+        steps,
+        contents,
+        stoppedAt: "empty",
+        finishReason: res.finishReason || null,
+      };
+    }
+
+    return { text: finalText, steps, contents, stoppedAt: "final" };
   }
 
   return { text: "I wasn't able to finish within the step budget.", steps, contents, stoppedAt: "limit" };

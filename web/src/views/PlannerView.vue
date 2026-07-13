@@ -4,9 +4,12 @@ import { useAuthStore } from "@/stores/auth";
 import { useActivityStore } from "@/stores/activities";
 import { usePlannerStore } from "@/stores/planner";
 import { useProfilesStore } from "@/stores/profiles";
-import { addBlock, removeBlock } from "@/services/planner";
+import { addBlock, removeBlock, clearBlocks } from "@/services/planner";
 import { updateGuardian } from "@/services/profiles";
 import { autoSchedule } from "@/services/scheduler";
+import { useActivityLink } from "@/composables/useActivityLink";
+
+const { copiedId, copyActivityLink } = useActivityLink();
 
 const auth = useAuthStore();
 const activityStore = useActivityStore();
@@ -167,6 +170,33 @@ async function scheduleViaAgent() {
   }
 }
 
+// ─── Clear all planned items for the week ────────────────────────────────────
+const weekBlockCount = computed(() =>
+  weekDays.value.reduce((n, d) => n + (plannerStore.dayBlocks[d.dateKey]?.length || 0), 0)
+);
+const clearConfirm = ref(false);
+const clearing = ref(false);
+
+function openClearConfirm() {
+  if (weekBlockCount.value) clearConfirm.value = true;
+}
+
+async function confirmClearWeek() {
+  if (!auth.familyId || clearing.value) return;
+  clearing.value = true;
+  agentSchedError.value = "";
+  try {
+    const removed = await clearBlocks(auth.familyId, weekDays.value.map((d) => d.dateKey));
+    clearConfirm.value = false;
+    agentSchedMsg.value = `Cleared ${removed} planned item${removed === 1 ? "" : "s"} from this week.`;
+    setTimeout(() => (agentSchedMsg.value = ""), 6000);
+  } catch (e) {
+    agentSchedError.value = e?.message || "Failed to clear the week.";
+  } finally {
+    clearing.value = false;
+  }
+}
+
 // ─── Guardian availability ───────────────────────────────────────────────────
 const WEEKDAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
 const availOpen = ref(false);
@@ -208,10 +238,66 @@ async function saveAvailability(g) {
 
 // ─── Display helpers ─────────────────────────────────────────────────────────
 const TYPE_ICONS = {
-  quran: "📖", noorani_qaida: "🔤", story_reading: "📚", mathematics: "🔢",
-  computer: "💻", ai_robotics: "🤖", physical: "🏃", teaching: "📝",
+  quran: "📖", noorani_qaida: "🔤",
+  arabic_reading: "📗", urdu_reading: "📙", english_reading: "📘", story_reading: "📚", conversation: "💬",
+  mathematics: "🔢", computer: "💻", ai_robotics: "🤖", physical: "🏃", teaching: "📝",
 };
 const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
+const TYPE_LABELS = {
+  quran: "Quran", noorani_qaida: "Qaida",
+  arabic_reading: "Arabic reading", urdu_reading: "Urdu reading", english_reading: "English reading",
+  story_reading: "Story", conversation: "Conversation",
+  mathematics: "Mathematics", computer: "Computer", ai_robotics: "AI & Robotics", physical: "Physical", teaching: "Teaching",
+};
+
+// ─── Activity pool search + filters (#6) ─────────────────────────────────────
+const poolQuery = ref("");
+const poolType = ref("");
+const poolChildId = ref("");
+const availableTypes = computed(() =>
+  [...new Set(activityStore.activities.map((a) => a.type))].sort((a, b) => (TYPE_LABELS[a] || a).localeCompare(TYPE_LABELS[b] || b))
+);
+
+// A target id only counts if it matches a real child doc. Stale/garbage ids
+// (e.g. names the syllabus model guessed before the binding fix) are ignored, so
+// such an activity reads as "applies to all children" instead of vanishing.
+const validChildIds = computed(() => new Set(profilesStore.children.map((c) => c.id)));
+function effectiveTargets(a) {
+  return (a.targetChildren || []).filter((id) => validChildIds.value.has(id));
+}
+
+// Child names for a given activity/block (#8 attribution chips).
+function childNamesFor(a) {
+  const ids = effectiveTargets(a);
+  if (!ids.length) return profilesStore.children.length ? ["All children"] : [];
+  return ids.map((id) => profilesStore.children.find((c) => c.id === id)?.name || "All children");
+}
+
+const filteredGroups = computed(() => {
+  const q = poolQuery.value.trim().toLowerCase();
+  const items = activityStore.activities.filter((a) => {
+    if (poolType.value && a.type !== poolType.value) return false;
+    if (poolChildId.value) {
+      const t = effectiveTargets(a);
+      // No resolvable targets = applies to all children, so it matches any filter.
+      if (t.length && !t.includes(poolChildId.value)) return false;
+    }
+    if (q) {
+      const hay = `${a.title || ""} ${a.subject || ""} ${TYPE_LABELS[a.type] || a.type}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  const map = {};
+  for (const a of items) {
+    const key = a.subjectId || "__unknown__";
+    if (!map[key]) map[key] = { subjectId: key, subject: a.subject || key, items: [] };
+    map[key].items.push(a);
+  }
+  return Object.values(map);
+});
+const hasFilter = computed(() => Boolean(poolQuery.value.trim() || poolType.value || poolChildId.value));
+const filteredCount = computed(() => filteredGroups.value.reduce((n, g) => n + g.items.length, 0));
 </script>
 
 <template>
@@ -227,6 +313,12 @@ const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
       </div>
       <div class="planner-actions">
         <button class="nav-btn" @click="openAvailability">🗓 Availability</button>
+        <button
+          class="nav-btn danger"
+          :disabled="!weekBlockCount"
+          :title="weekBlockCount ? 'Remove all planned items this week' : 'Nothing planned this week'"
+          @click="openClearConfirm"
+        >🗑 Clear all</button>
         <button class="nav-btn primary" :disabled="agentScheduling" @click="scheduleViaAgent">
           {{ agentScheduling ? "Scheduling…" : "✨ Schedule via agent" }}
         </button>
@@ -247,7 +339,25 @@ const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
           <router-link to="/syllabus">generate a syllabus first</router-link>.
         </p>
         <template v-else>
-          <div v-for="group in activityStore.bySubject" :key="group.subjectId" class="pool-group">
+          <!-- Search + filters (#6) -->
+          <div class="pool-filters">
+            <input v-model="poolQuery" class="pool-search" type="search" placeholder="Search title, subject…" aria-label="Search activities" />
+            <div class="pool-filter-row">
+              <select v-model="poolType" class="pool-filter" aria-label="Filter by activity type">
+                <option value="">All types</option>
+                <option v-for="t in availableTypes" :key="t" :value="t">{{ TYPE_LABELS[t] || t }}</option>
+              </select>
+              <select v-model="poolChildId" class="pool-filter" aria-label="Filter by child">
+                <option value="">All children</option>
+                <option v-for="c in profilesStore.children" :key="c.id" :value="c.id">{{ c.name || c.id }}</option>
+              </select>
+            </div>
+            <p v-if="hasFilter" class="pool-count">{{ filteredCount }} match{{ filteredCount === 1 ? "" : "es" }}</p>
+          </div>
+
+          <p v-if="!filteredGroups.length" class="pool-empty">No activities match these filters.</p>
+
+          <div v-for="group in filteredGroups" :key="group.subjectId" class="pool-group">
             <h3 class="pool-group-title">{{ group.subject }}</h3>
             <div
               v-for="a in group.items"
@@ -265,6 +375,9 @@ const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
               </div>
               <p class="pool-card-title">{{ a.title }}</p>
               <p class="pool-card-meta">{{ a.durationMinutes }} min</p>
+              <div v-if="childNamesFor(a).length" class="pool-card-children">
+                <span v-for="(n, ni) in childNamesFor(a)" :key="ni" class="mini-child-chip">{{ n }}</span>
+              </div>
               <button
                 class="schedule-btn"
                 @click="openModal(a)"
@@ -303,10 +416,20 @@ const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
                 >×</button>
               </div>
               <p class="block-title">{{ block.activityTitle }}</p>
+              <div v-if="childNamesFor(block).length" class="block-children">
+                <span v-for="(n, ni) in childNamesFor(block)" :key="ni" class="mini-child-chip">{{ n }}</span>
+              </div>
               <div class="block-footer">
                 <span :class="`rank-badge rank-${block.complexityRank}`">
                   {{ RANK_LABELS[block.complexityRank] }}
                 </span>
+                <button
+                  type="button"
+                  class="share-link-btn"
+                  :title="copiedId === block.activityId ? 'Link copied!' : 'Copy shareable link'"
+                  :aria-label="`Copy shareable link for ${block.activityTitle}`"
+                  @click="copyActivityLink(block.activityId)"
+                >{{ copiedId === block.activityId ? "✓" : "🔗" }}</button>
                 <router-link
                   :to="`/activity/${block.activityId}?blockId=${block.id}&dateKey=${day.dateKey}`"
                   class="view-link"
@@ -347,6 +470,25 @@ const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
             <button class="btn secondary" @click="closeModal">Cancel</button>
             <button class="btn primary" :disabled="scheduling" @click="confirmSchedule">
               {{ scheduling ? "Scheduling…" : "Schedule" }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </teleport>
+
+    <!-- Clear-all confirmation modal -->
+    <teleport to="body">
+      <div v-if="clearConfirm" class="modal-backdrop" @click.self="clearConfirm = false">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="clear-title">
+          <h2 id="clear-title" class="modal-h">Clear this week?</h2>
+          <p class="modal-activity">
+            This removes all {{ weekBlockCount }} planned item{{ weekBlockCount === 1 ? "" : "s" }}
+            for {{ weekLabel }}. This can’t be undone.
+          </p>
+          <div class="modal-actions">
+            <button class="btn secondary" :disabled="clearing" @click="clearConfirm = false">Cancel</button>
+            <button class="btn danger" :disabled="clearing" @click="confirmClearWeek">
+              {{ clearing ? "Clearing…" : "Clear all" }}
             </button>
           </div>
         </div>
@@ -418,6 +560,9 @@ const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
 .nav-btn.primary { background: #0b1f3a; color: #fff; border-color: #0b1f3a; }
 .nav-btn.primary:disabled { opacity: 0.6; cursor: not-allowed; }
 .nav-btn.primary:hover { background: #13294d; }
+.nav-btn.danger { color: #b91c1c; border-color: #fecaca; }
+.nav-btn.danger:hover:not(:disabled) { background: #fef2f2; }
+.nav-btn.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .planner-actions { display: flex; align-items: center; gap: 0.5rem; }
 
@@ -453,6 +598,15 @@ const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
 .pool-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin: 0 0 0.75rem; }
 .pool-empty { font-size: 0.85rem; color: #94a3b8; }
 .pool-empty a { color: #0b1f3a; }
+
+/* Pool search + filters */
+.pool-filters { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.75rem; }
+.pool-search { width: 100%; padding: 0.4rem 0.55rem; border: 1px solid #cbd5e1; border-radius: 7px; font: inherit; font-size: 0.8rem; }
+.pool-filter-row { display: flex; gap: 0.4rem; }
+.pool-filter { flex: 1; min-width: 0; padding: 0.35rem 0.4rem; border: 1px solid #cbd5e1; border-radius: 7px; font: inherit; font-size: 0.75rem; background: #fff; }
+.pool-count { font-size: 0.72rem; color: #94a3b8; margin: 0; }
+.pool-card-children { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-bottom: 0.4rem; }
+.mini-child-chip { font-size: 0.62rem; font-weight: 600; padding: 0.05rem 0.35rem; border-radius: 999px; background: #e0e7ff; color: #3730a3; }
 
 .pool-group { margin-bottom: 1rem; }
 .pool-group-title {
@@ -535,9 +689,14 @@ const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
   font-size: 0.9rem; line-height: 1; padding: 0 0.1rem;
 }
 .remove-btn:hover { color: #ef4444; }
+.block-children { display: flex; flex-wrap: wrap; gap: 0.15rem; margin: 0.15rem 0; }
 .block-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 0.2rem; }
 .view-link { font-size: 0.68rem; color: #0b1f3a; text-decoration: none; }
 .view-link:hover { text-decoration: underline; }
+/* Copy-link icon sits with the Run link on the right; auto margin keeps the
+   rank badge anchored to the left. */
+.share-link-btn { margin-left: auto; margin-right: 0.4rem; background: none; border: none; padding: 0; cursor: pointer; font-size: 0.72rem; line-height: 1; }
+.share-link-btn:hover { opacity: 0.7; }
 
 /* ─── Modal ──────────────────────────────────────────────────────────────── */
 .modal-backdrop {
@@ -560,5 +719,7 @@ const RANK_LABELS = { 1: "Intro", 2: "Basic", 3: "Mid", 4: "Adv", 5: "Master" };
 .btn { padding: 0.5rem 1rem; border-radius: 7px; border: none; cursor: pointer; font: inherit; }
 .btn.primary { background: #0b1f3a; color: #fff; }
 .btn.secondary { background: #f1f5f9; color: #334155; border: 1px solid #cbd5e1; }
+.btn.danger { background: #dc2626; color: #fff; }
+.btn.danger:hover:not(:disabled) { background: #b91c1c; }
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 </style>

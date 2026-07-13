@@ -164,3 +164,18 @@ test("user doc is private to its owner", async () => {
   await assertSucceeds(setDoc(doc(mine, "users", "me"), { familyId: "x" }));
   await assertFails(getDoc(doc(mine, "users", "someoneElse")));
 });
+
+test("player token: unexpired is publicly readable, expired is denied (audit #6)", async () => {
+  const now = Date.now();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const d = ctx.firestore();
+    await setDoc(doc(d, "families", FAM_A, "playerTokens", "live"), { expiresAtMs: now + 60_000, familyId: FAM_A });
+    await setDoc(doc(d, "families", FAM_A, "playerTokens", "dead"), { expiresAtMs: now - 60_000, familyId: FAM_A });
+    await setDoc(doc(d, "families", FAM_A, "playerTokens", "legacy"), { familyId: FAM_A }); // no expiresAtMs
+  });
+  const anon = testEnv.unauthenticatedContext().firestore();
+  await assertSucceeds(getDoc(doc(anon, "families", FAM_A, "playerTokens", "live")));
+  await assertFails(getDoc(doc(anon, "families", FAM_A, "playerTokens", "dead")));
+  // Tokens written before the field existed stay readable (backward-compatible).
+  await assertSucceeds(getDoc(doc(anon, "families", FAM_A, "playerTokens", "legacy")));
+});

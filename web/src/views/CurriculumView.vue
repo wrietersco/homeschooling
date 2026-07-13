@@ -56,13 +56,23 @@ async function send() {
   await scrollDown();
   try {
     const res = await askCurriculum(text, geminiHistory.value);
-    messages.value.push({ role: "assistant", text: res.text, configured: res.configured });
-    // Accumulate history for the next turn (Gemini format).
-    geminiHistory.value = [
-      ...geminiHistory.value,
-      { role: "user", parts: [{ text }] },
-      { role: "model", parts: [{ text: res.text }] },
-    ];
+    const reply = (res.text || "").trim();
+    if (reply) {
+      messages.value.push({ role: "assistant", text: reply, configured: res.configured });
+      // Accumulate history for the next turn (Gemini format). Only append turns
+      // that carry real text — an empty model part poisons the next request
+      // (Gemini rejects empty parts) and compounds the failure across turns.
+      geminiHistory.value = [
+        ...geminiHistory.value,
+        { role: "user", parts: [{ text }] },
+        { role: "model", parts: [{ text: reply }] },
+      ];
+    } else {
+      // The agent returned nothing usable — show why instead of a blank bubble.
+      error.value = res.configured === false
+        ? "The curriculum agent isn't configured yet (no AI key set)."
+        : `The agent didn't return a reply${res.stoppedAt ? ` (${res.stoppedAt}${res.finishReason ? `: ${res.finishReason}` : ""})` : ""}. Please try again.`;
+    }
     if (res.curriculum) {
       justCreated.value = res.curriculum;
     }

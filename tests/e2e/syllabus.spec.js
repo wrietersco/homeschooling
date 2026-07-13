@@ -25,7 +25,7 @@ test("syllabus page is reachable via nav", async ({ page }) => {
   await registerAndOnboard(page);
   await page.locator("header.nav").getByRole("link", { name: "Syllabus" }).click();
   await expect(page).toHaveURL(/\/syllabus$/);
-  await expect(page.getByRole("heading", { name: "Syllabus Builder" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your Activities" })).toBeVisible();
 });
 
 test("syllabus page shows 'no curriculum' prompt when none exists", async ({ page }) => {

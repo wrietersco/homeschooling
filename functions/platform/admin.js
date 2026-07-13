@@ -162,6 +162,7 @@ function sanitizeBlock(raw = {}) {
   if (raw.thinkingBudget != null) out.thinkingBudget = Math.max(0, Math.min(24576, Number(raw.thinkingBudget) || 0));
   if (raw.systemInstructions != null) out.systemInstructions = String(raw.systemInstructions).slice(0, 8000);
   if (raw.voiceName != null) out.voiceName = String(raw.voiceName).slice(0, 60);
+  if (raw.provider === "gemini" || raw.provider === "openai" || raw.provider === "anthropic") out.provider = raw.provider;
   return out;
 }
 

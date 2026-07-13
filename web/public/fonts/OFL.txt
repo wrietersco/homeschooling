@@ -1,0 +1,25 @@
+Bundled Arabic webfonts
+=======================
+
+Both faces below are © SIL Global and free to use, bundle, and redistribute
+under the SIL Open Font License v1.1 (OFL-1.1). Full license text:
+https://openfontlicense.org
+
+1) Indo-Pak Naskh (PRIMARY)
+   File:   lateef-400.woff2, lateef-700.woff2
+   Family: Lateef
+   Source: https://software.sil.org/lateef/  (via @fontsource/lateef)
+   Lateef is SIL's Naskh face tuned for the Arabic script as written in South
+   Asia (Urdu/Sindhi/Pakistani conventions) — the closest license-clean match to
+   the Indo-Pak Mushaf hand. Used as the self-hosted "Indo-Pak Naskh" face.
+
+2) Quran Naskh (FALLBACK)
+   File:   scheherazade-new-400.woff2, scheherazade-new-700.woff2
+   Family: Scheherazade New
+   Source: https://software.sil.org/scheherazade/  (via @fontsource/scheherazade-new)
+   A general Arabic Naskh face, kept as the fallback under "Quran Naskh".
+
+Both are wired in web/src/assets/main.css. To swap in a specific licensed
+Indo-Pak Mushaf font (e.g. a publisher's Quran face), replace the relevant
+.woff2 files and update the @font-face src — keep this notice accurate for
+whatever font is bundled.

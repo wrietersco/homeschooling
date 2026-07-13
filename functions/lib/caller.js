@@ -18,5 +18,12 @@ export async function resolveCaller(request) {
   const role = memberSnap.exists ? memberSnap.data()?.role : null;
   if (!role) throw new HttpsError("permission-denied", "You are not a member of this family.");
 
+  // Enforce family suspension server-side (audit #5). A superadmin can still act
+  // on a disabled family via the lifecycle/admin callables (which bypass this).
+  const famSnap = await db.collection("families").doc(familyId).get();
+  if (famSnap.exists && famSnap.data()?.status === "disabled") {
+    throw new HttpsError("permission-denied", "This family is currently disabled. Contact support.");
+  }
+
   return { db, uid, familyId, role };
 }
