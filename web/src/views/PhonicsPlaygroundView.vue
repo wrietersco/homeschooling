@@ -54,8 +54,11 @@ import {
   SOUND_BY_ID,
   colorFor,
 } from "@/lib/phonicsData";
+import { loadCanvas, saveCanvas } from "@/lib/phonicsSave";
+import { useAuthStore } from "@/stores/auth";
 
 const router = useRouter();
+const auth = useAuthStore();
 // lastError carries the most recent TTS failure (e.g. the daily AI-voice budget
 // being reached) so the settings panel can explain a silent voice fallback.
 const { speak, stop: stopSpeech, lastError } = useSpeech();
@@ -672,6 +675,29 @@ function speakAll() {
   speakWord(text, "pp-speak-all");
 }
 
+/* ── Save state ─────────────────────────────────────────────────────────── */
+// The canvas survives leaving the page (navigation, reload, closing the tab):
+// blocks, score, pan and the spacebar's target row are restored per child.
+const saveUid = auth.user?.uid;
+const saved = loadCanvas(saveUid);
+if (saved) {
+  groups.value = saved.groups;
+  groupSeq = saved.groupSeq;
+  wordsBuilt.value = saved.wordsBuilt;
+  pan.value = saved.pan;
+  activeRowKey.value = saved.activeRowKey;
+}
+
+function persist() {
+  saveCanvas(saveUid, {
+    groups: groups.value,
+    wordsBuilt: wordsBuilt.value,
+    pan: pan.value,
+    activeRowKey: activeRowKey.value,
+  });
+}
+watch([groups, wordsBuilt, pan, activeRowKey], persist, { deep: true });
+
 /* ── Lifecycle ──────────────────────────────────────────────────────────── */
 onMounted(() => {
   preloadClips();
@@ -683,6 +709,7 @@ onMounted(() => {
   }
 });
 onBeforeUnmount(() => {
+  persist();
   releaseListeners();
   releasePanListeners();
   window.removeEventListener("keydown", onSpaceKey);

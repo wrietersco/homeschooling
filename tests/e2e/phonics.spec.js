@@ -142,6 +142,52 @@ test("clear button empties the canvas", async ({ page }) => {
   await expect(page.locator(".pp-hint-bubble")).toBeVisible();
 });
 
+test("the canvas is saved — blocks stay after leaving the page and after a reload", async ({ page }) => {
+  const canvas = await openPlayground(page);
+  const box = await canvas.boundingBox();
+  const cy = box.y + box.height * 0.45;
+  await dragTo(page, blockByLetter(page, "c"), box.x + 220, cy);
+  await dragTo(page, blockByLetter(page, "a"), box.x + 220 + 58, cy);
+  await dragTo(page, blockByLetter(page, "t"), box.x + 220 + 116, cy);
+  await expect(page.locator(".pp-banner")).toContainText("cat", { timeout: 15_000 });
+  await page.keyboard.press("Space");
+  await dragTo(page, blockByLetter(page, "o"), box.x + 200, box.y + box.height * 0.75);
+  await expect(page.locator(".pp-row")).toHaveCount(2);
+  const before = await rowByLetters(page, "c").locator(".pp-tile").first().boundingBox();
+
+  // Leave mid-game via the home button, then come back.
+  await page.locator(".pp-topbar").getByTitle("Back to dashboard").click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await page.goto("/phonics");
+  await expect(page.locator(".pp-title")).toHaveText(/Sound Splash/);
+
+  await expect(page.locator(".pp-row")).toHaveCount(2);
+  await expect(page.locator(".pp-hint-bubble")).toHaveCount(0);
+  const letters = await rowByLetters(page, "c").locator(".pp-tile").evaluateAll((els) =>
+    els.map((el) => (el.classList.contains("is-space") ? "_" : el.querySelector(".pp-tile-text").textContent)),
+  );
+  expect(letters.join("")).toBe("cat_");
+  const after = await rowByLetters(page, "c").locator(".pp-tile").first().boundingBox();
+  expect(after.x).toBeCloseTo(before.x, 0);
+  expect(after.y).toBeCloseTo(before.y, 0);
+  await expect(page.locator(".pp-score")).toContainText("1");
+
+  // The restored row is still live: the next block snaps after its space.
+  const rb = await rowByLetters(page, "c").boundingBox();
+  await dragTo(page, blockByLetter(page, "s"), rb.x + rb.width - 8, rb.y + rb.height / 2);
+  await expect(rowByLetters(page, "c").locator(".pp-tile")).toHaveCount(5);
+
+  // A full reload keeps it too; clearing wipes the save.
+  await page.reload();
+  await expect(rowByLetters(page, "c").locator(".pp-tile")).toHaveCount(5);
+  await page.locator(".pp-clear").click();
+  await expect(page.locator(".pp-row")).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator(".pp-title")).toHaveText(/Sound Splash/);
+  await expect(page.locator(".pp-hint-bubble")).toBeVisible();
+  await expect(page.locator(".pp-row")).toHaveCount(0);
+});
+
 test("spacebar inserts one space block; blocks attach to it; the big speaker reads the phrase", async ({ page }) => {
   const canvas = await openPlayground(page);
   const synthRequests = [];
