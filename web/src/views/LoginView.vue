@@ -2,6 +2,8 @@
 import { ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
+import { isEmulator } from "@/lib/firebase";
+import { createFamily } from "@/services/onboarding";
 
 const auth = useAuthStore();
 const route = useRoute();
@@ -13,6 +15,50 @@ const password = ref("");
 const displayName = ref("");
 const error = ref("");
 const busy = ref(false);
+
+// ── Developer access channel (LOCAL EMULATORS ONLY) ────────────────────────
+// One-click sign-in with a fixed developer account against the Firebase
+// emulator suite, auto-creating the account and a "Dev Family" on a fresh
+// emulator. Gated on `isEmulator`, so it never renders in a production build;
+// the account itself exists only in the local auth emulator.
+const DEV_EMAIL = "dev@local.test";
+const DEV_PASSWORD = "dev123456";
+const devBusy = ref(false);
+
+async function devSignIn() {
+  error.value = ""; devBusy.value = true;
+  try {
+    try {
+      await auth.login(DEV_EMAIL, DEV_PASSWORD);
+    } catch (e) {
+      const code = String(e?.code || "");
+      // Fresh emulator: the account doesn't exist yet — create it. If a parallel
+      // session created it first, fall through and sign in.
+      if (code.includes("invalid-credential") || code.includes("user-not-found")) {
+        try {
+          await auth.register(DEV_EMAIL, DEV_PASSWORD, "Developer");
+        } catch (e2) {
+          if (!String(e2?.code || "").includes("email-already-in-use")) throw e2;
+          await auth.login(DEV_EMAIL, DEV_PASSWORD);
+        }
+      } else {
+        throw e;
+      }
+    }
+    await auth.ready();
+    await waitUntil(() => auth.user && auth.profileLoaded);
+    if (!auth.hasFamily) {
+      await createFamily({ familyName: "Dev Family", displayName: "Developer" });
+      await waitUntil(() => auth.hasFamily);
+    }
+    await auth.ready();
+    router.replace({ name: "dashboard" });
+  } catch (e) { error.value = friendly(e); }
+  finally { devBusy.value = false; }
+}
+
+// ?dev=1 on the login page triggers the same flow without the click.
+if (isEmulator && route.query.dev === "1") devSignIn();
 
 function friendly(e) {
   const code = e?.code || "";
@@ -107,6 +153,16 @@ async function google() {
       Continue with Google
     </button>
 
+    <!-- Developer access channel — renders ONLY when connected to the local
+         emulator suite (see lib/firebase.js isEmulator). -->
+    <template v-if="isEmulator">
+      <button class="btn dev" type="button" :disabled="devBusy || busy" @click="devSignIn">
+        <span class="material-symbols-rounded">developer_mode</span>
+        {{ devBusy ? "Preparing dev session…" : "Developer sign-in (local emulator)" }}
+      </button>
+      <p class="dev-hint">Emulators detected — full app access, no real data. Append <code>?dev=1</code> to skip the click.</p>
+    </template>
+
     <p class="switch">
       <template v-if="mode === 'signin'">
         New here?
@@ -179,4 +235,17 @@ input {
 
 .switch { text-align: center; font-size: 0.82rem; color: #6B7280; margin: 0; }
 .linkish { background: none; border: none; color: #9333EA; cursor: pointer; font: inherit; font-weight: 600; padding: 0; }
+
+/* Developer access channel (emulator only) */
+.btn.dev {
+  background: #F3E8FF; border: 1px dashed #9333EA; color: #6B21A8;
+  font-weight: 600;
+}
+.btn.dev .material-symbols-rounded { font-size: 18px; }
+.dev-hint {
+  margin: 0; text-align: center; font-size: 0.72rem; color: #9CA3AF; line-height: 1.4;
+}
+.dev-hint code {
+  background: #F3E8FF; color: #6B21A8; padding: 0 0.25rem; border-radius: 4px;
+}
 </style>

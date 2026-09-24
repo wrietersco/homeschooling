@@ -46,6 +46,11 @@ const useEmulators =
   import.meta.env.VITE_USE_EMULATORS === "true" ||
   (import.meta.env.DEV && import.meta.env.VITE_USE_EMULATORS !== "false");
 
+// True when every Firebase client talks to the LOCAL emulator suite. This is
+// the gate for developer-access affordances (e.g. the one-click dev sign-in on
+// the login page): they must never render or run against the live project.
+export const isEmulator = useEmulators;
+
 if (useEmulators) {
   const host = import.meta.env.VITE_EMULATOR_HOST || "localhost";
   connectAuthEmulator(auth, `http://${host}:9099`, { disableWarnings: true });

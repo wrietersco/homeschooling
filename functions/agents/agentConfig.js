@@ -12,9 +12,10 @@
 import { platformLlmConfig } from "../lib/paths.js";
 import { createGeminiClient, createOpenAiClient, createClaudeClient, DEFAULT_ANTHROPIC_MODEL } from "./llm.js";
 import { recordCostEvent } from "../lib/costMeter.js";
+import { replacementForRetired, liveThinkingLevels } from "./modelCatalog.js";
 
 // Agents that can be configured independently. Keep in sync with the Platform UI.
-export const AGENT_KEYS = ["guide", "curriculum", "syllabus", "content", "scheduler", "brief", "image", "tts"];
+export const AGENT_KEYS = ["guide", "curriculum", "syllabus", "content", "scheduler", "brief", "image", "tts", "explore"];
 
 const BASE_MODEL = "gemini-2.5-flash";
 
@@ -27,8 +28,13 @@ export const AGENT_DEFAULTS = {
   content: { model: BASE_MODEL, temperature: 0.5, maxOutputTokens: 8192, thinkingBudget: 0, systemInstructions: "" },
   scheduler: { model: BASE_MODEL, temperature: 0.3, maxOutputTokens: 4096, thinkingBudget: 0, systemInstructions: "" },
   brief: { model: BASE_MODEL, temperature: 0.4, maxOutputTokens: 2048, thinkingBudget: 0, systemInstructions: "" },
-  image: { model: "gemini-2.5-flash-image", systemInstructions: "" },
+  image: { model: "gemini-3.1-flash-image", systemInstructions: "" },
   tts: { provider: "gemini", model: "gemini-2.5-flash-preview-tts", voiceName: "Kore", systemInstructions: "" },
+  // Explore — the child's live voice companion (Gemini Live). `model` is a Live
+  // model id (not a text model), `voiceName` a prebuilt Live voice.
+  // thinkingLevel ("" | low | medium | high) only applies to extended-thinking Live
+  // models; sessionMinutes caps one conversation; dailySessions caps per family/day.
+  explore: { model: "gemini-3.8-live", learnModel: "gemini-3.8-live", learnThinkingLevel: "", voiceName: "Puck", thinkingLevel: "", sessionMinutes: 20, dailySessions: 30, systemInstructions: "" },
 };
 
 // Clean a stored block — keep only known, well-typed fields. Used both when
@@ -41,6 +47,11 @@ function pickBlock(raw = {}) {
   if (Number.isFinite(Number(raw.thinkingBudget))) out.thinkingBudget = Number(raw.thinkingBudget);
   if (typeof raw.systemInstructions === "string") out.systemInstructions = raw.systemInstructions;
   if (typeof raw.voiceName === "string" && raw.voiceName.trim()) out.voiceName = raw.voiceName.trim().slice(0, 60);
+  if (["", "low", "medium", "high"].includes(raw.thinkingLevel)) out.thinkingLevel = raw.thinkingLevel;
+  if (["", "low", "medium", "high"].includes(raw.learnThinkingLevel)) out.learnThinkingLevel = raw.learnThinkingLevel;
+  if (typeof raw.learnModel === "string" && raw.learnModel.trim()) out.learnModel = raw.learnModel.trim().slice(0, 100);
+  if (Number.isFinite(Number(raw.sessionMinutes)) && raw.sessionMinutes !== "") out.sessionMinutes = Math.max(5, Math.min(30, Math.round(Number(raw.sessionMinutes))));
+  if (Number.isFinite(Number(raw.dailySessions)) && raw.dailySessions !== "") out.dailySessions = Math.max(1, Math.min(500, Math.round(Number(raw.dailySessions))));
   if (raw.provider === "gemini" || raw.provider === "openai" || raw.provider === "anthropic") out.provider = raw.provider;
   return out;
 }
@@ -74,11 +85,37 @@ export async function readLlmConfigDoc(db) {
 }
 
 // Deep-merge built-in defaults ⊕ stored default ⊕ stored per-agent override.
-export function mergeAgentConfig(doc, agentKey) {
+// A Gemini Live (realtime voice) model id: "gemini-3.8-live", "...-native-audio-...".
+// Excludes the specialised Live models (translate / transcribe / robotics) that share the protocol but cannot hold a spoken conversation.
+export const isLiveModelId = (id) => /live|native-audio/i.test(String(id || "")) && !/transcribe|translate|robotics/i.test(String(id || ""));
+
+export function mergeAgentConfig(doc, agentKey, now = new Date()) {
   const builtin = AGENT_DEFAULTS[agentKey] || AGENT_DEFAULTS.guide;
   const storedDefault = pickBlock(doc?.default);
   const agentOverride = pickBlock(doc?.agents?.[agentKey]);
-  const merged = { ...builtin, ...storedDefault, ...agentOverride };
+  // The global default block carries TEXT-model settings (model, temperature, token
+  // limits…). Explore runs on a Live model, so those must never leak into it — only
+  // the superadmin's system-instruction text is shared.
+  const inheritedDefault = agentKey === "explore"
+    ? (storedDefault.systemInstructions !== undefined ? { systemInstructions: storedDefault.systemInstructions } : {})
+    : storedDefault;
+  const merged = { ...builtin, ...inheritedDefault, ...agentOverride };
+  // Belt and braces: a non-Live model id (e.g. a stale/saved text model) would make
+  // every conversation fail to connect, so fall back to the built-in Live model.
+  if (agentKey === "explore" && !isLiveModelId(merged.model)) merged.model = builtin.model;
+  if (agentKey === "explore" && !isLiveModelId(merged.learnModel)) merged.learnModel = builtin.learnModel;
+  // A model the provider has retired (or is about to) resolves to its replacement so
+  // an old saved choice never turns every call for that agent into a 404.
+  const swap = replacementForRetired(merged.model, now);
+  if (swap) merged.model = swap;
+  // A thinking level only exists for models that have thinking. A level left over
+  // from an earlier model choice would make every Live session refuse to connect
+  // ("Thinking level is not supported for this model"), so drop it here — the one
+  // place every caller (Explore, the Platform preview, the health check) reads.
+  if (agentKey === "explore") {
+    if (!liveThinkingLevels(merged.model).includes(merged.thinkingLevel)) merged.thinkingLevel = "";
+    if (!liveThinkingLevels(merged.learnModel).includes(merged.learnThinkingLevel)) merged.learnThinkingLevel = "";
+  }
 
   // The global `default` block must not silently lower an agent's token ceiling
   // below its built-in. curriculum/content need maxOutputTokens >= 8192 because

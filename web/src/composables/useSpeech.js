@@ -145,8 +145,11 @@ export function useSpeech() {
   // `contentKind` (e.g. "quran", "story", "tips") picks a default emotional tone
   // fitting that kind of content server-side, so it's part of the cache key too
   // (the same text read for two different kinds is a genuinely different clip).
-  async function serverSpeak(text, lang, { id = null, voiceName = "", contentKind = "", onEnd = null } = {}) {
-    const key = `${voiceName || ""}|${lang}|${contentKind || ""}|${text}`;
+  // `provider`/`model` pin the synthesis backend for explicit voice picks (e.g.
+  // the phonics word-voice picker choosing a specific Gemini voice) — without
+  // them the platform-configured provider decides, which may not be Gemini.
+  async function serverSpeak(text, lang, { id = null, voiceName = "", provider = "", model = "", contentKind = "", onEnd = null } = {}) {
+    const key = `${provider || ""}|${model || ""}|${voiceName || ""}|${lang}|${contentKind || ""}|${text}`;
     if (serverAudioCache.has(key)) {
       playAudio(serverAudioCache.get(key), { id, onError: () => browserSpeak(text, lang, { id, onEnd }), onEnd });
       return true;
@@ -155,7 +158,14 @@ export function useSpeech() {
     loadingId.value = id;  // drives the "preparing audio…" spinner on the button
     try {
       const t0 = (typeof performance !== "undefined" ? performance.now() : 0);
-      const res = await synthesizeSpeech({ text, lang, voiceName: voiceName || undefined, contentKind: contentKind || undefined });
+      const res = await synthesizeSpeech({
+        text,
+        lang,
+        voiceName: voiceName || undefined,
+        provider: provider || undefined,
+        model: model || undefined,
+        contentKind: contentKind || undefined,
+      });
       // Function reachable but not set up (no API key) — give up for the session.
       if (res && res.configured === false) {
         serverUnavailable = true;
@@ -185,11 +195,12 @@ export function useSpeech() {
   // Internal speak that cancels current AUDIO only (not a running scene chain), so
   // it can be used both standalone and to play each turn of a sequence. `onEnd`
   // fires once when this utterance finishes (server audio, browser voice, or a
-  // silent no-op). `voiceName` selects a Gemini voice (per-character in dialogue).
-  function _speak(text, lang = "en", { id = null, rate = 0.85, voiceName = "", contentKind = "", onEnd = null } = {}) {
+  // silent no-op). `voiceName` selects a Gemini voice (per-character in dialogue);
+  // `provider`/`model` pin the backend for explicit voice picks.
+  function _speak(text, lang = "en", { id = null, rate = 0.85, voiceName = "", provider = "", model = "", contentKind = "", onEnd = null } = {}) {
     if (!text) { if (onEnd) onEnd(); return; }
     stopAudio();
-    serverSpeak(text, lang, { id, voiceName, contentKind, onEnd }).then((ok) => {
+    serverSpeak(text, lang, { id, voiceName, provider, model, contentKind, onEnd }).then((ok) => {
       if (!ok) browserSpeak(text, lang, { id, rate, onEnd });
     });
   }
@@ -198,12 +209,12 @@ export function useSpeech() {
   // a playing conversation). Gemini TTS first, browser voice as fallback.
   // `contentKind` (e.g. "quran", "story", "tips") picks a default emotional tone
   // fitting that kind of content — see TONE_BY_CONTENT_KIND server-side.
-  function speak(text, lang = "en", { id = null, rate = 0.85, voiceName = "", contentKind = "" } = {}) {
+  function speak(text, lang = "en", { id = null, rate = 0.85, voiceName = "", provider = "", model = "", contentKind = "" } = {}) {
     if (!text) return;
     lastError.value = ""; // fresh tap — clear any prior "couldn't be spoken" notice
     sequenceToken += 1;
     sequenceIndex.value = -1;
-    _speak(text, lang, { id, rate, voiceName, contentKind });
+    _speak(text, lang, { id, rate, voiceName, provider, model, contentKind });
   }
 
   // Play a list of turns in order, each with its own voice. `turns` items:
@@ -224,7 +235,7 @@ export function useSpeech() {
       const cur = i;
       i += 1;
       sequenceIndex.value = cur;
-      const speakTurn = () => _speak(t.text, t.lang || "en", { id: t.id, voiceName: t.voiceName, contentKind: t.contentKind, rate: t.rate ?? 0.95, onEnd: next });
+      const speakTurn = () => _speak(t.text, t.lang || "en", { id: t.id, voiceName: t.voiceName, provider: t.provider, model: t.model, contentKind: t.contentKind, rate: t.rate ?? 0.95, onEnd: next });
       if (t.audioUrl) playAudio(t.audioUrl, { id: t.id, onError: speakTurn, onEnd: next });
       else speakTurn();
     };

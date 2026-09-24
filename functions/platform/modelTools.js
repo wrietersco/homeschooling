@@ -5,7 +5,10 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import { createGeminiClient, createOpenAiClient, createClaudeClient } from "../agents/llm.js";
 import { pcmToWav, TTS_PROVIDERS, resolveTtsProvider, effectiveTtsModel, effectiveTtsVoice } from "../agents/tts.js";
-import { MODEL_CATALOG, capabilityForAgent } from "../agents/modelCatalog.js";
+import { testLiveModel } from "../agents/liveTest.js";
+import { thinkingConfigFor } from "../agents/explore.js";
+import { loadPricing, DEFAULT_PRICING } from "../lib/costMeter.js";
+import { MODEL_CATALOG, LIVE_PRICING_META, PRICING_META, capabilityForAgent } from "../agents/modelCatalog.js";
 import { AGENT_KEYS, loadAgentConfig, resolveTextProvider, secretNameForProvider } from "../agents/agentConfig.js";
 
 function requireSuperAdmin(request) {
@@ -19,8 +22,17 @@ const now = () => (typeof performance !== "undefined" ? performance.now() : Date
 // Run a minimal real call for one capability and return latency + a result.
 // `geminiKey` powers text/image (and Gemini TTS); `openaiKey` powers OpenAI TTS
 // and OpenAI text; `anthropicKey` powers Claude text.
-async function pingModel({ capability, provider, model, voiceName, sampleText, geminiKey, openaiKey, anthropicKey }) {
+async function pingModel({ capability, provider, model, voiceName, sampleText, thinkingLevel, geminiKey, openaiKey, anthropicKey }) {
   const t0 = now();
+  if (capability === "live") {
+    if (!geminiKey) throw new Error("GEMINI_API_KEY is not set.");
+    const level = thinkingConfigFor({ model, thinkingLevel }).thinkingConfig?.thinkingLevel || "";
+    const r = await testLiveModel({
+      apiKey: geminiKey, model, voiceName: voiceName || "Puck", thinkingLevel: level,
+      ...(sampleText ? { prompt: sampleText } : {}),
+    });
+    return { latencyMs: r.latencyMs, firstAudioMs: r.firstAudioMs, audioSeconds: r.audioSeconds, url: r.url, output: r.transcript, model, provider: "gemini" };
+  }
   if (capability === "tts") {
     const p = resolveTtsProvider(provider);
     const apiKey = p === "openai" ? openaiKey : geminiKey;
@@ -56,11 +68,15 @@ async function pingModel({ capability, provider, model, voiceName, sampleText, g
 
 export const getModelCatalog = onCall(async (request) => {
   requireSuperAdmin(request);
-  return { catalog: MODEL_CATALOG, agentCapabilities: Object.fromEntries(AGENT_KEYS.map((k) => [k, capabilityForAgent(k)])) };
+  // The rates the Costs dashboard actually uses (code defaults ⊕ any override the
+  // superadmin saved), so the pricing tab can flag a rate that differs from Google's.
+  let metered = DEFAULT_PRICING;
+  try { metered = await loadPricing(getFirestore()); } catch { /* defaults */ }
+  return { catalog: MODEL_CATALOG, livePricing: LIVE_PRICING_META, pricingMeta: PRICING_META, meteredPricing: metered, defaultPricing: DEFAULT_PRICING, agentCapabilities: Object.fromEntries(AGENT_KEYS.map((k) => [k, capabilityForAgent(k)])) };
 });
 
 // Preview a specific (possibly UNSAVED) model/voice choice for an agent.
-export const previewModel = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 60 }, async (request) => {
+export const previewModel = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 90 }, async (request) => {
   requireSuperAdmin(request);
   const geminiKey = process.env.GEMINI_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
@@ -76,8 +92,9 @@ export const previewModel = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY
       : undefined;
   const voiceName = request.data?.voiceName ? String(request.data.voiceName) : undefined;
   const sampleText = String(request.data?.sampleText || "").slice(0, 300);
+  const thinkingLevel = ["low", "medium", "high"].includes(request.data?.thinkingLevel) ? request.data.thinkingLevel : "";
   try {
-    const r = await pingModel({ capability, provider, model, voiceName, sampleText, geminiKey, openaiKey, anthropicKey });
+    const r = await pingModel({ capability, provider, model, voiceName, sampleText, thinkingLevel, geminiKey, openaiKey, anthropicKey });
     return { configured: true, ok: true, capability, provider, model, ...r };
   } catch (e) {
     return { configured: true, ok: false, capability, provider, model, error: String(e?.message || e).slice(0, 400) };
@@ -86,7 +103,7 @@ export const previewModel = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY
 
 // Health-check every configured agent's model. Returns one row per agent so the
 // superadmin can confirm everything works before/after saving.
-export const testAllModels = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 120 }, async (request) => {
+export const testAllModels = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], timeoutSeconds: 300 }, async (request) => {
   requireSuperAdmin(request);
   const geminiKey = process.env.GEMINI_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
@@ -105,7 +122,7 @@ export const testAllModels = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KE
         : undefined;
     const model = capability === "tts" ? effectiveTtsModel(provider, cfg.model) : cfg.model;
     try {
-      const r = await pingModel({ capability, provider, model: cfg.model, voiceName: cfg.voiceName, sampleText: "ping", geminiKey, openaiKey, anthropicKey });
+      const r = await pingModel({ capability, provider, model: cfg.model, voiceName: cfg.voiceName, sampleText: capability === "live" ? undefined : "ping", thinkingLevel: cfg.thinkingLevel, geminiKey, openaiKey, anthropicKey });
       results.push({ agentKey, model: r.model || model, provider, capability, ok: true, skipped: Boolean(r.skipped), latencyMs: r.latencyMs });
     } catch (e) {
       results.push({ agentKey, model, provider, capability, ok: false, error: String(e?.message || e).slice(0, 300) });

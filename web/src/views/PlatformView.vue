@@ -121,6 +121,7 @@ const AGENT_META = {
   brief: { label: "Knowledge brief", desc: "Writes the pedagogical brief grounding all agents.", kind: "text" },
   image: { label: "Storybook images", desc: "Generates story illustrations.", kind: "image" },
   tts: { label: "Text-to-speech", desc: "Reads words/phrases aloud (Gemini or OpenAI voices).", kind: "tts" },
+  explore: { label: "Explore (live voice)", desc: "The child's real-time voice companion (Gemini Live). Preview connects for real and plays the voice.", kind: "live" },
 };
 const llmDefault = ref({ model: "gemini-2.5-flash", temperature: 0.4, maxOutputTokens: 2048, thinkingBudget: 0, systemInstructions: "" });
 const llmAgents = ref({});
@@ -129,7 +130,102 @@ const llmLoading = ref(false);
 const llmSaving = ref(false);
 const llmSaved = ref(false);
 const llmError = ref("");
-const modelCatalog = ref({ text: [], tts: [], image: [], voices: [] });
+const modelCatalog = ref({ text: [], tts: [], image: [], live: [], liveOther: [], voices: [] });
+const livePricing = ref({ source: "", checkedAt: "", unit: "", sessionNote: "" });
+const pricingMeta = ref({ checkedAt: "", sources: {} });
+const meteredPricing = ref({ text: {}, tts: {}, image: {} });
+const defaultPricing = ref({ text: {}, tts: {}, image: {} });
+
+// ── Models & pricing (text / speech / image) ─────────────────────────────────
+// Price with at least 2 decimals and as many more (up to 4) as needed, never rounding
+// a real price: $0.30, $0.075, $0.0336, $15.00.
+const usdP = (n) => {
+  if (n == null) return "—";
+  const [i, d = ""] = String(Number(Number(n).toFixed(4))).split(".");
+  return `$${i}.${d.padEnd(2, "0")}`;
+};
+const PROVIDER_LABEL = { gemini: "Google Gemini", openai: "OpenAI", anthropic: "Anthropic Claude" };
+const textByProvider = computed(() =>
+  ["gemini", "openai", "anthropic"].map((prov) => ({
+    prov,
+    label: PROVIDER_LABEL[prov],
+    models: (modelCatalog.value.text || []).filter((m) => (m.provider || "gemini") === prov),
+  })).filter((g) => g.models.length)
+);
+// The first day the next price applies, given the last day of an intro price.
+function dayAfter(iso) {
+  if (!iso) return "";
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+function daysUntil(iso) {
+  if (!iso) return null;
+  return Math.ceil((new Date(`${iso}T00:00:00Z`).getTime() - Date.now()) / 86400000);
+}
+// The rate the Costs dashboard charges for a model, and whether an override
+// (saved in platform/pricing) makes it differ from the code default.
+function metered(kind, id) { return meteredPricing.value?.[kind]?.[id] || null; }
+function rateOverridden(kind, id) {
+  const m = metered(kind, id), d = defaultPricing.value?.[kind]?.[id];
+  return !!(m && d && JSON.stringify(m) !== JSON.stringify(d));
+}
+function meteredLabel(kind, id) {
+  const r = metered(kind, id);
+  if (!r) return "— (priced as fallback)";
+  if (r.perImage != null) return `${usdP(r.perImage)} / image`;
+  return `${usdP(r.input)} in / ${usdP(r.output)} out`;
+}
+// Which agents currently use a model (so a retiring model's impact is obvious).
+function agentsUsing(id) {
+  return Object.entries(llmAgents.value || {}).filter(([, a]) => a?.model === id).map(([k]) => agentMeta(k).label);
+}
+// Models that need attention: retired (calls fail) or scheduled to shut down.
+const modelAlerts = computed(() => {
+  const out = [];
+  for (const kind of ["text", "tts", "image"]) {
+    for (const m of modelCatalog.value[kind] || []) {
+      const st = m.availability?.state;
+      if (st && st !== "ok") out.push({ kind, ...m, state: st, days: daysUntil(m.availability.date) });
+    }
+  }
+  return out;
+});
+function availText(m) {
+  const a = m.availability || { state: "ok" };
+  if (a.state === "unavailable") return "Unavailable";
+  if (a.state === "deprecating") {
+    const d = daysUntil(a.date);
+    return d != null && d >= 0 ? `Shuts down ${a.date} (${d} days)` : `Shut down ${a.date}`;
+  }
+  return "Available";
+}
+
+// ── Live models & pricing tab ────────────────────────────────────────────────
+const usd = (n, digits = 2) => (n == null ? "—" : `$${Number(n).toFixed(digits)}`);
+// Per-minute prices: at least 3 decimals, more only when needed ($0.005, $0.0045, $0.0315).
+const usdMin = (n) => {
+  if (n == null) return "—";
+  const t = String(Number(Number(n).toFixed(4)));
+  const [i, d = ""] = t.split(".");
+  return `$${i}.${d.padEnd(3, "0")}`;
+};
+// Which Explore modes currently use a model (from the saved LLM config).
+function liveUsage(id) {
+  const a = llmAgents.value.explore || {};
+  const uses = [];
+  if (a.model === id) uses.push("Exploration");
+  if (a.learnModel === id) uses.push("Learning");
+  return uses;
+}
+// Rough cost of one minute of conversation: the mic streams the whole minute
+// (audio in) and the buddy speaks about half of it (audio out). Excludes the
+// small text/tool tokens and re-read context, so treat it as a floor.
+const speakShare = 0.5;
+function perConversationMinute(price) {
+  if (!price) return null;
+  return (price.inAudioPerMin || 0) + speakShare * (price.outAudioPerMin || 0);
+}
 const modelLoading = ref(false);
 const previewing = ref({});
 const previewResults = ref({});
@@ -188,9 +284,31 @@ function voicesFor(k) {
   const byProvider = modelCatalog.value.voicesByProvider;
   return (byProvider && byProvider[agentProvider(k)]) || modelCatalog.value.voices || [];
 }
+// The thinking levels a Live model accepts, from its catalog entry. A model that
+// declares none has no thinking at all: sending it a level closes the Live socket
+// with "Thinking level is not supported for this model", so the level control is
+// hidden AND the stored value cleared whenever the model changes.
+function liveLevels(id) {
+  return modelById("live", id)?.thinkingLevels || [];
+}
+// Drop a thinking level the currently chosen models can't honour. Runs on every
+// model change and once after the saved config loads, so a level left over from an
+// earlier model never reaches the API.
+function syncLiveCapabilities(k) {
+  const a = llmAgents.value[k];
+  // Without the catalog nothing is known about a model's features yet — clearing
+  // then would wipe a perfectly valid saved level.
+  if (!a || agentMeta(k).kind !== "live" || !modelCatalog.value.live?.length) return;
+  if (!liveLevels(a.model).includes(a.thinkingLevel)) a.thinkingLevel = "";
+  if (!liveLevels(a.learnModel).includes(a.learnThinkingLevel)) a.learnThinkingLevel = "";
+}
+// Switching the Learning-mode model may invalidate its thinking level.
+function onLearnModelChange(k) { syncLiveCapabilities(k); }
 // Switching a TTS agent's model may invalidate its voice — snap to a valid one.
 function onAgentModelChange(k) {
-  if (agentMeta(k).kind !== "tts") return;
+  const kind = agentMeta(k).kind;
+  if (kind === "live") syncLiveCapabilities(k);
+  if (kind !== "tts" && kind !== "live") return;
   const voices = voicesFor(k);
   if (llmAgents.value[k]?.voiceName && !voices.includes(llmAgents.value[k].voiceName)) llmAgents.value[k].voiceName = voices[0];
 }
@@ -223,6 +341,13 @@ async function loadModelCatalog() {
   try {
     const res = await getModelCatalog();
     modelCatalog.value = res.catalog || modelCatalog.value;
+    // The catalog is what says which features a model has, so reconcile the
+    // already-loaded config with it (either load can finish first).
+    for (const k of llmKeys.value) syncLiveCapabilities(k);
+    livePricing.value = res.livePricing || livePricing.value;
+    pricingMeta.value = res.pricingMeta || pricingMeta.value;
+    meteredPricing.value = res.meteredPricing || meteredPricing.value;
+    defaultPricing.value = res.defaultPricing || defaultPricing.value;
   } catch (e) {
     llmError.value = e?.message || "Could not load model catalog.";
   } finally {
@@ -237,6 +362,7 @@ async function loadLlmConfig() {
     llmKeys.value = cfg.agentKeys || Object.keys(cfg.agents || {});
     llmDefault.value = { ...llmDefault.value, ...(cfg.default || {}) };
     llmAgents.value = cfg.agents || {};
+    for (const k of llmKeys.value) syncLiveCapabilities(k);
     // Switchable text agents need a concrete provider for the <select> to bind
     // (TTS already carries one from its built-in default).
     for (const k of llmKeys.value) {
@@ -276,9 +402,12 @@ async function runPreview(k) {
       provider: llmAgents.value[k].provider,
       model: llmAgents.value[k].model,
       voiceName: llmAgents.value[k].voiceName,
+      thinkingLevel: llmAgents.value[k].thinkingLevel,
       sampleText: agentMeta(k).kind === "tts"
         ? "Assalamu alaikum. This is the activity voice preview."
-        : "Reply with one short preview sentence.",
+        : agentMeta(k).kind === "live"
+          ? "" // the server uses its own friendly hello for Live models
+          : "Reply with one short preview sentence.",
     });
     previewResults.value = { ...previewResults.value, [k]: r };
     if (r?.url) {
@@ -834,6 +963,7 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
         <button :class="{ active: tab === 'quota' }" @click="openQuotaTab">Quota</button>
         <button :class="{ active: tab === 'costs' }" @click="openCostsTab">Costs</button>
         <button :class="{ active: tab === 'llm' }" @click="tab = 'llm'">LLM config</button>
+        <button :class="{ active: tab === 'live' }" @click="tab = 'live'">Models &amp; pricing</button>
         <button :class="{ active: tab === 'quran' }" @click="tab = 'quran'">Quran</button>
         <button :class="{ active: tab === 'qaida' }" @click="openQaidaTab">Qaida</button>
       </nav>
@@ -1163,6 +1293,190 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
       </template>
     </div>
 
+    <!-- ── Live models & pricing ───────────────────────────────────────── -->
+    <div v-if="tab === 'live'" class="llm-wrap live-wrap">
+      <p v-if="modelLoading && !modelCatalog.live.length" class="muted">Loading…</p>
+      <template v-else>
+        <div class="card live-intro">
+          <h3 class="llm-h">Models &amp; pricing</h3>
+          <p class="muted">
+            What every model the app can use costs, in USD, straight from each provider's pricing page
+            (last checked {{ pricingMeta.checkedAt }}):
+            <a :href="pricingMeta.sources.gemini" target="_blank" rel="noopener">Google</a> ·
+            <a :href="pricingMeta.sources.openai" target="_blank" rel="noopener">OpenAI</a> ·
+            <a :href="pricingMeta.sources.anthropic" target="_blank" rel="noopener">Anthropic</a>.
+            “Charged in Costs” is the rate the Costs dashboard applies; it is flagged when a saved override makes it differ from the published price.
+          </p>
+        </div>
+
+        <div v-if="modelAlerts.length" class="card price-alerts" role="alert" aria-label="Model alerts">
+          <h3 class="llm-h">Needs attention</h3>
+          <ul>
+            <li v-for="a in modelAlerts" :key="a.id" :class="a.state">
+              <b>{{ a.label }}</b> <code>{{ a.id }}</code> — {{ availText(a) }}.
+              {{ a.availability.note }}
+              <span v-if="agentsUsing(a.id).length" class="price-using">Currently used by: {{ agentsUsing(a.id).join(", ") }}.</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="card live-table-card">
+          <h3 class="llm-h">Text models</h3>
+          <div class="live-scroll">
+            <table class="md-table live-table" aria-label="Text models">
+              <thead>
+                <tr>
+                  <th>Model</th><th>Availability</th>
+                  <th>Input<br><span class="md-t-sub">per 1M tokens</span></th>
+                  <th>Output<br><span class="md-t-sub">per 1M tokens</span></th>
+                  <th>Cached input<br><span class="md-t-sub">per 1M tokens</span></th>
+                  <th>Charged in Costs</th><th>Notes</th>
+                </tr>
+              </thead>
+              <tbody v-for="g in textByProvider" :key="g.prov">
+                <tr class="price-group"><td colspan="7">{{ g.label }}</td></tr>
+                <tr v-for="m in g.models" :key="m.id" :class="{ dim: m.availability.state === 'unavailable' }">
+                  <td><span class="md-t-name">{{ m.label }}</span><span v-if="m.recommended" class="md-rec">Recommended</span><span v-if="m.newest" class="md-rec md-new">New</span><code class="md-t-id">{{ m.id }}</code></td>
+                  <td><span :class="['avail', m.availability.state]">{{ availText(m) }}</span></td>
+                  <td><b>{{ usdP(m.price?.in) }}</b><span v-if="m.price?.until" class="md-t-sub price-then"><br>→ {{ usdP(m.price.then.in) }} from {{ dayAfter(m.price.until) }}</span></td>
+                  <td><b>{{ usdP(m.price?.out) }}</b><span v-if="m.price?.until" class="md-t-sub price-then"><br>→ {{ usdP(m.price.then.out) }} from {{ dayAfter(m.price.until) }}</span></td>
+                  <td>{{ usdP(m.price?.cachedIn) }}</td>
+                  <td>{{ meteredLabel("text", m.id) }}<span v-if="rateOverridden('text', m.id)" class="live-badge">override</span></td>
+                  <td class="md-t-sub">{{ m.price?.note || "" }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card live-table-card">
+          <h3 class="llm-h">Speech (text-to-speech) models</h3>
+          <div class="live-scroll">
+            <table class="md-table live-table" aria-label="Speech models">
+              <thead>
+                <tr><th>Model</th><th>Availability</th><th>Input<br><span class="md-t-sub">text, per 1M tokens</span></th><th>Output<br><span class="md-t-sub">audio, per 1M tokens</span></th><th>Charged in Costs</th><th>Notes</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="m in modelCatalog.tts" :key="m.id">
+                  <td><span class="md-t-name">{{ m.label }}</span><span v-if="m.recommended" class="md-rec">Recommended</span><span v-if="m.newest" class="md-rec md-new">New</span><code class="md-t-id">{{ m.id }}</code></td>
+                  <td><span :class="['avail', m.availability.state]">{{ availText(m) }}</span></td>
+                  <td v-if="m.price?.perMChars != null" colspan="2"><b>{{ usdP(m.price.perMChars) }}</b> per 1M characters</td>
+                  <template v-else>
+                    <td><b>{{ usdP(m.price?.in) }}</b></td>
+                    <td><b>{{ usdP(m.price?.out) }}</b></td>
+                  </template>
+                  <td>{{ meteredLabel("tts", m.id) }}<span v-if="rateOverridden('tts', m.id)" class="live-badge">override</span></td>
+                  <td class="md-t-sub">{{ m.price?.note || "" }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card live-table-card">
+          <h3 class="llm-h">Image models</h3>
+          <div class="live-scroll">
+            <table class="md-table live-table" aria-label="Image models">
+              <thead>
+                <tr><th>Model</th><th>Availability</th><th>Per image</th><th>Charged in Costs</th><th>Notes</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="m in modelCatalog.image" :key="m.id" :class="{ dim: m.availability.state === 'unavailable' }">
+                  <td><span class="md-t-name">{{ m.label }}</span><span v-if="m.recommended" class="md-rec">Recommended</span><span v-if="m.newest" class="md-rec md-new">New</span><code class="md-t-id">{{ m.id }}</code></td>
+                  <td><span :class="['avail', m.availability.state]">{{ availText(m) }}</span></td>
+                  <td><b>{{ usdP(m.price?.perImage) }}</b></td>
+                  <td>{{ meteredLabel("image", m.id) }}<span v-if="rateOverridden('image', m.id)" class="live-badge">override</span></td>
+                  <td class="md-t-sub">{{ m.availability.state !== "ok" ? m.availability.note : (m.price?.note || "") }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card live-intro">
+          <h3 class="llm-h">Gemini Live (real-time voice) models</h3>
+          <p class="muted">
+            Every real-time voice model Google exposes on the Live API. The first table lists the
+            <b>conversational</b> models the Explore buddy can use (pick them on the
+            <a href="#" @click.prevent="tab = 'llm'">LLM config</a> tab); the second lists specialised Live models for reference.
+            Prices are USD, paid tier — the free tier is rate-limited and free of charge.
+          </p>
+          <p class="muted sm-text">
+            Source: <a :href="livePricing.source" target="_blank" rel="noopener">{{ livePricing.source }}</a>
+            · last checked {{ livePricing.checkedAt }}. {{ livePricing.sessionNote }}
+          </p>
+        </div>
+
+        <div class="card live-table-card">
+          <h3 class="llm-h">Conversational models (usable as the Explore buddy)</h3>
+          <div class="live-scroll">
+            <table class="md-table live-table" aria-label="Conversational Live models">
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Status</th>
+                  <th>Text in / out<br><span class="md-t-sub">per 1M tokens</span></th>
+                  <th>Audio in / out<br><span class="md-t-sub">per 1M tokens</span></th>
+                  <th>Per audio minute<br><span class="md-t-sub">in / out</span></th>
+                  <th>≈ per conversation minute<br><span class="md-t-sub">mic + buddy speaks ½</span></th>
+                  <th>Latency</th>
+                  <th>Used by Explore</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="m in modelCatalog.live" :key="m.id" :class="{ sel: liveUsage(m.id).length }">
+                  <td>
+                    <span class="md-t-name">{{ m.label }}</span>
+                    <span v-if="m.recommended" class="md-rec">Recommended</span>
+                    <code class="md-t-id">{{ m.id }}</code>
+                    <span class="md-t-sub">{{ m.whenToUse }}</span>
+                  </td>
+                  <td>{{ m.status }}<br><span class="md-t-sub">{{ m.context }} context</span></td>
+                  <td>{{ usd(m.price.inText) }} / {{ usd(m.price.outText) }}</td>
+                  <td><b>{{ usd(m.price.inAudio) }} / {{ usd(m.price.outAudio) }}</b></td>
+                  <td>{{ usdMin(m.price.inAudioPerMin) }} / {{ usdMin(m.price.outAudioPerMin) }}<span v-if="m.price.perMinEstimated" class="md-t-sub"><br>estimated at 25 tokens/s</span></td>
+                  <td><b>{{ usdMin(perConversationMinute(m.price)) }}</b><br><span class="md-t-sub">20 min ≈ {{ usd(perConversationMinute(m.price) * 20) }}</span></td>
+                  <td>{{ m.latency }}</td>
+                  <td>
+                    <span v-for="u in liveUsage(m.id)" :key="u" class="live-badge">{{ u }}</span>
+                    <span v-if="!liveUsage(m.id).length" class="md-t-sub">—</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="muted sm-text">
+            The per-conversation figure is an estimate: the microphone streams audio for the whole conversation (billed as
+            audio input) and the buddy speaks about half the time (audio output). It excludes small text/tool tokens and
+            re-read conversation context, so real bills can be a little higher. Extended-thinking adds thinking tokens to output.
+            Explore's cost isn't in the Costs tab yet — audio goes straight from the browser to Google.
+          </p>
+        </div>
+
+        <div class="card live-table-card">
+          <h3 class="llm-h">Other Live models (reference — not usable as the buddy)</h3>
+          <div class="live-scroll">
+            <table class="md-table live-table" aria-label="Other Live models">
+              <thead>
+                <tr><th>Model</th><th>Status</th><th>Audio in / out<br><span class="md-t-sub">per 1M tokens</span></th><th>Per minute</th><th>What it does</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="m in modelCatalog.liveOther" :key="m.id">
+                  <td><span class="md-t-name">{{ m.label }}</span><code class="md-t-id">{{ m.id }}</code></td>
+                  <td>{{ m.status }}<br><span class="md-t-sub">{{ m.context }} context</span></td>
+                  <td v-if="m.price">{{ usd(m.price.inAudio) }} in / {{ m.price.outAudio != null ? usd(m.price.outAudio) + " audio out" : usd(m.price.outText) + " text out" }}</td>
+                  <td v-else class="md-t-sub">not published</td>
+                  <td v-if="m.price">{{ usdMin(m.price.inAudioPerMin) }} in / {{ usdMin(m.price.outAudioPerMin ?? m.price.outTextPerMin) }} out</td>
+                  <td v-else>—</td>
+                  <td>{{ m.purpose }}<br><span class="md-t-sub">{{ m.explore }}</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+    </div>
+
     <!-- ── LLM Config tab — per agent ───────────────────────────────────── -->
     <div v-if="tab === 'llm'" class="llm-wrap">
       <p v-if="llmLoading" class="muted">Loading…</p>
@@ -1241,7 +1555,7 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
           <label>Model ID
             <select v-if="catalogFor(k).length" v-model="llmAgents[k].model" @change="onAgentModelChange(k)">
               <option v-for="m in catalogFor(k)" :key="m.id" :value="m.id">
-                {{ m.label }}{{ m.recommended ? ' ★' : '' }} — {{ m.id }}
+                {{ m.label }}{{ m.recommended ? ' ★' : '' }} — {{ m.id }}{{ m.availability?.state === 'unavailable' ? ' — UNAVAILABLE' : m.availability?.state === 'deprecating' ? ' — SHUTTING DOWN' : '' }}
               </option>
             </select>
             <input v-else v-model="llmAgents[k].model" type="text" placeholder="gemini-2.5-flash" />
@@ -1297,6 +1611,44 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
             </label>
           </template>
 
+          <template v-if="agentMeta(k).kind === 'live'">
+            <label>Voice
+              <select v-model="llmAgents[k].voiceName">
+                <option v-for="v in voicesFor(k)" :key="v" :value="v">{{ v }}</option>
+              </select>
+              <small>All 30 Gemini Live voices were verified on the current models. Use Preview to hear one before saving.</small>
+            </label>
+            <label v-if="liveLevels(llmAgents[k].model).length">Thinking level
+              <select v-model="llmAgents[k].thinkingLevel">
+                <option value="">Default (low)</option>
+                <option v-for="l in liveLevels(llmAgents[k].model)" :key="l" :value="l">{{ l }}</option>
+              </select>
+              <small>How much the model reasons in the background before speaking. Higher = better for maths, slightly costlier.</small>
+            </label>
+            <label>Learning-mode model
+              <select v-model="llmAgents[k].learnModel" @change="onLearnModelChange(k)">
+                <option v-for="m in catalogFor(k)" :key="m.id" :value="m.id">
+                  {{ m.label }} — {{ m.id }}{{ m.thinkingLevels ? " · thinking" : "" }}
+                </option>
+              </select>
+              <small>Used when a child is in Learning mode (speech, maths, concepts). A "thinking" model checks answers more carefully. Parents can choose the faster model instead in the Explore screen's Buddy settings.</small>
+            </label>
+            <label v-if="liveLevels(llmAgents[k].learnModel).length">Learning thinking level
+              <select v-model="llmAgents[k].learnThinkingLevel">
+                <option v-for="l in liveLevels(llmAgents[k].learnModel)" :key="l" :value="l">{{ l }}</option>
+              </select>
+              <small>Only models with extended thinking accept this — it disappears for the others.</small>
+            </label>
+            <div class="llm-row">
+              <label>Max minutes per conversation
+                <input v-model.number="llmAgents[k].sessionMinutes" type="number" min="5" max="30" step="1" />
+              </label>
+              <label>Max conversations per family / day
+                <input v-model.number="llmAgents[k].dailySessions" type="number" min="1" max="500" step="1" />
+              </label>
+            </div>
+          </template>
+
           <label v-if="agentMeta(k).kind === 'tts'">Voice name
             <select v-if="voicesFor(k).length" v-model="llmAgents[k].voiceName">
               <option v-for="v in voicesFor(k)" :key="v" :value="v">{{ v }}</option>
@@ -1306,8 +1658,9 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
             <small v-else>Gemini prebuilt voice, e.g. <code>Kore</code>, <code>Puck</code>, <code>Charon</code>.</small>
           </label>
 
-          <label v-if="agentMeta(k).kind === 'text'">System instructions <span class="opt">(optional)</span>
+          <label v-if="agentMeta(k).kind === 'text' || agentMeta(k).kind === 'live'">System instructions <span class="opt">(optional)</span>
             <textarea v-model="llmAgents[k].systemInstructions" rows="3" placeholder="Prepended to this agent's system prompt…"></textarea>
+            <small v-if="agentMeta(k).kind === 'live'">Added before the buddy's built-in rules and the child's brief (e.g. tone, values, topics to avoid). Applies to new conversations.</small>
           </label>
 
           <div class="preview-row">
@@ -1315,7 +1668,7 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
               {{ previewing[k] ? "Previewing..." : "Preview" }}
             </button>
             <span v-if="previewResults[k]?.ok" class="ok sm-text">
-              OK {{ previewResults[k].latencyMs != null ? `(${previewResults[k].latencyMs}ms)` : "" }}
+              OK {{ previewResults[k].latencyMs != null ? `(${previewResults[k].latencyMs}ms${previewResults[k].firstAudioMs != null ? `, first audio ${previewResults[k].firstAudioMs}ms` : ""})` : "" }}
             </span>
             <span v-else-if="previewResults[k]?.error" class="error sm-text">
               {{ previewResults[k].error }}
@@ -1622,6 +1975,25 @@ h1 { margin: 0; }
 .md-custom { color: #94a3b8; font-size: 0.8rem; }
 .md-compare summary { cursor: pointer; font-size: 0.8rem; color: #2563eb; user-select: none; }
 .md-compare[open] summary { margin-bottom: 0.5rem; }
+ .live-wrap { display: flex; flex-direction: column; gap: 1rem; }
+.live-intro p { margin: 0.4rem 0 0; }
+.live-scroll { overflow-x: auto; }
+.live-table { min-width: 900px; }
+.live-table td, .live-table th { vertical-align: top; }
+.price-alerts { border-left: 4px solid #dc2626; background: #fef2f2; }
+.price-alerts ul { margin: 0.4rem 0 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: 0.4rem; }
+.price-alerts li.deprecating { color: #92400e; }
+.price-alerts li.unavailable { color: #991b1b; }
+.price-using { display: block; font-weight: 600; }
+.md-new { background: #dcfce7; color: #166534; }
+.price-then { color: #b45309; font-weight: 600; }
+.price-group td { background: #f1f5f9; font-weight: 700; color: #334155; }
+.avail { font-weight: 600; }
+.avail.ok { color: #15803d; }
+.avail.deprecating { color: #b45309; }
+.avail.unavailable { color: #b91c1c; }
+tr.dim td { opacity: 0.6; }
+.live-badge { display: inline-block; background: #dbeafe; color: #1e40af; border-radius: 999px; padding: 0.1rem 0.5rem; font-size: 0.72rem; font-weight: 600; margin: 0 0.25rem 0.25rem 0; }
 .md-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
 .md-table th { text-align: left; color: #64748b; font-weight: 600; padding: 0.35rem 0.5rem; border-bottom: 1px solid #e2e8f0; }
 .md-table td { padding: 0.4rem 0.5rem; border-top: 1px solid #f1f5f9; vertical-align: top; color: #334155; }

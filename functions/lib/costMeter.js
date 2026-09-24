@@ -23,22 +23,42 @@ export const DEFAULT_PRICING = {
     "gemini-2.5-flash": { input: 0.30, output: 2.50 },
     "gemini-2.5-flash-lite": { input: 0.10, output: 0.40 },
     "gemini-2.5-pro": { input: 1.25, output: 10.00 }, // ≤200k-token context tier
-    "gemini-2.0-flash": { input: 0.10, output: 0.40 },
+    "gemini-2.0-flash": { input: 0.10, output: 0.40 }, // retired by Google (kept so old events price)
+    // Gemini 3.x (verified against Google's pricing page 2026-09-20). 3.6–3.8 Flash
+    // carry an intro price that doubles on 2027-01-01 — `until`/`then` make the
+    // meter switch automatically (see effectiveRate) instead of under-billing.
+    "gemini-3.8-flash": { input: 0.75, output: 3.75, until: "2026-12-31", then: { input: 1.50, output: 7.50 } },
+    "gemini-3.7-flash": { input: 0.75, output: 3.75, until: "2026-12-31", then: { input: 1.50, output: 7.50 } },
+    "gemini-3.6-flash": { input: 0.75, output: 3.75, until: "2026-12-31", then: { input: 1.50, output: 7.50 } },
+    "gemini-3.5-flash": { input: 1.50, output: 9.00 },
+    "gemini-3.5-flash-lite": { input: 0.30, output: 2.50 },
+    "gemini-3.1-flash-lite": { input: 0.25, output: 1.50 },
+    "gemini-3.1-pro-preview": { input: 2.00, output: 12.00 }, // ≤200k-token prompts
+    // OpenAI current generation (standard tier, ≤ the model's long-context threshold).
+    "gpt-6-astra": { input: 10.00, output: 50.00 },
+    "gpt-5.6-sol": { input: 4.00, output: 20.00 },
+    "gpt-5.6-terra": { input: 2.00, output: 12.00 },
+    "gpt-5.6-luna": { input: 0.20, output: 1.20 },
+    "gpt-5.5": { input: 5.00, output: 30.00 },
+    "gpt-5.4": { input: 2.50, output: 15.00 },
+    "gpt-5.4-mini": { input: 0.75, output: 4.50 },
+    "gpt-5.4-nano": { input: 0.20, output: 1.25 },
     // OpenAI chat models (published per-1M-token rates). Reasoning tokens, if any,
     // are billed at the output rate — priceText folds thoughtTokens into output.
     "gpt-4o-mini": { input: 0.15, output: 0.60 },
     "gpt-4.1-mini": { input: 0.40, output: 1.60 },
     "gpt-4o": { input: 2.50, output: 10.00 },
     "gpt-4.1": { input: 2.00, output: 8.00 },
-    // Anthropic Claude models (published per-1M-token rates, June 2026). Sonnet 5
-    // intro pricing ($2/$10) runs through 2026-08-31; using the standard $3/$15
-    // rate here keeps the fallback conservative once the intro window ends.
-    "claude-sonnet-5": { input: 3.00, output: 15.00 },
+    // Anthropic Claude models (published per-1M-token rates). Sonnet 5's launch
+    // intro price ($2/$10) became the permanent price — the planned rise to $3/$15
+    // on 2026-09-01 was cancelled (verified 2026-09-20).
+    "claude-sonnet-5": { input: 2.00, output: 10.00 },
     "claude-opus-4-8": { input: 5.00, output: 25.00 },
   },
   tts: {
     "gemini-2.5-flash-preview-tts": { input: 0.50, output: 10.00 },
     "gemini-2.5-pro-preview-tts": { input: 1.00, output: 20.00 },
+    "gemini-3.1-flash-tts-preview": { input: 1.00, output: 20.00 },
     // OpenAI's audio response carries no token counts, so these are billed via the
     // audioSeconds→output-tokens fallback (25 tok/s) in priceTts. gpt-4o-mini-tts
     // is token-priced (~$0.015/min audio); tts-1/-hd are really per-character but
@@ -51,6 +71,15 @@ export const DEFAULT_PRICING = {
     // Gemini Flash Image output is billed per token ($30/1M); a ≤1024px image
     // ≈ 1290 tokens ⇒ ~$0.039. Imagen models are billed per generated image.
     "gemini-2.5-flash-image": { perImage: 0.039 },
+    // Nano Banana 2 family — 1K image (1120 image tokens × $60/M ≈ $0.067, verified by
+    // a real generation). Pro: $120/M ≈ $0.134. OpenAI gpt-image: ~196 output tokens
+    // for a 1024² image at default quality × $30/M ≈ $0.006 (measured; higher quality
+    // settings cost more).
+    "gemini-3.1-flash-image": { perImage: 0.067 },
+    "gemini-3.1-flash-lite-image": { perImage: 0.0336 },
+    "gemini-3-pro-image": { perImage: 0.134 },
+    "gpt-image-2.5-flare": { perImage: 0.006 },
+    "gpt-image-2.5-sunburst": { perImage: 0.006 },
     "imagen-4.0-fast-generate-001": { perImage: 0.02 },
     "imagen-4.0-generate-001": { perImage: 0.04 },
     "imagen-4.0-ultra-generate-001": { perImage: 0.06 },
@@ -97,9 +126,18 @@ export function _resetPricingCache() { _pricingCache = null; _pricingCacheAt = 0
 // Each returns { costUsd, rate } so the caller can snapshot the rate it used.
 const round6 = (n) => Math.round((Number(n) || 0) * 1e6) / 1e6;
 
+// A rate may carry an end date for an introductory price: `until` (inclusive,
+// YYYY-MM-DD, UTC) and `then` (the rate that applies afterwards). Returns the rate
+// in force on `now`, so the meter follows Google's published price changes with no
+// redeploy and without silently under-billing after the intro period.
+export function effectiveRate(rate, now = new Date()) {
+  if (rate && rate.until && rate.then && now.toISOString().slice(0, 10) > rate.until) return { ...rate.then };
+  return rate;
+}
+
 // Thinking tokens are billed at the output rate, so fold them into output.
-export function priceText({ model, usage = {}, pricing = DEFAULT_PRICING }) {
-  const rate = pricing.text?.[model] || FALLBACK.text;
+export function priceText({ model, usage = {}, pricing = DEFAULT_PRICING, now = new Date() }) {
+  const rate = effectiveRate(pricing.text?.[model], now) || FALLBACK.text;
   const input = Number(usage.inputTokens) || 0;
   const output = (Number(usage.outputTokens) || 0) + (Number(usage.thoughtTokens) || 0);
   const costUsd = round6((input * rate.input + output * rate.output) / 1e6);
@@ -107,8 +145,8 @@ export function priceText({ model, usage = {}, pricing = DEFAULT_PRICING }) {
 }
 
 // TTS: prefer real token usage; fall back to audioSeconds → tokens (25 tok/sec).
-export function priceTts({ model, usage = {}, pricing = DEFAULT_PRICING }) {
-  const rate = pricing.tts?.[model] || FALLBACK.tts;
+export function priceTts({ model, usage = {}, pricing = DEFAULT_PRICING, now = new Date() }) {
+  const rate = effectiveRate(pricing.tts?.[model], now) || FALLBACK.tts;
   const input = Number(usage.inputTokens) || 0;
   let output = Number(usage.outputTokens) || 0;
   if (!output && usage.audioSeconds) output = Math.round(Number(usage.audioSeconds) * 25);
@@ -116,18 +154,18 @@ export function priceTts({ model, usage = {}, pricing = DEFAULT_PRICING }) {
   return { costUsd, rate };
 }
 
-export function priceImage({ model, usage = {}, pricing = DEFAULT_PRICING }) {
-  const rate = pricing.image?.[model] || FALLBACK.image;
+export function priceImage({ model, usage = {}, pricing = DEFAULT_PRICING, now = new Date() }) {
+  const rate = effectiveRate(pricing.image?.[model], now) || FALLBACK.image;
   const images = Number(usage.images) || 0;
   const costUsd = round6(images * (rate.perImage || 0));
   return { costUsd, rate };
 }
 
 // Dispatch by kind. Returns { costUsd, rate }.
-export function priceEvent({ kind, model, usage, pricing }) {
-  if (kind === "tts") return priceTts({ model, usage, pricing });
-  if (kind === "image") return priceImage({ model, usage, pricing });
-  return priceText({ model, usage, pricing });
+export function priceEvent({ kind, model, usage, pricing, now }) {
+  if (kind === "tts") return priceTts({ model, usage, pricing, now });
+  if (kind === "image") return priceImage({ model, usage, pricing, now });
+  return priceText({ model, usage, pricing, now });
 }
 
 // ─── Period keys (UTC) ─────────────────────────────────────────────────────────

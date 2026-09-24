@@ -33,7 +33,15 @@ export async function runAgent({
     const res = await llm.generate({ system: datedSystem, contents, toolDeclarations, config });
 
     if (res.functionCalls && res.functionCalls.length) {
-      contents.push({ role: "model", parts: res.functionCalls.map((fc) => ({ functionCall: fc })) });
+      // Echo each call back as a model turn. A Gemini 3.x `thoughtSignature` lives on
+      // the PART (beside functionCall, not inside it) and must be returned verbatim.
+      contents.push({
+        role: "model",
+        parts: res.functionCalls.map(({ thoughtSignature, ...call }) => ({
+          functionCall: call,
+          ...(thoughtSignature ? { thoughtSignature } : {}),
+        })),
+      });
 
       const responseParts = [];
       let hitStopTool = false;

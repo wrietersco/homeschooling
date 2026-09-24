@@ -52,6 +52,14 @@ const profiles = useProfilesStore();
         <span class="material-symbols-rounded">format_list_bulleted</span>
         <strong>Syllabus</strong>
       </RouterLink>
+      <RouterLink to="/phonics" class="quick-tile tile-sky">
+        <span class="material-symbols-rounded">abc</span>
+        <strong>Sound Splash</strong>
+      </RouterLink>
+      <RouterLink to="/explore" class="quick-tile tile-peach">
+        <span class="material-symbols-rounded">rocket_launch</span>
+        <strong>Explore</strong>
+      </RouterLink>
     </div>
 
     <!-- Members -->
@@ -120,6 +128,7 @@ h1 { margin: 0; font-size: 1.5rem; color: #fff; }
 .tile-rose  { background: #FECDD3; color: #9F1239; }
 .tile-peach { background: #FED7AA; color: #9A3412; }
 .tile-teal  { background: #99F6E4; color: #134E4A; }
+.tile-sky   { background: #BAE6FD; color: #0C4A6E; }
 
 /* Members */
 .members { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.4rem; }

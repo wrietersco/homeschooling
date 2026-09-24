@@ -5,6 +5,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import { platformLlmConfig, userRef, familyPaths } from "../lib/paths.js";
 import { AGENT_KEYS, AGENT_DEFAULTS, readLlmConfigDoc, mergeAgentConfig } from "../agents/agentConfig.js";
+import { liveThinkingLevels } from "../agents/modelCatalog.js";
 
 function requireSuperAdmin(request) {
   if (request.auth?.token?.platformRole !== "superadmin") {
@@ -162,6 +163,11 @@ function sanitizeBlock(raw = {}) {
   if (raw.thinkingBudget != null) out.thinkingBudget = Math.max(0, Math.min(24576, Number(raw.thinkingBudget) || 0));
   if (raw.systemInstructions != null) out.systemInstructions = String(raw.systemInstructions).slice(0, 8000);
   if (raw.voiceName != null) out.voiceName = String(raw.voiceName).slice(0, 60);
+  if (["", "low", "medium", "high"].includes(raw.thinkingLevel)) out.thinkingLevel = raw.thinkingLevel;
+  if (["", "low", "medium", "high"].includes(raw.learnThinkingLevel)) out.learnThinkingLevel = raw.learnThinkingLevel;
+  if (raw.learnModel != null && String(raw.learnModel).trim()) out.learnModel = String(raw.learnModel).trim().slice(0, 100);
+  if (raw.sessionMinutes != null && raw.sessionMinutes !== "") out.sessionMinutes = Math.max(5, Math.min(30, Math.round(Number(raw.sessionMinutes)) || 20));
+  if (raw.dailySessions != null && raw.dailySessions !== "") out.dailySessions = Math.max(1, Math.min(500, Math.round(Number(raw.dailySessions)) || 30));
   if (raw.provider === "gemini" || raw.provider === "openai" || raw.provider === "anthropic") out.provider = raw.provider;
   return out;
 }
@@ -176,6 +182,14 @@ export const setLlmConfig = onCall(async (request) => {
   };
   for (const k of AGENT_KEYS) {
     if (data.agents && data.agents[k]) config.agents[k] = sanitizeBlock(data.agents[k]);
+  }
+  // Explore's Live models each support a specific feature set. Saving a thinking
+  // level against a model that has no thinking would break every conversation, so
+  // it is dropped at the door rather than stored and hit at connect time.
+  const ex = config.agents.explore;
+  if (ex) {
+    if (ex.thinkingLevel && !liveThinkingLevels(ex.model).includes(ex.thinkingLevel)) ex.thinkingLevel = "";
+    if (ex.learnThinkingLevel && !liveThinkingLevels(ex.learnModel).includes(ex.learnThinkingLevel)) ex.learnThinkingLevel = "";
   }
   const db = getFirestore();
   // Overwrite (not merge) so removed overrides actually clear.

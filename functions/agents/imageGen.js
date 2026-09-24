@@ -1,7 +1,7 @@
 // AI storybook illustrations (spec §41) — generate a gentle children's-book
 // image for a reading activity and store it so both parent and child can see it.
 //
-// Pipeline: Gemini image model (gemini-2.5-flash-image) → PNG bytes → Firebase
+// Pipeline: image model (Gemini Nano Banana 2 by default, or OpenAI gpt-image) → bytes → Firebase
 // Storage (default bucket) → Firebase download-token URL (public read without
 // needing object ACLs / uniform-access tweaks).
 //
@@ -14,7 +14,9 @@ import { recordCostEvent } from "../lib/costMeter.js";
 
 // Default when no model is passed in (superadmin can override per-agent via the
 // Platform → LLM config → Storybook images selector, threaded through `model`).
-const DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image";
+// gemini-2.5-flash-image is deprecated (Google shuts it down 2026-10-02); Nano Banana 2
+// is Google's recommended replacement and produces the same soft storybook style.
+export const DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image";
 
 // Google exposes two different image APIs on generativelanguage:
 //   • Gemini "image" models (gemini-*-image)  → :generateContent + IMAGE modality
@@ -24,10 +26,46 @@ function isImagenModel(model) {
   return /^imagen-/i.test(String(model || ""));
 }
 
+// OpenAI's image models (gpt-image-*, chatgpt-image-*) use a third API shape:
+//   • OpenAI images (gpt-image-*)              → POST /v1/images/generations → b64_json
+export function isOpenAiImageModel(model) {
+  return /^(gpt-image|chatgpt-image|dall-e)/i.test(String(model || ""));
+}
+
+// Which provider key a given image model needs. Returns "" when that key is missing,
+// so callers can skip illustration (best-effort) instead of calling with the wrong key.
+export function imageApiKeyFor(model, { geminiApiKey = "", openaiApiKey = "" } = {}) {
+  return isOpenAiImageModel(model) ? openaiApiKey || "" : geminiApiKey || "";
+}
+
+// Gemini 3.x image models default to a 16:9 canvas; the app's cards and storybook
+// layout are square, so ask for 1:1 explicitly (verified 2026-09-20: 1024×1024).
+export function geminiImageConfig(model) {
+  return /^gemini-3/i.test(String(model || "")) ? { imageConfig: { aspectRatio: "1:1" } } : {};
+}
+
 // Call one image model and return { data: base64, mime } or null on any failure.
-async function callImageModel({ model, prompt, apiKey, fetchImpl }) {
+export async function callImageModel({ model, prompt, apiKey, fetchImpl }) {
   const base = `https://generativelanguage.googleapis.com/v1beta/models/${model}`;
   const headers = { "x-goog-api-key": apiKey, "Content-Type": "application/json" };
+
+  if (isOpenAiImageModel(model)) {
+    const res = await fetchImpl("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, prompt, size: "1024x1024", n: 1 }),
+    });
+    if (!res.ok) { console.error("imageGen: openai HTTP", res.status, (await res.text().catch(() => "")).slice(0, 300)); return null; }
+    const json = await res.json();
+    const item = (json?.data || [])[0];
+    if (item?.b64_json) return { data: item.b64_json, mime: "image/png" };
+    if (item?.url) {
+      const img = await fetchImpl(item.url);
+      if (img.ok) return { data: Buffer.from(await img.arrayBuffer()).toString("base64"), mime: "image/png" };
+    }
+    console.error("imageGen: no image in OpenAI response");
+    return null;
+  }
 
   if (isImagenModel(model)) {
     const res = await fetchImpl(`${base}:predict`, {
@@ -51,7 +89,7 @@ async function callImageModel({ model, prompt, apiKey, fetchImpl }) {
     headers,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseModalities: ["IMAGE"] },
+      generationConfig: { responseModalities: ["IMAGE"], ...geminiImageConfig(model) },
     }),
   });
   if (!res.ok) { console.error("imageGen: model HTTP", res.status, (await res.text().catch(() => "")).slice(0, 300)); return null; }

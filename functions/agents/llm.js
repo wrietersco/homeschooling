@@ -9,8 +9,23 @@
 
 export const DEFAULT_MODEL = "gemini-2.5-flash";
 
+// Some Gemini models cannot switch thinking off — a `thinkingBudget: 0` request is
+// rejected with HTTP 400 ("Budget 0 is invalid. This model only works in thinking
+// mode"): every Pro model (2.5 Pro, 3.1 Pro …) and gemini-3.5-flash-lite (verified
+// against the live API 2026-09-20). For those, "thinking off" means "leave the
+// model's own default", i.e. omit thinkingConfig. Everything else keeps the
+// explicit budget (0 = off unless a superadmin raised it for harder reasoning).
+const GEMINI_THINKING_REQUIRED = /(^|-)pro(-|$)|3\.5-flash-lite/i;
+export function geminiThinkingConfig(model, budget = 0) {
+  const b = Number(budget) || 0;
+  if (b > 0) return { thinkingBudget: b };
+  if (GEMINI_THINKING_REQUIRED.test(String(model || ""))) return undefined;
+  return { thinkingBudget: 0 };
+}
+
 // Build a generateContent request body for Gemini's function-calling API.
-export function buildGeminiRequest({ system, contents, toolDeclarations, config = {} }) {
+export function buildGeminiRequest({ system, contents, toolDeclarations, config = {}, model }) {
+  const thinking = geminiThinkingConfig(model, config.thinkingBudget);
   const body = {
     contents,
     generationConfig: {
@@ -18,7 +33,7 @@ export function buildGeminiRequest({ system, contents, toolDeclarations, config 
       maxOutputTokens: config.maxOutputTokens ?? 2048,
       // Disable "thinking" tokens for latency/cost by default; a superadmin can
       // raise the budget per agent for harder reasoning (config.thinkingBudget).
-      thinkingConfig: { thinkingBudget: config.thinkingBudget ?? 0 },
+      ...(thinking ? { thinkingConfig: thinking } : {}),
     },
   };
   if (system) body.systemInstruction = { parts: [{ text: system }] };
@@ -46,7 +61,12 @@ export function parseGeminiResponse(json) {
   let text = "";
   for (const part of parts) {
     if (part.functionCall) {
-      functionCalls.push({ name: part.functionCall.name, args: part.functionCall.args || {} });
+      const call = { name: part.functionCall.name, args: part.functionCall.args || {} };
+      // Gemini 3.x models attach an opaque `thoughtSignature` to the function-call
+      // part and REJECT the next turn (HTTP 400 "Function call is missing a
+      // thought_signature") unless it is echoed back. Keep it so the runtime can.
+      if (part.thoughtSignature) call.thoughtSignature = part.thoughtSignature;
+      functionCalls.push(call);
     } else if (typeof part.text === "string") {
       text += part.text;
     }
@@ -91,7 +111,7 @@ export function createGeminiClient({ apiKey, model = DEFAULT_MODEL, fetchImpl = 
   return {
     model,
     async generate({ system, contents, toolDeclarations, config }) {
-      const body = buildGeminiRequest({ system, contents, toolDeclarations, config });
+      const body = buildGeminiRequest({ system, contents, toolDeclarations, config, model });
       let lastErr;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         let res;
@@ -140,6 +160,147 @@ function backoffMs(base, attempt) {
 
 export const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+
+// The newest OpenAI models (GPT-5.5, GPT-5.6 Sol/Terra/Luna, GPT-6 Astra …) are
+// reasoning models: /v1/chat/completions rejects a non-default temperature for
+// them, and refuses function tools unless reasoning_effort is "none" — which
+// GPT-6 Astra does not even offer. Their supported route is the Responses API, so
+// those ids are sent there (verified against the live API 2026-09-20). Older chat
+// models (gpt-4o*, gpt-4.1*, gpt-5.4*) keep using Chat Completions unchanged.
+export function usesResponsesApi(model) {
+  return /^gpt-(5\.([5-9]|\d{2,})|[6-9])/i.test(String(model || ""));
+}
+
+// Map the app's generic "thinking budget" onto OpenAI's reasoning effort. Budget 0
+// means "don't spend on thinking": "none" where the model allows it, else the
+// lowest effort it offers (GPT-6 Astra has no "none"). A positive budget picks a
+// tier by size. Returns the effort string for the Responses API.
+export function openAiReasoningEffort(model, thinkingBudget = 0) {
+  const b = Number(thinkingBudget) || 0;
+  if (b <= 0) return /^gpt-[6-9]/i.test(String(model || "")) ? "low" : "none";
+  if (b <= 2048) return "low";
+  if (b <= 8192) return "medium";
+  return "high";
+}
+
+// Gemini `contents` → Responses API `input` items. Same FIFO call-id pairing as
+// buildOpenAiMessages (Gemini parts carry no ids):
+//   user / text             → { role: "user", content }
+//   model / text            → { role: "assistant", content }
+//   model / functionCall[]  → [assistant text?] + { type: "function_call", call_id, name, arguments }
+//   user / functionResponse → { type: "function_call_output", call_id, output }
+export function buildOpenAiResponsesInput({ contents = [] }) {
+  const items = [];
+  const pendingIds = [];
+  let callSeq = 0;
+  for (const turn of contents) {
+    const parts = turn.parts || [];
+    const fnCalls = parts.filter((p) => p.functionCall);
+    const fnResponses = parts.filter((p) => p.functionResponse);
+    const text = parts.filter((p) => typeof p.text === "string").map((p) => p.text).join("");
+    if (fnCalls.length) {
+      if (text) items.push({ role: "assistant", content: text });
+      for (const p of fnCalls) {
+        const id = `call_${callSeq++}`;
+        pendingIds.push(id);
+        items.push({ type: "function_call", call_id: id, name: p.functionCall.name, arguments: JSON.stringify(p.functionCall.args || {}) });
+      }
+      continue;
+    }
+    if (fnResponses.length) {
+      for (const p of fnResponses) {
+        const id = pendingIds.shift() || `call_${callSeq++}`;
+        const payload = p.functionResponse?.response?.result ?? p.functionResponse?.response ?? {};
+        items.push({ type: "function_call_output", call_id: id, output: typeof payload === "string" ? payload : JSON.stringify(payload) });
+      }
+      continue;
+    }
+    items.push({ role: turn.role === "model" ? "assistant" : "user", content: text });
+  }
+  return items;
+}
+
+// Gemini functionDeclarations → Responses API tools (flat, unlike Chat Completions).
+export function buildOpenAiResponsesTools(toolDeclarations) {
+  if (!toolDeclarations?.length) return undefined;
+  return toolDeclarations.map((d) => ({
+    type: "function",
+    name: d.name,
+    description: d.description || "",
+    parameters: d.parameters || { type: "object", properties: {} },
+  }));
+}
+
+// Forced-tool config → Responses tool_choice ("required" | "none" | {type,name}).
+export function responsesToolChoiceFromConfig(toolConfig) {
+  const fc = toolConfig?.functionCallingConfig;
+  if (!fc) return undefined;
+  if (fc.mode === "ANY" || fc.mode === "REQUIRED") {
+    const allowed = fc.allowedFunctionNames;
+    if (Array.isArray(allowed) && allowed.length === 1) return { type: "function", name: allowed[0] };
+    return "required";
+  }
+  if (fc.mode === "NONE") return "none";
+  return undefined;
+}
+
+// The full Responses API request body for one generate() call.
+export function buildOpenAiResponsesRequest({ model, system, contents, toolDeclarations, config = {} }) {
+  const body = {
+    model,
+    input: buildOpenAiResponsesInput({ contents }),
+    // Includes reasoning tokens, like Chat Completions' max_completion_tokens.
+    max_output_tokens: config.maxOutputTokens ?? 2048,
+    reasoning: { effort: openAiReasoningEffort(model, config.thinkingBudget) },
+    store: false, // the app keeps its own history; don't retain conversations at OpenAI
+  };
+  if (system) body.instructions = system;
+  const tools = buildOpenAiResponsesTools(toolDeclarations);
+  if (tools) body.tools = tools;
+  const choice = responsesToolChoiceFromConfig(config.toolConfig);
+  if (choice) body.tool_choice = choice;
+  return body;
+}
+
+// Responses usage → the app's token shape. `output_tokens` already includes the
+// reasoning tokens, so split them out (thoughtTokens are folded back into output
+// by priceText, keeping cost math identical across providers).
+export function parseOpenAiResponsesUsage(usage) {
+  const u = usage || {};
+  const reasoning = Number(u.output_tokens_details?.reasoning_tokens) || 0;
+  const output = Number(u.output_tokens) || 0;
+  return {
+    inputTokens: Number(u.input_tokens) || 0,
+    outputTokens: Math.max(0, output - reasoning),
+    thoughtTokens: reasoning,
+    totalTokens: Number(u.total_tokens) || (Number(u.input_tokens) || 0) + output,
+  };
+}
+
+// Normalize a Responses API result into { text, functionCalls, finishReason,
+// blockReason, usage } — the same contract parseOpenAiResponse returns.
+export function parseOpenAiResponsesResponse(json) {
+  const functionCalls = [];
+  let text = "";
+  let refusal = false;
+  for (const item of json?.output || []) {
+    if (item.type === "function_call") {
+      let args = {};
+      try { args = item.arguments ? JSON.parse(item.arguments) : {}; } catch { args = {}; }
+      functionCalls.push({ name: item.name, args });
+    } else if (item.type === "message") {
+      for (const c of item.content || []) {
+        if (c.type === "output_text" && typeof c.text === "string") text += c.text;
+        else if (c.type === "refusal") refusal = true;
+      }
+    }
+  }
+  const reason = json?.incomplete_details?.reason || null;
+  let finishReason = json?.status === "incomplete" ? (reason === "max_output_tokens" ? "MAX_TOKENS" : reason) : "STOP";
+  const blockReason = reason === "content_filter" || (refusal && !text && !functionCalls.length) ? "SAFETY" : null;
+  return { text, functionCalls, finishReason, blockReason, usage: parseOpenAiResponsesUsage(json?.usage) };
+}
 
 // Build OpenAI `messages` from a system string + Gemini `contents`. Turn mapping:
 //   user / text             → { role: "user" }
@@ -261,27 +422,40 @@ export function parseOpenAiResponse(json) {
 // Gemini client, so the runtime and resolveLlm treat them interchangeably.
 export function createOpenAiClient({ apiKey, model = DEFAULT_OPENAI_MODEL, fetchImpl = globalThis.fetch, maxRetries = 3, baseDelayMs = 400 } = {}) {
   if (!apiKey) throw new Error("OPENAI_API_KEY is required for the OpenAI client");
+  const viaResponses = usesResponsesApi(model);
   return {
     model,
     async generate({ system, contents, toolDeclarations, config = {} }) {
-      const body = {
-        model,
-        messages: buildOpenAiMessages({ system, contents }),
-        temperature: config.temperature ?? 0.4,
-        // The current chat models expect max_completion_tokens (max_tokens is
-        // deprecated and rejected by the newer ones).
-        max_completion_tokens: config.maxOutputTokens ?? 2048,
-      };
-      const tools = buildOpenAiTools(toolDeclarations);
-      if (tools) body.tools = tools;
-      const choice = toolChoiceFromConfig(config.toolConfig);
-      if (choice) body.tool_choice = choice;
+      let url;
+      let body;
+      let parse;
+      if (viaResponses) {
+        url = OPENAI_RESPONSES_URL;
+        body = buildOpenAiResponsesRequest({ model, system, contents, toolDeclarations, config });
+        parse = parseOpenAiResponsesResponse;
+      } else {
+        url = OPENAI_CHAT_URL;
+        body = {
+          model,
+          messages: buildOpenAiMessages({ system, contents }),
+          temperature: config.temperature ?? 0.4,
+          // The current chat models expect max_completion_tokens (max_tokens is
+          // deprecated and rejected by the newer ones).
+          max_completion_tokens: config.maxOutputTokens ?? 2048,
+        };
+        const tools = buildOpenAiTools(toolDeclarations);
+        if (tools) body.tools = tools;
+        const choice = toolChoiceFromConfig(config.toolConfig);
+        if (choice) body.tool_choice = choice;
+        parse = parseOpenAiResponse;
+      }
 
       let lastErr;
+      let droppedTemperature = false;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         let res;
         try {
-          res = await fetchImpl(OPENAI_CHAT_URL, {
+          res = await fetchImpl(url, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
             body: JSON.stringify(body),
@@ -291,10 +465,18 @@ export function createOpenAiClient({ apiKey, model = DEFAULT_OPENAI_MODEL, fetch
           if (attempt < maxRetries) { await sleep(backoffMs(baseDelayMs, attempt)); continue; }
           throw lastErr;
         }
-        if (res.ok) return parseOpenAiResponse(await res.json());
+        if (res.ok) return parse(await res.json());
 
         const detail = await res.text().catch(() => "");
         lastErr = new Error(`OpenAI ${res.status}: ${detail.slice(0, 500)}`);
+        // A newer reasoning model that only accepts the default temperature: retry
+        // once without it instead of failing every call for that agent.
+        if (res.status === 400 && !droppedTemperature && "temperature" in body && /temperature/i.test(detail)) {
+          droppedTemperature = true;
+          delete body.temperature;
+          attempt -= 1; // this retry doesn't consume the transient-error budget
+          continue;
+        }
         if (RETRYABLE_STATUSES.has(res.status) && attempt < maxRetries) {
           await sleep(backoffMs(baseDelayMs, attempt));
           continue;

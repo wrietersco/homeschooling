@@ -24,6 +24,9 @@ export { createGlobalSkill } from "./skills/registry.js";
 // Phase 3 — AI agent runtime.
 export { askGuide, clearGuideHistory } from "./agents/guide.js";
 
+// Explore — live voice companion for a child (Gemini Live via ephemeral tokens).
+export { startExploreSession, exploreTool, endExploreSession, previewExploreVoice, getExploreSettings, saveExploreSettings } from "./agents/explore.js";
+
 // Phase 4 — Curriculum agent.
 export { askCurriculum } from "./agents/curriculum.js";
 

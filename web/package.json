@@ -12,6 +12,8 @@
     "lint": "eslint . --ext .js,.vue"
   },
   "dependencies": {
+    "@google/genai": "^2.23.0",
+    "canvas-confetti": "^1.9.4",
     "firebase": "^12.0.0",
     "pinia": "^3.0.0",
     "vue": "^3.5.0",

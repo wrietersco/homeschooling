@@ -26,7 +26,7 @@ import { resolveLlm, loadAgentConfig, secretNameForProvider, resolveTextProvider
 import { describeGuardian, summarizeChildPerformance } from "./grounding.js";
 import { enrichQuranContent } from "./quranSource.js";
 import { enrichQaidaContent } from "./qaidaLibrary.js";
-import { generateActivityImage, generateObjectImages } from "./imageGen.js";
+import { generateActivityImage, generateObjectImages, imageApiKeyFor } from "./imageGen.js";
 import { loadSubjectPlans, buildPlanContextString } from "./contentPlan.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
 
@@ -588,7 +588,7 @@ export function describeNoContent(result, kind = "") {
 // ─── Pure generator — produces content for an activity, no DB access ──────────
 // Reused by the syllabus worker (inline, at creation time) and the callable.
 // `geminiApiKey` + `storagePrefix` enable storybook image generation for stories.
-export async function generateContentForActivity({ activity, children = [], guardians = [], guidingLight = "", childPerformance = "", llm, genConfig, db = null, geminiApiKey = "", storagePrefix = "", planContext = "", guidance = "" }) {
+export async function generateContentForActivity({ activity, children = [], guardians = [], guidingLight = "", childPerformance = "", llm, genConfig, db = null, geminiApiKey = "", openaiApiKey = process.env.OPENAI_API_KEY || "", storagePrefix = "", planContext = "", guidance = "" }) {
   const kind = contentKindForType(activity.type);
   const familyId = storagePrefix || "";
 
@@ -686,17 +686,19 @@ export async function generateContentForActivity({ activity, children = [], guar
   // Resolve the superadmin's configured image model once (per-agent override,
   // falling back to the built-in default). Best-effort: any failure → default.
   let imageModel;
-  if (captured && geminiApiKey && db) {
+  if (captured && (geminiApiKey || openaiApiKey) && db) {
     try { imageModel = (await loadAgentConfig(db, "image")).model; }
     catch (e) { console.warn(`[content] image model resolve failed: ${e?.message || e}`); }
   }
+  // The key that matches the chosen image provider (Gemini or OpenAI); "" ⇒ skip images.
+  const imageKey = imageApiKeyFor(imageModel, { geminiApiKey, openaiApiKey });
 
   // Storybook illustration for reading stories (spec §41). Best-effort.
-  if (captured && captured.kind === "story" && captured.story && geminiApiKey) {
+  if (captured && captured.kind === "story" && captured.story && imageKey) {
     const scene = `${captured.story.title}. ${(captured.story.paragraphs || [])[0] || ""}`.slice(0, 400);
     const image = await generateActivityImage({
       scene,
-      apiKey: geminiApiKey,
+      apiKey: imageKey,
       model: imageModel,
       pathHint: `${storagePrefix || "shared"}/${slugify(activity.title)}`,
       meter: familyId ? { db, familyId, activityId: activity.id, source: "activityContent" } : null,
@@ -708,7 +710,7 @@ export async function generateContentForActivity({ activity, children = [], guar
   // ask the child to name an object shown as a picture. The model flags those
   // items with `imageSubject`; generate one clear picture per item (capped,
   // best-effort) and attach it. Covers reading/story vocab and qaida words.
-  if (captured && geminiApiKey) {
+  if (captured && imageKey) {
     const targets = [];
     if ((captured.kind === "story" || captured.kind === "reading") && captured.story) {
       for (const v of captured.story.vocab || []) if (v.imageSubject) targets.push(v);
@@ -719,7 +721,7 @@ export async function generateContentForActivity({ activity, children = [], guar
       const base = `${storagePrefix || "shared"}/${slugify(activity.title)}`;
       const images = await generateObjectImages(
         targets.slice(0, 8).map((t, i) => ({ subject: t.imageSubject, pathHint: `${base}-pic${i + 1}` })),
-        { apiKey: geminiApiKey, model: imageModel, meter: familyId ? { db, familyId, activityId: activity.id, source: "activityContent" } : null }
+        { apiKey: imageKey, model: imageModel, meter: familyId ? { db, familyId, activityId: activity.id, source: "activityContent" } : null }
       );
       images.forEach((img, i) => { if (img) targets[i].image = img; });
     }

@@ -27,6 +27,12 @@ firebase emulators:start          # hosting :5000, firestore :8080, functions :5
 ```
 Open http://localhost:5000 (terminal) and http://localhost:5000/admin.html (ops hub).
 
+## Developer access
+Full-app access with no auth friction: run the emulator suite + `npm run dev` in `web/`,
+then use the **Developer sign-in** button (or `http://localhost:5173/login?dev=1`).
+Account: `dev@local.test` / `dev123456`. Details and the production policy:
+**[DEVELOPER_ACCESS.md](./DEVELOPER_ACCESS.md)**.
+
 ## Deploy
 ```bash
 firebase functions:secrets:set GEMINI_API_KEY   # one-time, paste the key

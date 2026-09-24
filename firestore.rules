@@ -168,6 +168,9 @@ service cloud.firestore {
       match /exposures/{path=**}    { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /contentStats/{path=**} { allow read: if canRead(familyId); allow write: if writable(familyId); }
       match /intercom/{path=**}     { allow read: if canRead(familyId); allow write: if writable(familyId); }
+      // Explore live-conversation log: written only by Cloud Functions (Admin SDK);
+      // family members can read it.
+      match /exploreSessions/{path=**} { allow read: if canRead(familyId); allow write: if false; }
       // Invites: any signed-in user can read by knowing the UUID path (token = capability).
       // Only the owner creates invites; status updates happen via Cloud Function (Admin SDK).
       match /invites/{inviteId} {

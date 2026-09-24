@@ -4,7 +4,7 @@ import { AGENT_KEYS, AGENT_DEFAULTS, mergeAgentConfig, resolveTextProvider, effe
 import { DEFAULT_ANTHROPIC_MODEL } from "../agents/llm.js";
 
 test("AGENT_KEYS covers every configurable agent", () => {
-  assert.deepEqual(AGENT_KEYS, ["guide", "curriculum", "syllabus", "content", "scheduler", "brief", "image", "tts"]);
+  assert.deepEqual(AGENT_KEYS, ["guide", "curriculum", "syllabus", "content", "scheduler", "brief", "image", "tts", "explore"]);
 });
 
 test("mergeAgentConfig falls back to built-in defaults when nothing stored", () => {

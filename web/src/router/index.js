@@ -49,6 +49,21 @@ const routes = [
     component: () => import("@/views/GuideView.vue"),
     meta: { requiresAuth: true },
   },
+  // Phonics Playground — free-play sound building, open to every child in the
+  // family (no assignment needed).
+  {
+    path: "/phonics",
+    name: "phonics",
+    component: () => import("@/views/PhonicsPlaygroundView.vue"),
+    meta: { requiresAuth: true },
+  },
+  // Explore — live voice conversations with a companion (Gemini Live).
+  {
+    path: "/explore",
+    name: "explore",
+    component: () => import("@/views/ExploreView.vue"),
+    meta: { requiresAuth: true },
+  },
   {
     path: "/curriculum",
     name: "curriculum",

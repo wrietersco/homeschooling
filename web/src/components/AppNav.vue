@@ -1,8 +1,44 @@
 <script setup>
-import { RouterLink } from "vue-router";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { RouterLink, useRoute } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 
 const auth = useAuthStore();
+const route = useRoute();
+
+// GAMES dropdown — Explore + Phonics live behind one top-level menu so the
+// nav bar stays scannable. Click-to-open (touch friendly); closes on outside
+// click, Escape, route change, or submenu navigation.
+const gamesOpen = ref(false);
+const gamesMenu = ref(null);
+const gamesActive = computed(() => route.path.startsWith("/explore") || route.path.startsWith("/phonics"));
+
+function toggleGames() {
+  gamesOpen.value = !gamesOpen.value;
+}
+
+function closeGames() {
+  gamesOpen.value = false;
+}
+
+function onDocClick(e) {
+  if (gamesMenu.value && !gamesMenu.value.contains(e.target)) closeGames();
+}
+
+function onKeydown(e) {
+  if (e.key === "Escape") closeGames();
+}
+
+watch(() => route.fullPath, closeGames);
+
+onMounted(() => {
+  document.addEventListener("click", onDocClick);
+  document.addEventListener("keydown", onKeydown);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener("click", onDocClick);
+  document.removeEventListener("keydown", onKeydown);
+});
 </script>
 
 <template>
@@ -12,7 +48,7 @@ const auth = useAuthStore();
       <span class="brand-text">Dar-al-Hikmah OS</span>
     </RouterLink>
 
-    <nav class="links">
+    <nav class="links" :class="{ 'links-open': gamesOpen }">
       <RouterLink to="/" class="nav-link c-pink" exact>
         <span class="material-symbols-rounded">home</span>
         <span class="lbl">Home</span>
@@ -43,6 +79,36 @@ const auth = useAuthStore();
           <span class="material-symbols-rounded">chat_bubble</span>
           <span class="lbl">Guide</span>
         </RouterLink>
+        <!-- A DISCLOSURE, not an ARIA menu: role="menu"/"menuitem" would promise a
+             menu widget (arrow-key navigation, focus management, typeahead) that
+             this doesn't implement, and it hides the fact that these are ordinary
+             links — assistive tech announced "menu item" instead of "link", and
+             nothing could find them by link role. Button + aria-expanded +
+             aria-controls over plain links is the honest, working pattern. -->
+        <div v-if="auth.user && auth.hasFamily" ref="gamesMenu" class="games-menu">
+          <button
+            class="nav-link c-lavender games-toggle"
+            :class="{ 'router-link-active': gamesActive }"
+            type="button"
+            :aria-expanded="gamesOpen"
+            aria-controls="games-submenu"
+            @click="toggleGames"
+          >
+            <span class="material-symbols-rounded">sports_esports</span>
+            <span class="lbl">Games</span>
+            <span class="material-symbols-rounded games-caret" :class="{ open: gamesOpen }">expand_more</span>
+          </button>
+          <div v-if="gamesOpen" id="games-submenu" class="games-dropdown">
+            <RouterLink to="/explore" class="nav-link c-peach" @click="closeGames">
+              <span class="material-symbols-rounded">rocket_launch</span>
+              <span class="lbl">Explore</span>
+            </RouterLink>
+            <RouterLink to="/phonics" class="nav-link c-mint" @click="closeGames">
+              <span class="material-symbols-rounded">abc</span>
+              <span class="lbl">Phonics</span>
+            </RouterLink>
+          </div>
+        </div>
         <RouterLink to="/curriculum" class="nav-link c-rose">
           <span class="material-symbols-rounded">menu_book</span>
           <span class="lbl">Curriculum</span>
@@ -127,6 +193,9 @@ const auth = useAuthStore();
   gap: 0.1rem;
   overflow-x: auto;
 }
+/* While the Games dropdown is open, let it escape the scroll container —
+   overflow-x:auto would otherwise clip the absolutely-positioned panel. */
+.links-open { overflow: visible; }
 
 .nav-link {
   display: flex;
@@ -159,4 +228,30 @@ const auth = useAuthStore();
 .nav-link.c-teal.router-link-active     { background: #99F6E4; color: #134E4A; }
 
 .nav-signout:hover { background: #FEE2E2 !important; color: #B91C1C !important; }
+
+/* GAMES dropdown */
+.games-menu { position: relative; display: flex; }
+.games-toggle .games-caret {
+  font-size: 15px;
+  margin-left: -0.1rem;
+  transition: transform .15s;
+}
+.games-toggle .games-caret.open { transform: rotate(180deg); }
+
+.games-dropdown {
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  left: 0;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 9.5rem;
+  padding: 0.4rem;
+  background: #fff;
+  border: 1px solid #F3E8FF;
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(147, 51, 234, .16);
+}
+.games-dropdown .nav-link { padding: 0.45rem 0.6rem; font-size: 0.8rem; border-radius: 10px; }
 </style>
