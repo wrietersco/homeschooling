@@ -2,6 +2,8 @@
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { collection, doc, getDocs, onSnapshot, orderBy, query } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import SubscriptionAdmin from "@/components/SubscriptionAdmin.vue";
+import UserAccountsAdmin from "@/components/UserAccountsAdmin.vue";
 import {
   listFamilies, setFamilyStatus, listFamilyMembers,
   setMemberRole, removeMember, deleteFamily,
@@ -959,6 +961,8 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
       <h1>Platform admin</h1>
       <nav class="tabs">
         <button :class="{ active: tab === 'families' }" @click="tab = 'families'">Families</button>
+        <button :class="{ active: tab === 'subscriptions' }" @click="tab = 'subscriptions'">Plans &amp; subscriptions</button>
+        <button :class="{ active: tab === 'users' }" @click="tab = 'users'">User accounts</button>
         <button :class="{ active: tab === 'usage' }" @click="openUsageTab">Usage</button>
         <button :class="{ active: tab === 'quota' }" @click="openQuotaTab">Quota</button>
         <button :class="{ active: tab === 'costs' }" @click="openCostsTab">Costs</button>
@@ -968,6 +972,8 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
         <button :class="{ active: tab === 'qaida' }" @click="openQaidaTab">Qaida</button>
       </nav>
     </header>
+    <SubscriptionAdmin v-if="tab === 'subscriptions'" />
+    <UserAccountsAdmin v-if="tab === 'users'" />
 
     <!-- ── Families tab ─────────────────────────────────────────────────── -->
     <div v-if="tab === 'families'">

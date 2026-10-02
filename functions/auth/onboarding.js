@@ -6,6 +6,8 @@ import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import { familyPaths, userRef } from "../lib/paths.js";
+import { assertUserAccess } from "../lib/caller.js";
+import { subscriptionRef } from "../lib/subscriptions.js";
 
 function clean(str, max) {
   return String(str || "").trim().slice(0, max);
@@ -22,7 +24,7 @@ export const createFamily = onCall(async (request) => {
   const db = getFirestore();
 
   // One family per user for now: block if they already belong to one.
-  const userSnap = await userRef(db, uid).get();
+  const userSnap = await assertUserAccess(request, db);
   if (userSnap.exists && userSnap.data()?.familyId) {
     throw new HttpsError("already-exists", "You already belong to a family.");
   }
@@ -48,6 +50,7 @@ export const createFamily = onCall(async (request) => {
     createdAt: now,
     updatedAt: now,
   });
+  batch.set(subscriptionRef(db, familyId), { planId: "trial", status: "pending", createdAt: now });
   batch.set(p.member(uid), {
     role: "owner",
     email,

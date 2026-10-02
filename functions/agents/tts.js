@@ -14,7 +14,8 @@ import { resolveCaller } from "../lib/caller.js";
 import { loadAgentConfig } from "./agentConfig.js";
 import { parseUsage } from "./llm.js";
 import { recordCostEvent } from "../lib/costMeter.js";
-import { enforceFamilyTtsQuota } from "../platform/quota.js";
+import { consumePlanUsage } from "../lib/subscriptions.js";
+import { enforcePaidTtsCapacity } from "../platform/quota.js";
 import { MODEL_CATALOG } from "./modelCatalog.js";
 
 // ─── PCM → WAV (pure, unit-tested) ────────────────────────────────────────────
@@ -376,10 +377,9 @@ export const synthesizeSpeech = onCall(
       bucket = null;
     }
 
-    // Cache miss ⇒ a real Gemini call. Enforce this family's share of the shared
-    // TTS daily pool (fair multi-tenant allocation). Throws resource-exhausted when
-    // the family is over budget; the client then falls back to the browser voice.
-    await enforceFamilyTtsQuota(db, familyId, model);
+    // Cache misses reserve both paid-plan allowance and shared provider capacity.
+    await consumePlanUsage(db, familyId, "tts", { uid });
+    await enforcePaidTtsCapacity(db, model);
 
     let wav, sampleRate;
     try {

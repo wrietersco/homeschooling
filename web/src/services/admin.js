@@ -56,6 +56,16 @@ export const setQuotaConfig = (cfg) => call("setQuotaConfig")(cfg);
 // Cost reporting (superadmin).
 export const getCostOverview = (month) => call("getCostOverview")(month ? { month } : {});
 export const getFamilyCostDetail = (data) => call("getFamilyCostDetail")(data);
+export const getSubscriptionAdmin = () => call("getSubscriptionAdmin")({});
+export const setPricingPlans = (plans) => call("setPricingPlans")({ plans });
+export const setFamilySubscription = (data) => call("setFamilySubscription")(data);
+export const getMySubscription = () => call("getMySubscription")({});
+export const listPlatformUsers = (pageToken) => call("listPlatformUsers")({ pageToken });
+export const createPlatformUser = (data) => call("createPlatformUser")(data);
+export const updatePlatformUser = (data) => call("updatePlatformUser")(data);
+export const setPlatformUserSuspended = (uid, disabled) => call("setPlatformUserSuspended")({ uid, disabled });
+export const setPlatformUserPassword = (uid, password) => call("setPlatformUserPassword")({ uid, password });
+export const getPlatformPasswordResetLink = (uid) => call("getPlatformPasswordResetLink")({ uid });
 
 // Activity differentiation audit (owner/parent) — read-only; returns the
 // restructure plan for skill-paced activities clubbed across children.

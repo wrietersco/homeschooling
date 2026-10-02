@@ -25,6 +25,7 @@ import { GoogleGenAI, Modality } from "@google/genai";
 import { resolveCaller } from "../lib/caller.js";
 import { familyPaths } from "../lib/paths.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
+import { consumePlanUsage } from "../lib/subscriptions.js";
 import { loadAgentConfig, isLiveModelId } from "./agentConfig.js";
 import {
   LIVE_VOICES,
@@ -622,7 +623,8 @@ export const startExploreSession = onCall({ secrets: ["GEMINI_API_KEY"], timeout
 
   // Platform config (superadmin) ⊕ this family's own preferences (parents).
   const eff = applyFamilySettings(cfg, famSnap?.exists ? famSnap.data() : {}, mode);
-  const sessionMinutes = eff.sessionMinutes;
+  const reservation = await consumePlanUsage(db, familyId, "liveMinutes", { uid, units: eff.sessionMinutes, session: true });
+  const sessionMinutes = reservation.units;
   const model = eff.model;
   const systemInstruction = buildExploreSystemPrompt({
     mode,
@@ -654,7 +656,7 @@ export const startExploreSession = onCall({ secrets: ["GEMINI_API_KEY"], timeout
       config: {
         uses: 1,
         expireTime: new Date(Date.now() + sessionMinutes * 60_000).toISOString(),
-        newSessionExpireTime: new Date(Date.now() + 3 * 60_000).toISOString(),
+        newSessionExpireTime: new Date(Date.now() + Math.min(3, sessionMinutes) * 60_000).toISOString(),
         liveConnectConstraints: { model, config: liveConfig },
       },
     });
@@ -732,11 +734,12 @@ export const saveExploreSettings = onCall(async (request) => {
 // Let a parent hear a voice before choosing it: one short real Live greeting in
 // that voice (a few cents), rate-limited per family per day.
 export const previewExploreVoice = onCall({ secrets: ["GEMINI_API_KEY"], timeoutSeconds: 60 }, async (request) => {
-  const { db, familyId } = await resolveCaller(request);
+  const { db, familyId, uid } = await resolveCaller(request);
   const voiceName = String(request.data?.voiceName || "");
   if (!LIVE_VOICES.includes(voiceName)) throw new HttpsError("invalid-argument", "Unknown voice.");
   if (!process.env.GEMINI_API_KEY) return { configured: false };
   await enforceDailyLimit(db, familyId, "exploreVoice", 30);
+  await consumePlanUsage(db, familyId, "liveMinutes", { uid });
   const cfg = await loadAgentConfig(db, "explore");
   try {
     const r = await testLiveModel({

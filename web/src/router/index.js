@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
+import { getMySubscription } from "@/services/admin";
 
 // Route map mirrors the plan's feature modules. Most are placeholders in
 // Phase 0 and get fleshed out in their respective phases. `meta.requiresAuth`
@@ -7,6 +8,7 @@ import { useAuthStore } from "@/stores/auth";
 const routes = [
   { path: "/", name: "home", component: () => import("@/views/HomeView.vue") },
   { path: "/login", name: "login", component: () => import("@/views/LoginView.vue"), meta: { public: true } },
+  { path: "/subscription", name: "subscription", component: () => import("@/views/SubscriptionView.vue"), meta: { requiresAuth: true } },
   {
     path: "/onboarding",
     name: "onboarding",
@@ -146,6 +148,10 @@ router.beforeEach(async (to) => {
   }
   if (to.meta.role === "superadmin" && !authStore.isSuperAdmin) {
     return { name: "home" };
+  }
+  if (authStore.user && authStore.hasFamily && !authStore.isSuperAdmin && to.meta.requiresAuth && !["onboarding", "subscription"].includes(to.name)) {
+    try { const r = await getMySubscription(); if (r.subscription.effectiveStatus !== "active") return { name: "subscription" }; }
+    catch { return { name: "subscription" }; }
   }
   return true;
 });

@@ -4,13 +4,24 @@
 import { HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import { userRef, familyPaths } from "./paths.js";
+import { subscriptionRef, subscriptionState } from "./subscriptions.js";
 
-export async function resolveCaller(request) {
+export async function assertUserAccess(request, db = getFirestore()) {
+  const uid = request.auth?.uid;
+  if (!uid) throw new HttpsError("unauthenticated", "Sign in first.");
+  const snap = await userRef(db, uid).get();
+  const user = snap.data() || {};
+  if (user.disabled) throw new HttpsError("permission-denied", "Your account is suspended. Contact the administrator.");
+  if (user.sessionValidAfterSeconds && Number(request.auth.token?.auth_time || 0) < user.sessionValidAfterSeconds) throw new HttpsError("unauthenticated", "Your account changed. Please sign in again.");
+  return snap;
+}
+
+export async function resolveCaller(request, { requireSubscription = true } = {}) {
   const uid = request.auth?.uid;
   if (!uid) throw new HttpsError("unauthenticated", "Sign in first.");
 
   const db = getFirestore();
-  const userSnap = await userRef(db, uid).get();
+  const userSnap = await assertUserAccess(request, db);
   const familyId = userSnap.exists ? userSnap.data()?.familyId : null;
   if (!familyId) throw new HttpsError("failed-precondition", "Create a family first.");
 
@@ -25,5 +36,10 @@ export async function resolveCaller(request) {
     throw new HttpsError("permission-denied", "This family is currently disabled. Contact support.");
   }
 
+  if (requireSubscription) {
+    const sub = await subscriptionRef(db, familyId).get();
+    const state = subscriptionState(sub.exists ? sub.data() : null);
+    if (state !== "active") throw new HttpsError("failed-precondition", `Subscription ${state}. Contact the administrator to activate or renew it.`);
+  }
   return { db, uid, familyId, role };
 }

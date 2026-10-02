@@ -17,6 +17,57 @@ const ttsLogs = ref([]);       // recent TTS events, newest first (diagnostics o
 let voices = [];
 let activeAudio = null; // currently-playing recorded-audio element (qirat, etc.)
 
+// ─── Mobile audio unlock ─────────────────────────────────────────────────────
+// iOS Safari and Android Chrome refuse to play audio (and speak) until a user
+// gesture has "unlocked" the page — and a tapped word always plays AFTER an
+// async server round-trip, i.e. outside the gesture's call stack, so on phones
+// the first tap on every word would be silent while the same tap works on
+// desktop. The first gesture anywhere primes both audio systems synchronously
+// (capture-phase listener, so it runs before the tap's own handler): a silent
+// <audio> element is played once inside the gesture, and a silent utterance
+// primes speech synthesis. After that, the async TTS → play() chain is allowed.
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+let audioUnlocked = false;
+let unlockEl = null;
+
+function unlockSpeechAudio() {
+  if (audioUnlocked) return;
+  audioUnlocked = true;
+  try {
+    if (!unlockEl) {
+      unlockEl = new Audio(SILENT_WAV);
+      unlockEl.preload = "auto";
+    }
+    const p = unlockEl.play();
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch { /* no <audio> support — speechSynthesis prime below still helps */ }
+  try {
+    const synth = typeof window !== "undefined" ? window.speechSynthesis : null;
+    if (synth) {
+      const u = new SpeechSynthesisUtterance(" ");
+      u.volume = 0;
+      synth.speak(u);
+    }
+  } catch { /* ignore — desktop browsers don't need the prime */ }
+}
+
+// Exported for tests + audio diagnostics: has a gesture unlocked audio yet?
+export function isSpeechAudioUnlocked() {
+  return audioUnlocked;
+}
+
+if (typeof window !== "undefined") {
+  const GESTURES = ["pointerdown", "touchstart", "touchend", "click"];
+  const onFirstGesture = () => {
+    unlockSpeechAudio();
+    for (const evt of GESTURES) window.removeEventListener(evt, onFirstGesture, true);
+  };
+  for (const evt of GESTURES) {
+    window.addEventListener(evt, onFirstGesture, { capture: true, passive: true });
+  }
+}
+
 // Friendly names for the non-English languages we read aloud, for the
 // "no on-device voice" notice (most desktops ship no Arabic/Urdu voice).
 const LANG_NAMES = { ar: "Arabic", ur: "Urdu", fa: "Persian", ps: "Pashto" };
@@ -95,6 +146,7 @@ export function useSpeech() {
   // speakingId for the active-highlight, like speak().
   function playAudio(url, { id = null, onError = null, onEnd = null } = {}) {
     if (!url) { if (onError) onError(); else if (onEnd) onEnd(); return; }
+    unlockSpeechAudio(); // in-gesture prime if the global listener somehow missed this tap
     stopAudio();
     const a = new Audio(url);
     activeAudio = a;
@@ -211,6 +263,7 @@ export function useSpeech() {
   // fitting that kind of content — see TONE_BY_CONTENT_KIND server-side.
   function speak(text, lang = "en", { id = null, rate = 0.85, voiceName = "", provider = "", model = "", contentKind = "" } = {}) {
     if (!text) return;
+    unlockSpeechAudio(); // synchronously inside the tap — async TTS later needs this on mobile
     lastError.value = ""; // fresh tap — clear any prior "couldn't be spoken" notice
     sequenceToken += 1;
     sequenceIndex.value = -1;

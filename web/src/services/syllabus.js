@@ -4,6 +4,7 @@ import { functions } from "@/lib/firebase";
 const _generateSyllabus = httpsCallable(functions, "generateSyllabus");
 const _stopSyllabus = httpsCallable(functions, "stopSyllabus");
 const _requestActivityTopUp = httpsCallable(functions, "requestActivityTopUp");
+const _ensureDefaultSubjects = httpsCallable(functions, "ensureDefaultSubjects");
 
 export async function startSyllabus(curriculumId) {
   const res = await _generateSyllabus({ curriculumId, targetActivitiesPerSubject: 48 });
@@ -27,13 +28,23 @@ export async function generateSyllabus(curriculumId) {
 }
 
 // "Generate more activities" — create brand-new activities of the selected
-// type(s). Reuses stopSyllabus to cancel (the run is generic on runId).
-export async function requestActivityTopUp({ curriculumId, onlyTypes, addCount }) {
-  const res = await _requestActivityTopUp({ curriculumId, onlyTypes, addCount });
+// type(s) and/or for the selected subject(s), optionally following the
+// parent's free-text `guidance`. Reuses stopSyllabus to cancel (the run is
+// generic on runId).
+export async function requestActivityTopUp({ curriculumId, onlyTypes, onlySubjects, addCount, guidance }) {
+  const res = await _requestActivityTopUp({ curriculumId, onlyTypes, onlySubjects, addCount, guidance });
   return res.data;
 }
 
 export async function pollActivityTopUp(runId) {
   const res = await _requestActivityTopUp({ runId });
+  return res.data;
+}
+
+// Make sure the default subject catalog (Geography, Social Studies, History,
+// Politics) exists in the curriculum. Idempotent — seeded subjects stay dormant
+// until the parent explicitly generates activities for them.
+export async function ensureDefaultSubjects(curriculumId) {
+  const res = await _ensureDefaultSubjects({ curriculumId });
   return res.data;
 }

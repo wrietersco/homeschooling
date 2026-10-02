@@ -1,6 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { platformBudget, familyBudget, allocate, DEFAULT_QUOTA } from "../platform/quota.js";
+import { platformBudget, familyBudget, allocate, DEFAULT_QUOTA, enforcePaidTtsCapacity } from "../platform/quota.js";
+
+test("paid speech uses shared capacity regardless of legacy zero family weights", async () => {
+  const docs = new Map([["platform/quota", { models: { "gemini-2.5-flash-preview-tts": { rpd: 2 } }, platformReservePct: 50, familyWeights: { paid: 0 } }]]);
+  const ref = (path) => ({ path, collection: (name) => ref(`${path}/${name}`), doc: (id) => ref(`${path}/${id}`) });
+  let queue = Promise.resolve();
+  const db = { collection: ref, runTransaction(fn) {
+    const next = queue.then(() => fn({ get: async (r) => ({ data: () => docs.get(r.path) }), set: (r, value) => docs.set(r.path, { ...docs.get(r.path), ...value }) }));
+    queue = next.catch(() => {}); return next;
+  } };
+  const results = await Promise.allSettled([enforcePaidTtsCapacity(db, "gemini-2.5-flash-preview-tts"), enforcePaidTtsCapacity(db, "gemini-2.5-flash-preview-tts")]);
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+  assert.equal(results.find((r) => r.status === "rejected").reason.code, "resource-exhausted");
+  await enforcePaidTtsCapacity(db, "gpt-4o-mini-tts");
+});
+
+test("paid speech capacity fails closed on storage errors", async () => {
+  const ref = { doc: () => ref, collection: () => ref };
+  const db = { collection: () => ref, runTransaction: async () => { throw new Error("offline"); } };
+  await assert.rejects(enforcePaidTtsCapacity(db, "gemini-2.5-flash-preview-tts"), { code: "unavailable" });
+});
 
 test("platform reserve is the configured % of the model's RPD", () => {
   assert.equal(platformBudget(100, 30), 30);

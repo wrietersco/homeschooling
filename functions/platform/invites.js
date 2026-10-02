@@ -4,7 +4,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
-import { resolveCaller } from "../lib/caller.js";
+import { resolveCaller, assertUserAccess } from "../lib/caller.js";
 import { userRef } from "../lib/paths.js";
 
 export const createInvite = onCall(async (request) => {
@@ -68,7 +68,7 @@ export const acceptInvite = onCall(async (request) => {
   }
 
   // Block users who already belong to a family.
-  const existingUser = await userRef(db, uid).get();
+  const existingUser = await assertUserAccess(request, db);
   if (existingUser.exists && existingUser.data()?.familyId) {
     throw new HttpsError("already-exists", "You already belong to a family.");
   }

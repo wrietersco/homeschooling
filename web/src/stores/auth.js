@@ -57,6 +57,9 @@ export const useAuthStore = defineStore("auth", () => {
       doc(db, "users", fbUser.uid),
       (snap) => {
         profile.value = snap.exists() ? snap.data() : null;
+        if (profile.value?.disabled || (profile.value?.sessionValidAfterSeconds && Number(claims.value.auth_time || 0) < profile.value.sessionValidAfterSeconds)) {
+          signOut(auth).catch(() => {});
+        }
         profileLoaded.value = true;
         if (first) {
           first = false;

@@ -23,10 +23,26 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     function signedIn() {
-      return request.auth != null;
+      return request.auth != null && accountActive();
+    }
+    function accountActive() {
+      let path = /databases/$(database)/documents/users/$(request.auth.uid);
+      return !exists(path) ||
+        ((!('disabled' in get(path).data) || get(path).data.disabled != true) &&
+        (!('sessionValidAfterSeconds' in get(path).data) ||
+          request.auth.token.auth_time >= get(path).data.sessionValidAfterSeconds));
+    }
+    function familyActive(familyId) {
+      let path = /databases/$(database)/documents/families/$(familyId);
+      return exists(path) && (!('status' in get(path).data) || get(path).data.status != 'disabled');
+    }
+    function subscribed(familyId) {
+      let path = /databases/$(database)/documents/families/$(familyId)/billing/subscription;
+      return exists(path) && get(path).data.status == 'active' &&
+        get(path).data.startsAt <= request.time && get(path).data.endsAt > request.time;
     }
     function isSuperAdmin() {
-      return signedIn() && request.auth.token.platformRole == 'superadmin';
+      return signedIn() && ('platformRole' in request.auth.token) && request.auth.token.platformRole == 'superadmin';
     }
     function memberPath(familyId) {
       return /databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid);
@@ -41,20 +57,22 @@ service cloud.firestore {
       return isMember(familyId) && memberRole(familyId) == 'owner';
     }
     function canWrite(familyId) {
-      return isMember(familyId) && memberRole(familyId) in ['owner', 'parent'];
+      return isMember(familyId) && familyActive(familyId) && subscribed(familyId) && memberRole(familyId) in ['owner', 'parent'];
     }
     function canRead(familyId) {
-      return isMember(familyId) || isSuperAdmin();
+      return (isMember(familyId) && familyActive(familyId) && subscribed(familyId)) || isSuperAdmin();
     }
     function writable(familyId) {
       return canWrite(familyId) || isSuperAdmin();
     }
 
-    // A user reads/writes only their own user doc. The familyId pointer here is
-    // not trusted for access decisions — membership is proven by the members
-    // doc — so a self-edited pointer grants nothing.
+    // Account access fields and family pointers are server-controlled. Users
+    // may edit only their display name, and can read suspension state to sign out.
     match /users/{uid} {
-      allow read, write: if signedIn() && request.auth.uid == uid;
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow update: if signedIn() && request.auth.uid == uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName']);
+      allow create, delete: if false;
     }
 
     // Platform config (incl. platform/pricing): superadmin only.
@@ -64,6 +82,10 @@ service cloud.firestore {
 
     // Platform-wide cost rollups: superadmin read; written server-side (Admin SDK).
     match /platformCostRollups/{period} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
+    }
+    match /platformAudit/{eventId} {
       allow read: if isSuperAdmin();
       allow write: if false;
     }
@@ -97,9 +119,10 @@ service cloud.firestore {
 
     match /families/{familyId} {
       // Family creation/deletion is server-side only (callables w/ Admin SDK).
-      allow read: if canRead(familyId);
+      allow read: if isMember(familyId) || isSuperAdmin();
       allow create, delete: if isSuperAdmin();
-      allow update: if canManage(familyId) || isSuperAdmin();
+      allow update: if isSuperAdmin() || (canManage(familyId) && familyActive(familyId) && subscribed(familyId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'updatedAt']));
 
       // Members: readable by any member; only the owner (or superadmin) mutates.
       match /members/{memberUid} {
@@ -138,6 +161,8 @@ service cloud.firestore {
         allow read: if isSuperAdmin();
         allow write: if false;
       }
+      match /billing/{path=**} { allow read, write: if isSuperAdmin(); }
+      match /planUsage/{period} { allow read: if canRead(familyId); allow write: if false; }
 
       // Member-read / parent-write content (each match also covers the group's
       // nested subcollections via {path=**}).
@@ -160,8 +185,8 @@ service cloud.firestore {
       // expiresAtMs in the past is no longer readable. Tokens written before this
       // field existed (no expiresAtMs) remain readable for backward compatibility.
       match /playerTokens/{tokenId} {
-        allow read: if !('expiresAtMs' in resource.data) ||
-          resource.data.expiresAtMs > request.time.toMillis();
+        allow read: if familyActive(familyId) && subscribed(familyId) &&
+          (!('expiresAtMs' in resource.data) || resource.data.expiresAtMs > request.time.toMillis());
         allow write: if writable(familyId);
       }
       match /scores/{path=**}       { allow read: if canRead(familyId); allow write: if writable(familyId); }

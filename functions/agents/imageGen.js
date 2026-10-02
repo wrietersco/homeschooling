@@ -11,6 +11,7 @@
 import { getStorage } from "firebase-admin/storage";
 import { randomUUID } from "node:crypto";
 import { recordCostEvent } from "../lib/costMeter.js";
+import { consumePlanUsage } from "../lib/subscriptions.js";
 
 // Default when no model is passed in (superadmin can override per-agent via the
 // Platform → LLM config → Storybook images selector, threaded through `model`).
@@ -137,6 +138,10 @@ export async function generateActivityImage({ scene, apiKey, pathHint, style = "
 
   const imageModel = String(model || "").trim() || DEFAULT_IMAGE_MODEL;
   const prompt = promptFor(style, scene);
+  if (meter?.db && meter.familyId) {
+    try { await consumePlanUsage(meter.db, meter.familyId, "image", { uid: meter.uid }); }
+    catch (e) { if (e?.code === "resource-exhausted") return null; throw e; }
+  }
 
   let buffer, mime;
   try {

@@ -31,7 +31,7 @@ export { startExploreSession, exploreTool, endExploreSession, previewExploreVoic
 export { askCurriculum } from "./agents/curriculum.js";
 
 // Phase 5 — Syllabus builder.
-export { generateSyllabus, stopSyllabus, syllabusWorker, requestActivityTopUp } from "./agents/syllabus.js";
+export { generateSyllabus, stopSyllabus, syllabusWorker, requestActivityTopUp, ensureDefaultSubjects } from "./agents/syllabus.js";
 
 // Activity content — type-specific content (verses / problems / story / steps).
 // Backfill runs server-side via a scheduled worker (like the syllabus builder):
@@ -76,6 +76,8 @@ export { rebuildKnowledgeBrief, getActivityJourney } from "./agents/knowledgeBri
 
 // Phase 8 — Super Admin callables.
 export { listFamilies, setFamilyStatus, listFamilyMembers, setMemberRole, removeMember, deleteFamily, getLlmConfig, setLlmConfig } from "./platform/admin.js";
+export { getSubscriptionAdmin, setPricingPlans, setFamilySubscription, getMySubscription } from "./platform/subscriptions.js";
+export { listPlatformUsers, createPlatformUser, updatePlatformUser, setPlatformUserSuspended, setPlatformUserPassword, getPlatformPasswordResetLink } from "./platform/userAdmin.js";
 
 // Cost reporting (superadmin) — platform/per-family cost overview + deep event log.
 export { getCostOverview, getFamilyCostDetail } from "./platform/costReport.js";

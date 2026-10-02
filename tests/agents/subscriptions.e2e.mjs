@@ -1,0 +1,61 @@
+import { test, before } from "node:test";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+// Use the same Admin SDK instance as the functions workspace (the repository
+// also installs a separate copy for its rule tests).
+const require = createRequire(new URL("../../functions/package.json", import.meta.url));
+const { initializeApp, getApps } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
+const { getFirestore } = require("firebase-admin/firestore");
+import { createPlatformUser, updatePlatformUser, setPlatformUserSuspended, setPlatformUserPassword, getPlatformPasswordResetLink, listPlatformUsers } from "../../functions/platform/userAdmin.js";
+import { setPricingPlans, setFamilySubscription } from "../../functions/platform/subscriptions.js";
+import { DEFAULT_PLANS, consumePlanUsage, subscriptionRef, allowancePeriod, usageRef } from "../../functions/lib/subscriptions.js";
+import { assertUserAccess } from "../../functions/lib/caller.js";
+
+const enabled = Boolean(process.env.FIRESTORE_EMULATOR_HOST && process.env.FIREBASE_AUTH_EMULATOR_HOST);
+let adminRequest;
+before(async () => {
+  if (!enabled) return;
+  if (!getApps().length) initializeApp({ projectId: "demo-subscriptions-test" });
+  const admin = await getAuth().createUser({ email: `admin-${Date.now()}@example.test`, password: "Admin-test-123" });
+  await getAuth().setCustomUserClaims(admin.uid, { platformRole: "superadmin" });
+  adminRequest = { auth: { uid: admin.uid, token: { platformRole: "superadmin", auth_time: Math.ceil(Date.now() / 1000) + 5 } } };
+});
+test("manual subscriptions and account management through actual Auth/Firestore emulators", { skip: !enabled }, async () => {
+  const db = getFirestore(), auth = getAuth();
+  const request = (data) => ({ ...adminRequest, data });
+  await assert.rejects(listPlatformUsers.run({ auth: { uid: "ordinary", token: {} }, data: {} }), { code: "permission-denied" });
+  const password = "Initial-secret-123", changedPassword = "Changed-secret-456";
+  const r = await createPlatformUser.run(request({ email: `member-${Date.now()}@example.test`, displayName: "Test member", password, familyName: "Subscription test family", platformRole: "superadmin" }));
+  const { uid, familyId } = r.user;
+  assert.equal((await auth.getUser(uid)).customClaims.platformRole, undefined);
+  await assert.rejects(consumePlanUsage(db, familyId, "text", { uid }), { code: "failed-precondition" });
+  const plans = structuredClone(DEFAULT_PLANS); plans.basic.limits.text = 3;
+  await setPricingPlans.run(request({ plans }));
+  const start = Date.now() - 60000;
+  await setFamilySubscription.run(request({ familyId, planId: "basic", status: "active", startsAt: start, endsAt: start + 30 * 86400000, paymentStatus: "paid", paymentReference: "CASH-TEST", notes: "Paid outside app" }));
+  assert.equal((await subscriptionRef(db, familyId).get()).data().agreedPrice, 4500);
+  const reservations = await Promise.allSettled(Array.from({ length: 8 }, () => consumePlanUsage(db, familyId, "text", { uid })));
+  const passed = reservations.filter((s) => s.status === "fulfilled").length;
+  assert.ok(passed > 0 && passed <= 3);
+  const sub = (await subscriptionRef(db, familyId).get()).data();
+  assert.equal((await usageRef(db, familyId, allowancePeriod(sub)).get()).data().text, passed);
+  await updatePlatformUser.run(request({ uid, email: `renamed-${Date.now()}@example.test`, displayName: "Renamed member" }));
+  assert.equal((await auth.getUser(uid)).displayName, "Renamed member");
+  assert.equal((await db.collection("families").doc(familyId).collection("members").doc(uid).get()).data().displayName, "Renamed member");
+  await setPlatformUserSuspended.run(request({ uid, disabled: true }));
+  assert.equal((await auth.getUser(uid)).disabled, true);
+  await assert.rejects(assertUserAccess({ auth: { uid, token: { auth_time: Math.ceil(Date.now() / 1000) + 5 } } }, db), { code: "permission-denied" });
+  await assert.rejects(consumePlanUsage(db, familyId, "image", { uid }), { code: "permission-denied" });
+  await setPlatformUserSuspended.run(request({ uid, disabled: false }));
+  assert.equal((await auth.getUser(uid)).disabled, false);
+  const reset = await getPlatformPasswordResetLink.run(request({ uid }));
+  assert.ok(reset.link.includes("oobCode="));
+  await setPlatformUserPassword.run(request({ uid, password: changedPassword }));
+  await assert.rejects(assertUserAccess({ auth: { uid, token: { auth_time: Math.floor(start / 1000) } } }, db), { code: "unauthenticated" });
+  await assert.rejects(setPlatformUserSuspended.run(request({ uid: adminRequest.auth.uid, disabled: true })), { code: "failed-precondition" });
+  const users = (await listPlatformUsers.run(request({}))).users;
+  assert.ok(users.some((u) => u.uid === uid && !u.disabled && u.familyId === familyId));
+  const persisted = JSON.stringify({ user: (await db.collection("users").doc(uid).get()).data(), audit: (await db.collection("platformAudit").get()).docs.map((d) => d.data()) });
+  assert.equal(persisted.includes(password), false); assert.equal(persisted.includes(changedPassword), false); assert.equal(persisted.includes(reset.link), false);
+});

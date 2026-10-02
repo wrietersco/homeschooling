@@ -83,6 +83,27 @@ async function loadAllocation(db, nowMs = Date.now()) {
 }
 
 // ─── Enforcement ────────────────────────────────────────────────────────────────
+// Paid plans own the family allowance. Keep a separate shared model pool so old
+// weight allocations cannot silently give a paying family a zero speech quota.
+export async function enforcePaidTtsCapacity(db, model, now = new Date()) {
+  const configRef = db.collection("platform").doc("quota");
+  const usageRef = db.collection("platform").doc("paidTtsCapacity").collection("daily").doc(dayKey(now));
+  try {
+    await db.runTransaction(async (tx) => {
+      const config = (await tx.get(configRef)).data() || {};
+      const spec = { ...DEFAULT_QUOTA.models, ...config.models }[model];
+      if (!spec) return;
+      const cap = Math.max(0, Number(spec.rpd) - platformBudget(spec.rpd, config.platformReservePct ?? DEFAULT_QUOTA.platformReservePct));
+      const used = (await tx.get(usageRef)).data() || {};
+      if (Number(used[model] || 0) >= cap) throw new HttpsError("resource-exhausted", "Shared speech capacity reached for today. Try another available voice provider or use browser speech.");
+      tx.set(usageRef, { [model]: Number(used[model] || 0) + 1, updatedAt: now }, { merge: true });
+    });
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    throw new HttpsError("unavailable", "Speech capacity could not be checked. Please try again.");
+  }
+}
+
 // Family TTS: transactional per-family/day counter capped at the family's budget
 // for `model`. Throws resource-exhausted when over; fails OPEN on ledger errors.
 // No-op for models that aren't budgeted.

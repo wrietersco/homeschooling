@@ -31,17 +31,17 @@ export const useFamilyStore = defineStore("family", () => {
       onSnapshot(root, (snap) => {
         family.value = snap.exists() ? { id: snap.id, ...snap.data() } : null;
         loading.value = false;
-      })
+      }, () => { family.value = null; loading.value = false; })
     );
     stops.push(
       onSnapshot(doc(db, "families", familyId, "profile", "family"), (snap) => {
         profile.value = snap.exists() ? snap.data() : null;
-      })
+      }, () => { profile.value = null; })
     );
     stops.push(
       onSnapshot(collection(db, "families", familyId, "members"), (snap) => {
         members.value = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
-      })
+      }, () => { members.value = []; })
     );
   }
 

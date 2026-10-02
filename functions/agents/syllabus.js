@@ -16,7 +16,7 @@ import { resolveCaller } from "../lib/caller.js";
 import { runAgent } from "./runtime.js";
 import { resolveLlm, secretNameForProvider } from "./agentConfig.js";
 import { loadPlatformInstructions, describeGuardian, summarizeChildPerformance } from "./grounding.js";
-import { generateContentForActivity } from "./activityContent.js";
+import { generateContentForActivity, clampGuidance } from "./activityContent.js";
 import { regenerateBriefSafe } from "./knowledgeBrief.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
 
@@ -37,6 +37,48 @@ const MAX_SUBJECT_ATTEMPTS = 3;
 // A subject is "terminal" (no longer actionable) when done or permanently failed.
 function isSubjectTerminal(s) {
   return s && (s.status === "done" || s.status === "failed");
+}
+
+// Default subjects seeded into EVERY curriculum so they are always listed and
+// selectable, whether or not the curriculum interview included them. Seeding is
+// optional by design: a seeded subject stays DORMANT (matched:false, skipped by
+// builds) until the parent explicitly generates activities for it, so adding
+// this catalog later is backwards compatible with existing curricula — nothing
+// is generated for these subjects unless the parent asks for it.
+export const DEFAULT_SUBJECT_NAMES = ["Geography", "Social Studies", "History", "Politics"];
+
+// Idempotently create the default subject docs (matched by case-insensitive
+// name) and keep the curriculum doc's subjectCount honest. Returns the names
+// that were actually added.
+export async function ensureDefaultSubjectDocs({ db, familyId, curriculumId }) {
+  const famRef = db.collection("families").doc(familyId);
+  const subRef = famRef.collection("curriculum").doc(curriculumId).collection("subjects");
+  const snap = await subRef.get();
+  const existing = new Set(snap.docs.map((d) => String(d.data().name || "").trim().toLowerCase()));
+  const missing = DEFAULT_SUBJECT_NAMES.filter((n) => !existing.has(n.toLowerCase()));
+  if (!missing.length) return { added: [] };
+
+  const batch = db.batch();
+  for (const name of missing) {
+    // Same field shape finalize_curriculum writes, so every downstream reader
+    // (worker prompt, plan spine, curriculum view) sees a normal subject doc.
+    batch.set(subRef.doc(), {
+      name,
+      macroGoals: [],
+      contentOutline: "",
+      instructionApproach: "",
+      assessmentMethod: "",
+      gradingStandards: "",
+      targetChildren: [],
+      default: true, // dormant marker — skipped by builds until activated
+      createdAt: new Date(),
+    });
+  }
+  batch.update(famRef.collection("curriculum").doc(curriculumId), {
+    subjectCount: snap.size + missing.length,
+  });
+  await batch.commit();
+  return { added: missing };
 }
 
 // Coerce whatever the model put in `targetChildren` into REAL child document ids.
@@ -151,7 +193,7 @@ const CREATE_ACTIVITY_DECLARATION = {
 };
 
 // ─── Worker system prompt ─────────────────────────────────────────────────────
-function buildWorkerSystemPrompt({ subjectName, macroGoals, contentOutline, instructionApproach, assessmentMethod, children, guardians, guidingLight, motherTongue = "", childPerformance = "", platformInstructions, existingTitles, activitiesNeeded = 5, targetActivityCount = 4, onlyTypes = [] }) {
+function buildWorkerSystemPrompt({ subjectName, macroGoals, contentOutline, instructionApproach, assessmentMethod, children, guardians, guidingLight, motherTongue = "", childPerformance = "", platformInstructions, existingTitles, activitiesNeeded = 5, targetActivityCount = 4, onlyTypes = [], guidance = "" }) {
   const lines = [
     platformInstructions || "",
     platformInstructions ? "" : "",
@@ -214,6 +256,11 @@ function buildWorkerSystemPrompt({ subjectName, macroGoals, contentOutline, inst
       `  • parentInstructionsTranslit — the same instructions in ${motherTongue} but written in Latin/English transliteration (so a parent who can't read the native script can still read it).`,
       `  • parentInstructionsNative — the same instructions in ${motherTongue}'s native script (used for audio playback).`,
     ].join("\n") : "",
+    guidance ? [
+      "",
+      "PARENT'S INSTRUCTIONS FOR THIS BATCH (follow these closely — they say what the parent wants from these specific activities):",
+      guidance,
+    ].join("\n") : "",
   ];
   return lines.filter(Boolean).join("\n");
 }
@@ -224,6 +271,7 @@ export async function runSyllabusWorker({
   targetActivitiesPerSubject = DEFAULT_ACTIVITIES_PER_SUBJECT,
   batchActivities = DEFAULT_BATCH_ACTIVITIES,
   onlyTypes = [],
+  guidance = "",
 }) {
   // Load subject data from the curriculum's subjects subcollection.
   const subjectSnap = await db
@@ -314,12 +362,13 @@ export async function runSyllabusWorker({
       if (contentLlm) {
         try {
           const { kind, content, provider, model } = await generateContentForActivity({
-            activity: activityDoc, children, guardians, guidingLight, childPerformance,
+            activity: activityDoc, children, guardians, guidingLight, childPerformance, uid,
             llm: contentLlm,
             genConfig: contentGenConfig,
             db,
             geminiApiKey: process.env.GEMINI_API_KEY || "",
             storagePrefix: familyId,
+            guidance,
           });
           if (content) {
             activityDoc.content = content;
@@ -356,6 +405,7 @@ export async function runSyllabusWorker({
     activitiesNeeded,
     targetActivityCount,
     onlyTypes,
+    guidance,
   });
 
   const result = await runAgent({
@@ -388,6 +438,10 @@ export async function startSyllabusRun({
   targetActivitiesPerSubject = DEFAULT_ACTIVITIES_PER_SUBJECT,
   batchActivities = DEFAULT_BATCH_ACTIVITIES,
 }) {
+  // Make sure the default subject catalog exists (idempotent) so the parent
+  // always sees — and can top-up — Geography/Social Studies/History/Politics.
+  await ensureDefaultSubjectDocs({ db, familyId, curriculumId });
+
   // Load subjects from the curriculum.
   const subjectsSnap = await db
     .collection("families").doc(familyId)
@@ -395,18 +449,37 @@ export async function startSyllabusRun({
     .collection("subjects").get();
   if (subjectsSnap.empty) throw new Error("No subjects found in this curriculum — add subjects first.");
 
+  // Existing activity counts decide which seeded defaults are still dormant
+  // (never generated for) — those are pre-marked done so a full build only
+  // creates activities for subjects the parent actually opted into.
+  const activitiesSnap = await db
+    .collection("families").doc(familyId)
+    .collection("activities")
+    .where("curriculumId", "==", curriculumId).get();
+  const countsBySubject = {};
+  for (const d of activitiesSnap.docs) {
+    const a = d.data();
+    countsBySubject[a.subjectId] = (countsBySubject[a.subjectId] || 0) + 1;
+  }
+  let dormantCount = 0;
+
   // Build the initial subjects map for the progress doc.
   const subjectsMap = {};
   for (const d of subjectsSnap.docs) {
+    const s = d.data();
+    const dormant = Boolean(s.default) && (countsBySubject[d.id] || 0) === 0;
+    if (dormant) dormantCount += 1;
     subjectsMap[d.id] = {
-      name: d.data().name || d.id,
-      status: "pending",
+      name: s.name || d.id,
+      status: dormant ? "done" : "pending",
       activityCount: 0,
       targetActivityCount: targetActivitiesPerSubject,
+      ...(dormant ? { matched: false } : {}),
     };
   }
 
   // Create the agent-run progress doc.
+  const activeCount = subjectsSnap.size - dormantCount;
   const runRef = db.collection("families").doc(familyId).collection("agentRuns").doc();
   await runRef.set({
     type: "syllabus",
@@ -415,12 +488,12 @@ export async function startSyllabusRun({
     curriculumId,
     status: "queued",
     subjects: subjectsMap,
-    totalSubjects: subjectsSnap.size,
-    completedSubjects: 0,
+    totalSubjects: activeCount,
+    completedSubjects: dormantCount,
     totalActivities: 0,
     targetActivitiesPerSubject,
     batchActivities,
-    targetTotalActivities: subjectsSnap.size * targetActivitiesPerSubject,
+    targetTotalActivities: activeCount * targetActivitiesPerSubject,
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -433,23 +506,38 @@ export async function startSyllabusRun({
     updatedAt: new Date(),
   });
 
-  return { runId: runRef.id, totalSubjects: subjectsSnap.size, status: "queued", done: false };
+  // Report only ACTIVE subjects — dormant seeded defaults are skipped by the
+  // build and pre-marked done, so they aren't part of the work being started.
+  return { runId: runRef.id, totalSubjects: activeCount, status: "queued", done: false };
 }
 
-// ─── "Generate more activities" (type-scoped top-up) ──────────────────────────
+// ─── "Generate more activities" (type- or subject-scoped top-up) ─────────────
 // Reuses the same agentRuns/syllabusQueue/syllabusWorker machinery as a full
 // syllabus build (see startSyllabusRun above), so it gets live progress, retry,
-// and stop/cancel for free. The only difference is per-subject scoping: instead
-// of building every subject toward a flat target, this only touches subjects
-// that already contain the requested type(s), and seeds each one's
-// targetActivityCount as "current total + addCount" so the existing gap-based
-// logic in runSyllabusWorker creates exactly addCount new activities, then stops.
+// and stop/cancel for free. The only difference is per-subject scoping: pass
+// onlyTypes to touch just the subjects that already contain those type(s), or
+// onlySubjects to touch exactly those subjectIds (any activity type). Either
+// way each matched subject's targetActivityCount is seeded as "current total +
+// addCount" so the existing gap-based logic in runSyllabusWorker creates
+// exactly addCount new activities, then stops.
 export async function startActivityTopUp({
-  db, familyId, curriculumId, uid, role = "owner", onlyTypes, addCount,
+  db, familyId, curriculumId, uid, role = "owner", onlyTypes, onlySubjects, addCount, guidance: rawGuidance,
 }) {
   const types = Array.isArray(onlyTypes) ? onlyTypes.filter((t) => ACTIVITY_TYPES.includes(t)) : [];
-  if (!types.length) throw new HttpsError("invalid-argument", "onlyTypes must include at least one valid activity type.");
+  const subjectFilter = Array.isArray(onlySubjects)
+    ? [...new Set(onlySubjects.map((s) => String(s || "").trim()).filter(Boolean))]
+    : [];
+  if (!types.length && !subjectFilter.length) {
+    throw new HttpsError("invalid-argument", "onlyTypes or onlySubjects must include at least one entry.");
+  }
   const count = Math.min(12, Math.max(1, Number(addCount) || DEFAULT_BATCH_ACTIVITIES));
+  // Optional parent instructions for these specific activities — clamped like
+  // all content guidance so a crafted client can't blow up the worker prompt.
+  const guidance = clampGuidance(rawGuidance);
+
+  // Idempotent: makes sure the default subject catalog exists so a subject
+  // top-up can target a default subject the curriculum interview never created.
+  await ensureDefaultSubjectDocs({ db, familyId, curriculumId });
 
   const subjectsSnap = await db
     .collection("families").doc(familyId)
@@ -469,14 +557,15 @@ export async function startActivityTopUp({
     if (types.includes(a.type)) hasTypeBySubject[a.subjectId] = true;
   }
 
-  // Build the subjects map: only subjects that already have a matching-type
-  // activity get a real target; the rest are pre-marked "done" so the existing
-  // per-subject loop in continueSyllabusRun skips them with no extra code path.
+  // Build the subjects map: only matched subjects get a real target; the rest
+  // are pre-marked "done" so the existing per-subject loop in
+  // continueSyllabusRun skips them with no extra code path. Matched = selected
+  // by id (onlySubjects mode) or already holding a requested type (onlyTypes).
   const subjectsMap = {};
   let matchingSubjects = 0;
   for (const d of subjectsSnap.docs) {
     const existing = countsBySubject[d.id] || 0;
-    const matches = Boolean(hasTypeBySubject[d.id]);
+    const matches = subjectFilter.length ? subjectFilter.includes(d.id) : Boolean(hasTypeBySubject[d.id]);
     if (matches) matchingSubjects += 1;
     subjectsMap[d.id] = {
       name: d.data().name || d.id,
@@ -491,7 +580,9 @@ export async function startActivityTopUp({
   if (!matchingSubjects) {
     throw new HttpsError(
       "failed-precondition",
-      "None of the existing subjects have an activity of the selected type(s) yet — generate the syllabus first."
+      subjectFilter.length
+        ? "None of the selected subjects exist in this curriculum."
+        : "None of the existing subjects have an activity of the selected type(s) yet — generate the syllabus first."
     );
   }
 
@@ -500,6 +591,8 @@ export async function startActivityTopUp({
     type: "syllabus",
     mode: "topup",
     onlyTypes: types,
+    ...(subjectFilter.length ? { onlySubjects: subjectFilter } : {}),
+    ...(guidance ? { guidance } : {}),
     addCount: count,
     uid,
     role,
@@ -567,6 +660,7 @@ export async function continueSyllabusRun({
   const targetActivitiesPerSubject = Math.max(1, Number(run.targetActivitiesPerSubject) || DEFAULT_ACTIVITIES_PER_SUBJECT);
   const batchActivities = Math.max(1, Number(run.batchActivities) || DEFAULT_BATCH_ACTIVITIES);
   const onlyTypes = Array.isArray(run.onlyTypes) ? run.onlyTypes : [];
+  const guidance = clampGuidance(run.guidance);
 
   // Process each subject sequentially, updating progress after each.
   for (const subjectDoc of subjectsSnap.docs) {
@@ -592,6 +686,7 @@ export async function continueSyllabusRun({
         targetActivitiesPerSubject: subjectTarget,
         batchActivities,
         onlyTypes,
+        guidance,
       });
       const subjectDone = totalSubjectActivities >= subjectTarget;
       subjects[subjectId] = {
@@ -615,6 +710,7 @@ export async function continueSyllabusRun({
       });
     } catch (e) {
       // Bounded retry: count attempts and only give up (terminal "failed") after
+      if (["resource-exhausted", "permission-denied", "failed-precondition", "unavailable"].includes(e?.code)) throw e;
       // MAX_SUBJECT_ATTEMPTS, so a persistently-failing subject can't loop the run
       // forever (audit #3) while a transient blip still gets retried.
       const attempts = Number(subjects[subjectId]?.attempts || 0) + 1;
@@ -787,8 +883,11 @@ export async function runSyllabusQueuePass({ db, limit = 2 } = {}) {
       });
       processed += 1;
     } catch (e) {
+      if (["resource-exhausted", "permission-denied", "failed-precondition"].includes(e?.code)) {
+        await db.collection("families").doc(claimed.familyId).collection("agentRuns").doc(claimed.runId).set({ status: "error", error: String(e?.message || e).slice(0, 500), updatedAt: new Date() }, { merge: true });
+      }
       await q.ref.set({
-        status: "queued",
+        status: ["resource-exhausted", "permission-denied", "failed-precondition"].includes(e?.code) ? "error" : "queued",
         lastError: String(e?.message || e).slice(0, 500),
         updatedAt: new Date(),
       }, { merge: true });
@@ -871,8 +970,10 @@ export const requestActivityTopUp = onCall(
       // bucket as syllabus generation since it's the same cost class.
       await enforceDailyLimit(db, familyId, "syllabus");
       const onlyTypes = Array.isArray(request.data?.onlyTypes) ? request.data.onlyTypes.map((t) => String(t || "").trim()) : [];
+      const onlySubjects = Array.isArray(request.data?.onlySubjects) ? request.data.onlySubjects.map((s) => String(s || "").trim()) : [];
       const addCount = Math.min(12, Math.max(1, Number(request.data?.addCount) || DEFAULT_BATCH_ACTIVITIES));
-      const started = await startActivityTopUp({ db, familyId, curriculumId, uid, role, onlyTypes, addCount });
+      const guidance = clampGuidance(request.data?.guidance);
+      const started = await startActivityTopUp({ db, familyId, curriculumId, uid, role, onlyTypes, onlySubjects, addCount, guidance });
       return { configured: true, ...started };
     }
 
@@ -894,6 +995,19 @@ export const requestActivityTopUp = onCall(
     return { configured: true, runId, status: run.status, done: run.status === "done" };
   }
 );
+
+// Callable — make sure the default subject catalog (Geography, Social Studies,
+// History, Politics) exists in a curriculum. Idempotent and side-effect-free
+// beyond the seeded docs: seeded defaults stay dormant until the parent
+// explicitly generates activities for them. The Syllabus view calls this on
+// load so the subjects — and the by-subject top-up chips — always list them.
+export const ensureDefaultSubjects = onCall({ timeoutSeconds: 30 }, async (request) => {
+  const { db, familyId } = await resolveCaller(request);
+  const curriculumId = String(request.data?.curriculumId || "").trim();
+  if (!curriculumId) throw new HttpsError("invalid-argument", "curriculumId is required.");
+  const result = await ensureDefaultSubjectDocs({ db, familyId, curriculumId });
+  return { configured: true, ...result };
+});
 
 // Mark a syllabus run cancelled. The worker re-checks the run status and stops
 // re-claiming the queue row; an in-flight subject finishes, then it halts.

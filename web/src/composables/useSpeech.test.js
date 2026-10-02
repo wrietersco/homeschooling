@@ -39,12 +39,19 @@ describe("useSpeech.speakSequence — per-turn audioUrl", () => {
     vi.unstubAllGlobals();
   });
 
+  // The module primes mobile audio with ONE persistent silent element on the
+  // first gesture/tap (see useSpeech.js unlock) — filter it out so assertions
+  // describe only the media the sequence actually plays, independent of test order.
+  function mediaInstances() {
+    return audioInstances.filter((a) => !String(a.url).startsWith("data:audio/wav"));
+  }
+
   it("plays the turn's audioUrl directly, without calling synthesizeSpeech", async () => {
     const { speakSequence, stop } = useSpeech();
     speakSequence([{ text: "hi", lang: "en", id: "t0", audioUrl: "https://cdn/custom.wav" }]);
     await Promise.resolve(); // let the play() microtask settle
-    expect(audioInstances).toHaveLength(1);
-    expect(audioInstances[0].url).toBe("https://cdn/custom.wav");
+    expect(mediaInstances()).toHaveLength(1);
+    expect(mediaInstances()[0].url).toBe("https://cdn/custom.wav");
     expect(synthesizeSpeech).not.toHaveBeenCalled();
     stop();
   });
@@ -54,8 +61,8 @@ describe("useSpeech.speakSequence — per-turn audioUrl", () => {
     synthesizeSpeech.mockResolvedValue({ configured: false }); // no signed-in server path either; just confirms the fallback path fires
     speakSequence([{ text: "hi", lang: "en", id: "t0", voiceName: "Kore", audioUrl: "https://cdn/broken.wav" }]);
     await Promise.resolve();
-    expect(audioInstances).toHaveLength(1);
-    audioInstances[0].onerror?.(); // simulate the recording failing to play
+    expect(mediaInstances()).toHaveLength(1);
+    mediaInstances()[0].onerror?.(); // simulate the recording failing to play
     await Promise.resolve();
     await Promise.resolve();
     // Fallback path attempted synthesis (server unavailable here since auth.currentUser
@@ -68,7 +75,7 @@ describe("useSpeech.speakSequence — per-turn audioUrl", () => {
     const { speakSequence, stop } = useSpeech();
     speakSequence([{ text: "hi", lang: "en", id: "t0" }]);
     await Promise.resolve();
-    expect(audioInstances).toHaveLength(0);
+    expect(mediaInstances()).toHaveLength(0);
     stop();
   });
 });

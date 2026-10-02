@@ -588,7 +588,7 @@ export function describeNoContent(result, kind = "") {
 // ─── Pure generator — produces content for an activity, no DB access ──────────
 // Reused by the syllabus worker (inline, at creation time) and the callable.
 // `geminiApiKey` + `storagePrefix` enable storybook image generation for stories.
-export async function generateContentForActivity({ activity, children = [], guardians = [], guidingLight = "", childPerformance = "", llm, genConfig, db = null, geminiApiKey = "", openaiApiKey = process.env.OPENAI_API_KEY || "", storagePrefix = "", planContext = "", guidance = "" }) {
+export async function generateContentForActivity({ activity, children = [], guardians = [], guidingLight = "", childPerformance = "", llm, genConfig, db = null, geminiApiKey = "", openaiApiKey = process.env.OPENAI_API_KEY || "", storagePrefix = "", planContext = "", guidance = "", uid = null }) {
   const kind = contentKindForType(activity.type);
   const familyId = storagePrefix || "";
 
@@ -701,7 +701,7 @@ export async function generateContentForActivity({ activity, children = [], guar
       apiKey: imageKey,
       model: imageModel,
       pathHint: `${storagePrefix || "shared"}/${slugify(activity.title)}`,
-      meter: familyId ? { db, familyId, activityId: activity.id, source: "activityContent" } : null,
+      meter: familyId ? { db, familyId, uid, activityId: activity.id, source: "activityContent" } : null,
     });
     if (image) captured.story.image = image;
   }
@@ -721,7 +721,7 @@ export async function generateContentForActivity({ activity, children = [], guar
       const base = `${storagePrefix || "shared"}/${slugify(activity.title)}`;
       const images = await generateObjectImages(
         targets.slice(0, 8).map((t, i) => ({ subject: t.imageSubject, pathHint: `${base}-pic${i + 1}` })),
-        { apiKey: imageKey, model: imageModel, meter: familyId ? { db, familyId, activityId: activity.id, source: "activityContent" } : null }
+        { apiKey: imageKey, model: imageModel, meter: familyId ? { db, familyId, uid, activityId: activity.id, source: "activityContent" } : null }
       );
       images.forEach((img, i) => { if (img) targets[i].image = img; });
     }
@@ -782,7 +782,7 @@ export async function runGenerateContent({ db, familyId, activityId, uid, llm, g
   const planContext = activity.subjectId ? buildPlanContextString(plans.get(activity.subjectId), activityId) : "";
 
   const { kind, content, reason, provider, model } = await generateContentForActivity({
-    activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db,
+    activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db, uid,
     geminiApiKey: process.env.GEMINI_API_KEY || "",
     storagePrefix: familyId,
     planContext,
@@ -843,7 +843,7 @@ export async function runBackfill({ db, familyId, uid, llm, genConfig, limit, sh
       const activity = { id: d.id, ...d.data() };
       const planContext = activity.subjectId ? buildPlanContextString(plans.get(activity.subjectId), activity.id) : "";
       const { content, reason, provider, model } = await generateContentForActivity({
-        activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db,
+        activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db, uid,
         geminiApiKey: process.env.GEMINI_API_KEY || "",
         storagePrefix: familyId,
         planContext,
@@ -864,6 +864,7 @@ export async function runBackfill({ db, familyId, uid, llm, genConfig, limit, sh
       }
     } catch (e) {
       // skip this activity; it will be retried on a later backfill pass (fill
+      if (["resource-exhausted", "permission-denied", "failed-precondition", "unavailable"].includes(e?.code)) throw e;
       // mode). In force mode, stamp it so the run moves past it and converges.
       if (force) { try { await d.ref.update({ contentRegenToken: tok }); advanced++; } catch { /* ignore */ } }
       console.warn(`[content] backfill skipped activity ${d.id} in ${familyId}: ${e?.message || e}`);
@@ -971,7 +972,7 @@ export const requestContentSample = onCall(
       try {
         const planContext = buildPlanContextString(plan, activity.id);
         const { kind, content, reason, provider, model } = await generateContentForActivity({
-          activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db,
+          activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db, uid,
           geminiApiKey: process.env.GEMINI_API_KEY || "",
           storagePrefix: familyId,
           planContext,
@@ -1035,7 +1036,7 @@ export const regenerateFailedContent = onCall(
       try {
         const planContext = activity.subjectId ? buildPlanContextString(plans.get(activity.subjectId), activity.id) : "";
         const { kind, content, reason, provider, model } = await generateContentForActivity({
-          activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db,
+          activity, children, guardians, guidingLight, childPerformance, llm, genConfig, db, uid,
           geminiApiKey: process.env.GEMINI_API_KEY || "",
           storagePrefix: familyId,
           planContext,
@@ -1217,8 +1218,10 @@ export async function runContentBackfillQueuePass({ db, limit = 2 } = {}) {
       processed += 1;
     } catch (e) {
       // Transient failure — re-queue so a later pass retries this family.
+      const paused = ["resource-exhausted", "permission-denied", "failed-precondition"].includes(e?.code);
+      await backfillMetaRef(db, familyId).set({ status: paused ? "error" : "running", error: String(e?.message || e).slice(0, 500), updatedAt: new Date() }, { merge: true });
       await q.ref.set({
-        status: "queued",
+        status: paused ? "error" : "queued",
         lastError: String(e?.message || e).slice(0, 500),
         updatedAt: new Date(),
       }, { merge: true });

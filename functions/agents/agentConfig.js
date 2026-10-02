@@ -12,6 +12,7 @@
 import { platformLlmConfig } from "../lib/paths.js";
 import { createGeminiClient, createOpenAiClient, createClaudeClient, DEFAULT_ANTHROPIC_MODEL } from "./llm.js";
 import { recordCostEvent } from "../lib/costMeter.js";
+import { consumePlanUsage } from "../lib/subscriptions.js";
 import { replacementForRetired, liveThinkingLevels } from "./modelCatalog.js";
 
 // Agents that can be configured independently. Keep in sync with the Platform UI.
@@ -217,11 +218,16 @@ export async function resolveLlm(db, agentKey, apiKeys, meterCtx = null) {
 
 // Wrap a Gemini client so each generate() records a text cost event after the
 // model returns. Metering errors are swallowed inside recordCostEvent.
-function withCostMetering(db, client, agentKey, model, meterCtx) {
+export function withCostMetering(db, client, agentKey, model, meterCtx) {
   return {
     model: client.model,
     async generate(args) {
-      const res = await client.generate(args);
+      const { plan } = await consumePlanUsage(db, meterCtx.familyId, "text", { uid: meterCtx.uid });
+      const config = { ...args.config,
+        maxOutputTokens: Math.min(Number(args.config?.maxOutputTokens) || 2048, plan.maxOutputTokens),
+        thinkingBudget: Math.min(Number(args.config?.thinkingBudget) || 0, plan.thinkingBudget),
+      };
+      const res = await client.generate({ ...args, config });
       if (res?.usage) {
         await recordCostEvent(db, {
           familyId: meterCtx.familyId,

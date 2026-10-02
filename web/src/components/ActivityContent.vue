@@ -756,8 +756,12 @@ function playSection(items) {
 .ayah-tools { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; }
 .ayah-num { display: inline-flex; align-items: center; justify-content: center; min-width: 1.5rem; height: 1.5rem; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 0.75rem; font-weight: 700; }
 .ayah-arabic { direction: rtl; text-align: right; line-height: 2.4; color: #0f172a; margin: 0.25rem 0; font-weight: 600; }
-.ayah-word { cursor: pointer; padding: 0 0.2rem; border-radius: 6px; transition: background 0.1s; }
+/* Tap-to-recite words: touch-action kills the double-tap-zoom delay on mobile,
+   user-select stops long-press selection, and :active gives tap feedback
+   (hover never applies on touch). */
+.ayah-word { cursor: pointer; padding: 0 0.2rem; border-radius: 6px; transition: background 0.1s; -webkit-user-select: none; user-select: none; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .ayah-word:hover { background: #bbf7d0; }
+.ayah-word:active { background: #86efac; }
 .ayah-translit { color: #15803d; font-style: italic; margin: 0.4rem 0 0.2rem; line-height: 1.6; }
 .ayah-translation { color: #475569; margin: 0.2rem 0 0; line-height: 1.6; }
 
@@ -769,7 +773,7 @@ function playSection(items) {
 /* Cell wraps the glyph button so the voice caret + picker can anchor to it (a button
    can't nest another button). */
 .glyph-cell { position: relative; display: inline-flex; }
-.glyph { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; min-width: 64px; max-width: 140px; padding: 0.6rem 0.8rem; border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; cursor: pointer; transition: background 0.12s, transform 0.08s; }
+.glyph { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; min-width: 64px; max-width: 140px; padding: 0.6rem 0.8rem; border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; cursor: pointer; transition: background 0.12s, transform 0.08s; touch-action: manipulation; }
 /* A glyph with a saved custom voice — violet accent, like SpeakButton.saved. */
 .glyph-saved { border-color: #c4b5fd; }
 .glyph-saved:hover { background: #f5f3ff; }
@@ -845,8 +849,10 @@ function playSection(items) {
 .para-tools { margin-bottom: 0.4rem; }
 .para-body { margin: 0; line-height: 2.1; color: #1e293b; }
 .sentence { margin-right: 0.3rem; }
-.word { display: inline-block; cursor: pointer; margin: 0 0.12rem; padding: 0 0.12rem; border-radius: 4px; transition: background 0.1s; }
+/* Tap-to-hear story words — same mobile-touch treatment as .ayah-word above. */
+.word { display: inline-block; cursor: pointer; margin: 0 0.12rem; padding: 0 0.12rem; border-radius: 4px; transition: background 0.1s; -webkit-user-select: none; user-select: none; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .word:hover { background: #dbeafe; }
+.word:active { background: #bfdbfe; }
 /* Per-paragraph translation for non-native (e.g. Arabic) reading passages. */
 .para-translation { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #cbd5e1; }
 .para-tr-en { margin: 0; color: #475569; line-height: 1.6; direction: ltr; text-align: left; }

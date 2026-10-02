@@ -8,7 +8,7 @@ import {
   assertFails,
   assertSucceeds,
 } from "@firebase/rules-unit-testing";
-import { setDoc, getDoc, doc, deleteDoc } from "firebase/firestore";
+import { setDoc, getDoc, doc, deleteDoc, updateDoc, Timestamp } from "firebase/firestore";
 
 // Run via:  firebase emulators:exec --only firestore "node --test tests/rules/*.test.js"
 // (the exec wrapper sets FIRESTORE_EMULATOR_HOST).
@@ -48,6 +48,7 @@ beforeEach(async () => {
     await setDoc(doc(db, "families", FAM_B), { name: "B", status: "active" });
     await setDoc(doc(db, "families", FAM_B, "members", "ownerB"), { role: "owner" });
     await setDoc(doc(db, "families", FAM_B, "children", "cb"), { name: "Other" });
+    for (const familyId of [FAM_A, FAM_B]) await setDoc(doc(db, "families", familyId, "billing", "subscription"), { planId: "basic", status: "active", startsAt: Timestamp.fromMillis(Date.now() - 60000), endsAt: Timestamp.fromMillis(Date.now() + 86400000) });
   });
 });
 
@@ -161,8 +162,34 @@ test("superadmin can read any family", async () => {
 
 test("user doc is private to its owner", async () => {
   const mine = db("me");
-  await assertSucceeds(setDoc(doc(mine, "users", "me"), { familyId: "x" }));
+  await testEnv.withSecurityRulesDisabled(async (ctx) => setDoc(doc(ctx.firestore(), "users", "me"), { familyId: "x", disabled: false }));
+  await assertSucceeds(getDoc(doc(mine, "users", "me")));
+  await assertFails(updateDoc(doc(mine, "users", "me"), { disabled: false, familyId: "famOther" }));
   await assertFails(getDoc(doc(mine, "users", "someoneElse")));
+});
+
+test("family cannot modify subscriptions, usage, suspension, or password session markers", async () => {
+  const owner = db("ownerA");
+  await assertFails(updateDoc(doc(owner, "families", FAM_A, "billing", "subscription"), { planId: "premium" }));
+  await assertFails(setDoc(doc(owner, "families", FAM_A, "planUsage", "period"), { text: 0 }));
+  await assertFails(updateDoc(doc(owner, "families", FAM_A), { status: "disabled" }));
+  await testEnv.withSecurityRulesDisabled(async (ctx) => setDoc(doc(ctx.firestore(), "users", "ownerA"), { disabled: true, sessionValidAfterSeconds: 9999999999 }));
+  await assertFails(updateDoc(doc(owner, "users", "ownerA"), { disabled: false, sessionValidAfterSeconds: 0 }));
+  await assertFails(getDoc(doc(owner, "families", FAM_A, "children", "c1")));
+});
+
+test("expired and pending subscriptions cannot read or write family content", async () => {
+  for (const patch of [{ endsAt: Timestamp.fromMillis(Date.now() - 1000) }, { status: "pending", endsAt: Timestamp.fromMillis(Date.now() + 86400000) }]) {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => updateDoc(doc(ctx.firestore(), "families", FAM_A, "billing", "subscription"), patch));
+    await assertFails(getDoc(doc(db("parentA"), "families", FAM_A, "children", "c1")));
+    await assertFails(setDoc(doc(db("parentA"), "families", FAM_A, "children", "new"), { name: "No" }));
+  }
+});
+
+test("password revocation denies old tokens and permits a fresh sign-in", async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => setDoc(doc(ctx.firestore(), "users", "parentA"), { sessionValidAfterSeconds: 2000 }));
+  await assertFails(getDoc(doc(db("parentA", { auth_time: 1999 }), "families", FAM_A, "children", "c1")));
+  await assertSucceeds(getDoc(doc(db("parentA", { auth_time: 2001 }), "families", FAM_A, "children", "c1")));
 });
 
 test("player token: unexpired is publicly readable, expired is denied (audit #6)", async () => {

@@ -6,7 +6,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useCurriculumStore } from "@/stores/curriculum";
 import { useActivityStore } from "@/stores/activities";
 import { useProfilesStore } from "@/stores/profiles";
-import { resumeSyllabus, startSyllabus, stopSyllabus, requestActivityTopUp } from "@/services/syllabus";
+import { resumeSyllabus, startSyllabus, stopSyllabus, requestActivityTopUp, ensureDefaultSubjects } from "@/services/syllabus";
 import { deleteSyllabus, auditActivityDifferentiation, differentiateActivities } from "@/services/admin";
 import { requestContentPlanning, requestContentSample, regenerateFailedContent, requestContentBackfill } from "@/services/activityContent";
 import { useActivityLink } from "@/composables/useActivityLink";
@@ -471,6 +471,10 @@ function toggleTopUpType(t) {
 const topUpCount = ref(4);
 const topUpRunId = ref(null);
 const topUpRunData = ref(null);
+// Which card started the active top-up run ("types" or "subjects") so the
+// progress panel renders next to the controls that launched it. "" covers
+// runs resumed on mount with no known origin.
+const topUpRunSource = ref("");
 let topUpUnsub = null;
 watch(topUpRunId, (id) => {
   if (topUpUnsub) { topUpUnsub(); topUpUnsub = null; }
@@ -500,6 +504,7 @@ async function generateMoreActivities() {
   if (!window.confirm(
     `Add ${n} new ${names} activit${n === 1 ? "y" : "ies"} per matching subject? This creates brand-new activities — it will not change any existing ones.`
   )) return;
+  topUpRunSource.value = "types";
   startingTopUp.value = true;
   topUpError.value = "";
   try {
@@ -527,6 +532,78 @@ async function stopTopUp() {
     stoppingTopUp.value = false;
   }
 }
+
+// Subject-scoped variant of the top-up above: pick whole subjects instead of
+// activity types. Shares the same run doc, progress and stop machinery — one
+// top-up at a time; topUpRunSource decides where the progress panel shows.
+const topUpSubjects = ref([]);
+function toggleTopUpSubject(id) {
+  const i = topUpSubjects.value.indexOf(id);
+  if (i === -1) topUpSubjects.value.push(id); else topUpSubjects.value.splice(i, 1);
+}
+const subjectTopUpCount = ref(4);
+// Optional per-run instructions for the by-subject top-up (card 6) — separate
+// from the global "Direction for the generator" (which only drives content
+// regeneration, not new-activity creation).
+const subjectTopUpGuidance = ref("");
+async function generateMoreActivitiesForSubjects() {
+  if (startingTopUp.value || !topUpSubjects.value.length || !activeCurriculum.value) return;
+  const n = Number(subjectTopUpCount.value) || 4;
+  const guidance = subjectTopUpGuidance.value.trim();
+  if (!window.confirm(
+    `Add ${n} new activit${n === 1 ? "y" : "ies"} to each selected subject? This creates brand-new activities — it will not change any existing ones.`
+  )) return;
+  topUpRunSource.value = "subjects";
+  startingTopUp.value = true;
+  topUpError.value = "";
+  try {
+    const res = await requestActivityTopUp({
+      curriculumId: activeCurriculum.value.id,
+      onlySubjects: [...topUpSubjects.value],
+      addCount: n,
+      guidance,
+    });
+    if (res?.configured === false) { topUpError.value = res.text || "The syllabus agent isn't configured."; return; }
+    topUpRunId.value = res.runId;
+  } catch (e) {
+    topUpError.value = e?.message || "Failed to start generation.";
+  } finally {
+    startingTopUp.value = false;
+  }
+}
+
+// All curriculum subjects (not just ones with activities) — the by-subject
+// top-up chips must list every subject by default, including freshly seeded
+// defaults that have no activities yet.
+const curriculumSubjects = ref([]);
+let subjectsUnsub = null;
+const activityCountBySubject = computed(() => {
+  const map = {};
+  for (const a of activityStore.activities) map[a.subjectId] = (map[a.subjectId] || 0) + 1;
+  return map;
+});
+watch(
+  () => [activeCurriculum.value?.id, auth.familyId],
+  ([currId, famId]) => {
+    if (subjectsUnsub) { subjectsUnsub(); subjectsUnsub = null; }
+    curriculumSubjects.value = [];
+    if (!currId || !famId) return;
+    // Idempotent seed of the default catalog (Geography, Social Studies,
+    // History, Politics). Fire-and-forget: the listener below picks the docs up
+    // as soon as they land.
+    ensureDefaultSubjects(currId).catch(() => {});
+    subjectsUnsub = onSnapshot(
+      collection(db, "families", famId, "curriculum", currId, "subjects"),
+      (snap) => {
+        curriculumSubjects.value = snap.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+      }
+    );
+  },
+  { immediate: true }
+);
+onUnmounted(() => { if (subjectsUnsub) subjectsUnsub(); });
 
 // Retry-failed: activities that were attempted and failed carry a contentError
 // (and have no content). The activities store already streams these fields.
@@ -984,7 +1061,7 @@ const statusGenerateLabel = computed(() => {
               <button v-if="topUpTypes.length" class="rt-clear" type="button" @click="topUpTypes = []">Clear</button>
             </div>
 
-            <div v-if="topUpRunData" class="progress-panel">
+            <div v-if="topUpRunData && topUpRunSource !== 'subjects'" class="progress-panel">
               <div class="progress-header">
                 <span class="progress-title">New-activity progress</span>
                 <span class="progress-status" :class="topUpRunData.status">{{ topUpRunData.status }}</span>
@@ -1015,7 +1092,7 @@ const statusGenerateLabel = computed(() => {
                 ✓ Done — {{ topUpRunData.totalActivities }} activities total across the matched subjects.
               </div>
             </div>
-            <p v-if="topUpError" class="error">{{ topUpError }}</p>
+            <p v-if="topUpError && topUpRunSource !== 'subjects'" class="error">{{ topUpError }}</p>
           </div>
         </details>
 
@@ -1029,44 +1106,66 @@ const statusGenerateLabel = computed(() => {
         >
           <summary>Content tools</summary>
           <div class="power-body plan-card">
-            <div class="plan-head">
-              <p class="plan-lede">
-                Plan how activities connect, preview a sample, then generate or regenerate content for your library.
-              </p>
-              <button v-if="canBuild" class="btn primary" :disabled="planRunning" @click="planContent">
-                {{ planRunning ? "Planning…" : (hasPlans ? "Re-plan content" : "Plan content") }}
-              </button>
-            </div>
+            <p class="plan-lede">
+              Plan how activities connect, preview a sample, then generate or regenerate content for your library.
+              Work through the numbered steps — the fields and buttons inside each card belong to that step only.
+            </p>
             <p v-if="planError" class="error">{{ planError }}</p>
-            <p v-if="hasPlans && !planRunning" class="plan-ready">✓ A plan exists for {{ planSubjectCount }} subject(s). New content will follow it.</p>
 
-            <div v-if="planRunning && planRunSubjects.length" class="plan-progress">
-              <div v-for="s in planRunSubjects" :key="s.id" class="subject-row" :class="statusClass(s.status)">
-                <span class="status-icon">{{ statusIcon(s.status) }}</span>
-                <span class="subject-name">{{ s.name }}</span>
-                <span v-if="s.status === 'done'" class="subject-count">{{ s.activityCount }} activities planned</span>
-                <span v-else-if="s.status === 'error'" class="subject-err">{{ s.error }}</span>
+            <!-- Step 1: plan the activity structure -->
+            <div class="tool-card">
+              <div class="tool-head">
+                <span class="tool-step">1</span>
+                <div class="tool-head-text">
+                  <h3 class="tool-title">Plan the content</h3>
+                  <p class="tool-desc">Maps which activities each subject needs and how they connect. Usually done once — re-plan only if you want to change the structure.</p>
+                </div>
+                <button v-if="canBuild" class="btn primary tool-btn" :disabled="planRunning" @click="planContent">
+                  {{ planRunning ? "Planning…" : (hasPlans ? "Re-plan content" : "Plan content") }}
+                </button>
+              </div>
+              <p v-if="hasPlans && !planRunning" class="plan-ready">✓ A plan exists for {{ planSubjectCount }} subject(s). New content will follow it.</p>
+              <div v-if="planRunning && planRunSubjects.length" class="plan-progress">
+                <div v-for="s in planRunSubjects" :key="s.id" class="subject-row" :class="statusClass(s.status)">
+                  <span class="status-icon">{{ statusIcon(s.status) }}</span>
+                  <span class="subject-name">{{ s.name }}</span>
+                  <span v-if="s.status === 'done'" class="subject-count">{{ s.activityCount }} activities planned</span>
+                  <span v-else-if="s.status === 'error'" class="subject-err">{{ s.error }}</span>
+                </div>
               </div>
             </div>
 
-            <div class="qa-block">
-              <div class="bulk-guidance">
-                <label for="bulk-guidance" class="bg-label">
-                  Direction for the generator <span class="bg-optional">(optional — applies to every generate &amp; regenerate action below)</span>
-                </label>
-                <textarea
-                  id="bulk-guidance"
-                  v-model="bulkGuidance"
-                  class="bg-input"
-                  :maxlength="GUIDANCE_MAX"
-                  rows="3"
-                  :disabled="!canBuild"
-                  placeholder="Tell the generator why you're regenerating and what to change — e.g. content was too advanced for the children; use simpler language; tie activities more closely to the guiding light; add more real-world examples."
-                ></textarea>
-                <span class="bg-count">{{ bulkGuidance.length }} / {{ GUIDANCE_MAX }}</span>
+            <!-- Step 2: optional guidance applied to every action below -->
+            <div class="tool-card guidance-card">
+              <div class="tool-head">
+                <span class="tool-step">2</span>
+                <div class="tool-head-text">
+                  <h3 class="tool-title">Direction for the generator <span class="bg-optional">(optional)</span></h3>
+                  <p class="tool-desc">Anything you write here is sent with every generate &amp; regenerate action in steps 3–5 below. Leave it empty for the default behaviour.</p>
+                </div>
               </div>
+              <textarea
+                id="bulk-guidance"
+                v-model="bulkGuidance"
+                class="bg-input"
+                aria-label="Direction for the generator (optional)"
+                :maxlength="GUIDANCE_MAX"
+                rows="3"
+                :disabled="!canBuild"
+                placeholder="Tell the generator why you're regenerating and what to change — e.g. content was too advanced for the children; use simpler language; tie activities more closely to the guiding light; add more real-world examples."
+              ></textarea>
+              <span class="bg-count">{{ bulkGuidance.length }} / {{ GUIDANCE_MAX }}</span>
+            </div>
 
-              <h3 class="qa-title">Quick quality check</h3>
+            <!-- Step 3: sample one subject before committing -->
+            <div class="tool-card">
+              <div class="tool-head">
+                <span class="tool-step">3</span>
+                <div class="tool-head-text">
+                  <h3 class="tool-title">Preview a sample</h3>
+                  <p class="tool-desc">Generates real content for the first few activities of one subject, so you can judge quality before a full run.</p>
+                </div>
+              </div>
               <div class="qa-row">
                 <select v-model="sampleSubjectId" class="qa-select" aria-label="Subject to sample">
                   <option value="">Pick a subject…</option>
@@ -1080,9 +1179,28 @@ const statusGenerateLabel = computed(() => {
                   {{ sampling ? "Generating…" : "Generate sample" }}
                 </button>
               </div>
-              <p class="qa-hint">Generates real content for the first few activities of one subject so you can judge quality before a full run.</p>
               <p v-if="sampleError" class="error">{{ sampleError }}</p>
+              <ul v-if="sampleItems.length" class="qa-items">
+                <li v-for="it in sampleItems" :key="it.id" class="qa-item">
+                  <div class="qa-item-head">
+                    <span class="qa-mark" :class="it.ok ? 'ok' : 'bad'">{{ it.ok ? "✓" : "✗" }}</span>
+                    <router-link :to="`/activity/${it.id}`">{{ it.title }}</router-link>
+                    <span v-if="it.kind" class="qa-kind">{{ it.kind }}</span>
+                  </div>
+                  <p v-if="!it.ok && it.error" class="qa-reason">{{ it.error }}</p>
+                </li>
+              </ul>
+            </div>
 
+            <!-- Step 4: fill or overwrite everything -->
+            <div class="tool-card">
+              <div class="tool-head">
+                <span class="tool-step">4</span>
+                <div class="tool-head-text">
+                  <h3 class="tool-title">Generate or regenerate everything</h3>
+                  <p class="tool-desc">“Generate all content” only fills activities that are missing content. “Regenerate all” overwrites every activity.</p>
+                </div>
+              </div>
               <div class="generate-all">
                 <span v-if="missingContentCount" class="ga-count">{{ missingContentCount }} activit{{ missingContentCount === 1 ? "y" : "ies" }} still need content.</span>
                 <span v-else class="ga-done">All activities have content ✓</span>
@@ -1098,61 +1216,151 @@ const statusGenerateLabel = computed(() => {
                   {{ regeneratingAll ? "Starting…" : "Regenerate all" }}
                 </button>
               </div>
-              <p class="ga-hint">“Generate all” only fills activities that are missing content. “Regenerate all” overwrites everything.</p>
-
-              <div v-if="regenTypes.length" class="regen-types">
-                <span class="rt-label">Or regenerate only certain activity types:</span>
-                <p class="rt-hint">Rewrites the content of activities that already exist — does not add new ones. (To add new activities instead, use "Generate more activities" in Syllabus tools above.)</p>
-                <div class="rt-chips">
-                  <button
-                    v-for="t in regenTypes"
-                    :key="t"
-                    type="button"
-                    class="rt-chip"
-                    :class="{ on: selectedTypes.includes(t) }"
-                    :aria-pressed="selectedTypes.includes(t)"
-                    :disabled="!canBuild"
-                    @click="toggleType(t)"
-                  >
-                    <span class="rt-ico">{{ TYPE_ICONS[t] || "📝" }}</span>
-                    {{ TYPE_LABELS[t] || t }}
-                    <span class="rt-count">{{ typeCounts[t] }}</span>
-                  </button>
-                </div>
-                <div class="rt-actions">
-                  <button
-                    class="btn secondary"
-                    :disabled="!selectedTypes.length || regeneratingTypes || startingFull || regeneratingAll || !canBuild"
-                    @click="regenerateSelectedTypes"
-                  >
-                    {{ regeneratingTypes ? "Starting…" : (selectedTypes.length ? `Regenerate selected (${selectedTypeCount})` : "Regenerate selected") }}
-                  </button>
-                  <button v-if="selectedTypes.length" class="rt-clear" type="button" @click="selectedTypes = []">Clear</button>
-                </div>
-              </div>
               <p v-if="fullStarted" class="ga-started">✓ Started — generation runs on the server; the progress card (bottom of the screen) tracks it. You can leave this page.</p>
               <p v-if="fullError" class="error">{{ fullError }}</p>
-              <ul v-if="sampleItems.length" class="qa-items">
-                <li v-for="it in sampleItems" :key="it.id" class="qa-item">
-                  <div class="qa-item-head">
-                    <span class="qa-mark" :class="it.ok ? 'ok' : 'bad'">{{ it.ok ? "✓" : "✗" }}</span>
-                    <router-link :to="`/activity/${it.id}`">{{ it.title }}</router-link>
-                    <span v-if="it.kind" class="qa-kind">{{ it.kind }}</span>
-                  </div>
-                  <p v-if="!it.ok && it.error" class="qa-reason">{{ it.error }}</p>
-                </li>
-              </ul>
             </div>
 
-            <div v-if="failedActivities.length || retryItems.length" class="qa-block retry-block">
-              <h3 class="qa-title">Failed activities</h3>
-              <div class="qa-row">
-                <span class="retry-count">{{ failedActivities.length }} activit{{ failedActivities.length === 1 ? "y" : "ies" }} failed to generate.</span>
-                <button class="btn secondary" :disabled="!failedActivities.length || retrying || !canBuild" @click="retryFailed">
+            <!-- Step 5: overwrite selected activity types only -->
+            <div v-if="regenTypes.length" class="tool-card">
+              <div class="tool-head">
+                <span class="tool-step">5</span>
+                <div class="tool-head-text">
+                  <h3 class="tool-title">Regenerate only certain activity types</h3>
+                  <p class="tool-desc">Rewrites the content of existing activities of the types you pick — it does not add new ones. (To add new activities instead, use “Generate more activities” above or step 6 below.)</p>
+                </div>
+              </div>
+              <div class="rt-chips">
+                <button
+                  v-for="t in regenTypes"
+                  :key="t"
+                  type="button"
+                  class="rt-chip"
+                  :class="{ on: selectedTypes.includes(t) }"
+                  :aria-pressed="selectedTypes.includes(t)"
+                  :disabled="!canBuild"
+                  @click="toggleType(t)"
+                >
+                  <span class="rt-ico">{{ TYPE_ICONS[t] || "📝" }}</span>
+                  {{ TYPE_LABELS[t] || t }}
+                  <span class="rt-count">{{ typeCounts[t] }}</span>
+                </button>
+              </div>
+              <div class="rt-actions">
+                <button
+                  class="btn secondary"
+                  :disabled="!selectedTypes.length || regeneratingTypes || startingFull || regeneratingAll || !canBuild"
+                  @click="regenerateSelectedTypes"
+                >
+                  {{ regeneratingTypes ? "Starting…" : (selectedTypes.length ? `Regenerate selected (${selectedTypeCount})` : "Regenerate selected") }}
+                </button>
+                <button v-if="selectedTypes.length" class="rt-clear" type="button" @click="selectedTypes = []">Clear</button>
+              </div>
+            </div>
+
+            <!-- Step 6: additive — brand-new activities for whole subjects.
+                 Blue chips mirror "Generate more activities" above so "add"
+                 reads differently from the green "rewrite" chips in step 5. -->
+            <div class="tool-card">
+              <div class="tool-head">
+                <span class="tool-step">6</span>
+                <div class="tool-head-text">
+                  <h3 class="tool-title">Generate more activities for selected subjects</h3>
+                  <p class="tool-desc">Adds brand-new activities to the subjects you pick — it never changes existing activities. Subjects marked “new” don’t have any activities yet; picking them creates their first ones. Each selected subject gets the number you choose below.</p>
+                </div>
+              </div>
+              <div class="rt-chips">
+                <button
+                  v-for="s in curriculumSubjects"
+                  :key="s.id"
+                  type="button"
+                  class="rt-chip topup-chip"
+                  :class="{ on: topUpSubjects.includes(s.id) }"
+                  :aria-pressed="topUpSubjects.includes(s.id)"
+                  :disabled="!canBuild"
+                  @click="toggleTopUpSubject(s.id)"
+                >
+                  {{ s.name }}
+                  <span class="rt-count">{{ activityCountBySubject[s.id] || "new" }}</span>
+                </button>
+              </div>
+              <div class="tu-guidance">
+                <label for="subject-topup-guidance" class="tu-guidance-label">
+                  Instructions for these activities <span class="bg-optional">(optional)</span>
+                </label>
+                <textarea
+                  id="subject-topup-guidance"
+                  v-model="subjectTopUpGuidance"
+                  class="bg-input"
+                  aria-label="Instructions for these activities (optional)"
+                  :maxlength="GUIDANCE_MAX"
+                  rows="3"
+                  :disabled="!canBuild"
+                  placeholder="Tell the generator what you want from these activities — e.g. focus on exam preparation; use real-world examples; keep sessions indoors; make them hands-on rather than worksheet-based. Leave empty for the default mix."
+                ></textarea>
+                <span class="bg-count">{{ subjectTopUpGuidance.length }} / {{ GUIDANCE_MAX }}</span>
+              </div>
+              <div class="rt-actions">
+                <label class="topup-count-label">
+                  Add
+                  <input type="number" v-model="subjectTopUpCount" min="1" max="12" class="qa-num" aria-label="How many new activities per subject" :disabled="!canBuild" />
+                  new activit{{ Number(subjectTopUpCount) === 1 ? "y" : "ies" }} per selected subject
+                </label>
+                <button
+                  class="btn primary"
+                  :disabled="!topUpSubjects.length || startingTopUp || topUpRunning || topUpQueued || !canBuild"
+                  @click="generateMoreActivitiesForSubjects"
+                >
+                  {{ startingTopUp ? "Starting…" : `Generate ${subjectTopUpCount || 4} new activities` }}
+                </button>
+                <button v-if="topUpSubjects.length" class="rt-clear" type="button" @click="topUpSubjects = []">Clear</button>
+              </div>
+              <p v-if="topUpError && topUpRunSource === 'subjects'" class="error">{{ topUpError }}</p>
+              <div v-if="topUpRunData && topUpRunSource === 'subjects'" class="progress-panel">
+                <div class="progress-header">
+                  <span class="progress-title">New-activity progress</span>
+                  <span class="progress-status" :class="topUpRunData.status">{{ topUpRunData.status }}</span>
+                  <button
+                    v-if="topUpRunning || topUpQueued"
+                    class="btn-stop"
+                    type="button"
+                    :disabled="stoppingTopUp"
+                    @click="stopTopUp"
+                  >{{ stoppingTopUp ? "Stopping…" : "Stop" }}</button>
+                </div>
+                <div class="subjects-progress">
+                  <div
+                    v-for="s in topUpSubjectProgress"
+                    :key="s.id"
+                    class="subject-row"
+                    :class="statusClass(s.status)"
+                  >
+                    <span class="status-icon">{{ statusIcon(s.status) }}</span>
+                    <span class="subject-name">{{ s.name }}</span>
+                    <span v-if="s.status === 'done'" class="subject-count">
+                      {{ s.activityCount }} / {{ s.targetActivityCount || "?" }} activities
+                    </span>
+                    <span v-if="s.status === 'error'" class="subject-err">{{ s.error }}</span>
+                  </div>
+                </div>
+                <div v-if="topUpDone" class="progress-done">
+                  ✓ Done — new activities added to every selected subject.
+                </div>
+              </div>
+            </div>
+
+            <!-- Recovery: retry activities whose generation failed -->
+            <div v-if="failedActivities.length || retryItems.length" class="tool-card">
+              <div class="tool-head">
+                <span class="tool-step warn">⚠</span>
+                <div class="tool-head-text">
+                  <h3 class="tool-title">Failed activities</h3>
+                  <p class="tool-desc">Retries up to 10 at a time, using the plan. Click again to continue through a larger backlog.</p>
+                </div>
+                <button class="btn secondary tool-btn" :disabled="!failedActivities.length || retrying || !canBuild" @click="retryFailed">
                   {{ retrying ? "Retrying…" : "Regenerate failed" }}
                 </button>
               </div>
-              <p class="qa-hint">Retries up to 10 at a time, using the plan. Click again to continue through a larger backlog.</p>
+              <p class="retry-count">{{ failedActivities.length }} activit{{ failedActivities.length === 1 ? "y" : "ies" }} failed to generate.</p>
               <p v-if="retryError" class="error">{{ retryError }}</p>
               <p v-if="retryRemaining !== null" class="retry-summary">
                 Regenerated {{ retryItems.filter((i) => i.ok).length }} of {{ retryItems.length }}.
@@ -1569,24 +1777,46 @@ const statusGenerateLabel = computed(() => {
 .plan-lede { color: #475569; font-size: 0.86rem; margin: 0; flex: 1; min-width: 200px; }
 .plan-ready { color: #15803d; font-size: 0.85rem; margin: 0 0 0.75rem; }
 .plan-progress { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 1rem; }
-.qa-block { border-top: 1px solid #eef2f7; padding-top: 0.85rem; }
+
+/* Content tools step cards: each feature gets its own bordered card so every
+   field and button visibly belongs to exactly one step */
+.tool-card {
+  background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+  padding: 0.85rem 1rem; margin-top: 0.75rem;
+}
+.tool-card.guidance-card { background: #f8fafc; border-style: dashed; }
+.tool-head { display: flex; align-items: flex-start; gap: 0.6rem; }
+.tool-step {
+  flex: 0 0 auto; width: 1.45rem; height: 1.45rem; border-radius: 999px;
+  background: #0b1f3a; color: #fff; font-size: 0.78rem; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center; margin-top: 0.05rem;
+}
+.tool-step.warn { background: #b45309; font-size: 0.85rem; }
+.tool-head-text { flex: 1; min-width: 0; }
+.tool-title { margin: 0; font-size: 0.92rem; color: #1e293b; }
+.tool-desc { margin: 0.2rem 0 0; font-size: 0.78rem; color: #64748b; line-height: 1.5; }
+.tool-btn { flex: 0 0 auto; }
+.tool-card .plan-ready { margin: 0.6rem 0 0; }
+.tool-card .generate-all { margin-top: 0.75rem; padding-top: 0; border-top: none; }
+.tool-card .retry-count { margin: 0.6rem 0 0; }
+.guidance-card .bg-input { margin-top: 0.6rem; }
+
+/* By-subject top-up: optional instructions box (card 6) */
+.tu-guidance { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.75rem; }
+.tu-guidance-label { font-size: 0.78rem; font-weight: 600; color: #334155; }
 .qa-title { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin: 0 0 0.5rem; }
 .qa-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .qa-select { padding: 0.4rem 0.6rem; border: 1px solid #cbd5e1; border-radius: 8px; font: inherit; min-width: 160px; }
 .qa-num-label { font-size: 0.82rem; color: #64748b; display: flex; align-items: center; gap: 0.35rem; }
 .qa-num { width: 3.2rem; padding: 0.4rem 0.5rem; border: 1px solid #cbd5e1; border-radius: 8px; font: inherit; }
-.qa-hint { font-size: 0.76rem; color: #94a3b8; margin: 0.4rem 0 0; }
 .qa-items { list-style: none; padding: 0; margin: 0.6rem 0 0; display: flex; flex-direction: column; gap: 0.3rem; }
 .qa-item { font-size: 0.88rem; }
 .qa-item-head { display: flex; align-items: center; gap: 0.5rem; }
 .qa-reason { margin: 0.15rem 0 0 1.4rem; font-size: 0.76rem; color: #b91c1c; background: #fef2f2; border-radius: 6px; padding: 0.25rem 0.5rem; }
 .qa-mark.ok { color: #15803d; } .qa-mark.bad { color: #b91c1c; }
 .qa-kind { font-size: 0.68rem; padding: 0.05rem 0.4rem; border-radius: 999px; background: #f1f5f9; color: #64748b; }
-.retry-block { margin-top: 0.5rem; }
 .retry-count { font-size: 0.85rem; color: #b45309; }
 .retry-summary { font-size: 0.82rem; color: #334155; margin: 0.5rem 0 0; }
-.bulk-guidance { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 1rem; padding-bottom: 0.85rem; border-bottom: 1px dashed #e2e8f0; }
-.bg-label { font-size: 0.82rem; font-weight: 600; color: #334155; }
 .bg-optional { font-weight: 400; color: #94a3b8; }
 .bg-input {
   width: 100%; box-sizing: border-box; resize: vertical; min-height: 3.2rem;
@@ -1596,16 +1826,14 @@ const statusGenerateLabel = computed(() => {
 .bg-input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.15); }
 .bg-input:disabled { background: #f1f5f9; color: #94a3b8; }
 .bg-count { align-self: flex-end; font-size: 0.72rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
+.guidance-card .bg-count { display: block; text-align: right; }
 .generate-all { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.9rem; padding-top: 0.85rem; border-top: 1px solid #eef2f7; }
 .ga-count { font-size: 0.85rem; color: #334155; }
 .diff-btns { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-left: auto; }
 .ga-done { font-size: 0.85rem; color: #15803d; }
 .ga-started { font-size: 0.82rem; color: #15803d; margin: 0.5rem 0 0; }
-.ga-hint { font-size: 0.78rem; color: #64748b; margin: 0.45rem 0 0; line-height: 1.5; }
 
 /* Regenerate by activity type (filtered overwrite) */
-.regen-types { margin-top: 0.85rem; padding-top: 0.8rem; border-top: 1px dashed #e2e8f0; }
-.rt-label { display: block; font-size: 0.82rem; color: #334155; margin-bottom: 0.5rem; }
 .rt-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .rt-chip { display: inline-flex; align-items: center; gap: 0.35rem; border: 1px solid #cbd5e1; background: #fff; color: #334155; border-radius: 999px; padding: 0.3rem 0.7rem; font-size: 0.82rem; cursor: pointer; transition: background 0.12s, border-color 0.12s; }
 .rt-chip:hover:not(:disabled) { background: #f1f5f9; }
@@ -1617,7 +1845,6 @@ const statusGenerateLabel = computed(() => {
 .rt-actions { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.6rem; }
 .rt-clear { border: none; background: none; color: #64748b; font-size: 0.8rem; cursor: pointer; text-decoration: underline; }
 .rt-clear:hover { color: #334155; }
-.rt-hint { font-size: 0.76rem; color: #94a3b8; margin: 0 0 0.6rem; line-height: 1.4; }
 
 /* Generate more activities (additive — blue accent distinguishes it from the
    green "regenerate" chips so the two lookalike actions read differently at a glance) */
