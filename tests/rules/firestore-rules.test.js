@@ -56,6 +56,12 @@ function db(uid, claims) {
   return testEnv.authenticatedContext(uid, claims).firestore();
 }
 
+test("email outbox and plan review records cannot be forged by clients", async () => {
+  await assertFails(setDoc(doc(db("parentA"), "mail/forged"), { to: ["attacker@example.com"], message: { text: "Spam" } }));
+  await assertFails(setDoc(doc(db("rootAdmin", { platformRole: "superadmin" }), "mail/forged"), { to: ["attacker@example.com"] }));
+  await assertFails(setDoc(doc(db("parentA"), "platformPlanRequests/forged"), { status: "approved", planId: "premium" }));
+});
+
 test("cross-tenant read is denied", async () => {
   const asB = db("ownerB");
   await assertFails(getDoc(doc(asB, "families", FAM_A, "children", "c1")));

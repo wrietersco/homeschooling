@@ -60,6 +60,8 @@ export const getSubscriptionAdmin = () => call("getSubscriptionAdmin")({});
 export const setPricingPlans = (plans) => call("setPricingPlans")({ plans });
 export const setFamilySubscription = (data) => call("setFamilySubscription")(data);
 export const getMySubscription = () => call("getMySubscription")({});
+export const requestPlanChange = (planId) => call("requestPlanChange")({ planId });
+export const reviewPlanRequest = (data) => call("reviewPlanRequest")(data);
 export const listPlatformUsers = (pageToken) => call("listPlatformUsers")({ pageToken });
 export const createPlatformUser = (data) => call("createPlatformUser")(data);
 export const updatePlatformUser = (data) => call("updatePlatformUser")(data);

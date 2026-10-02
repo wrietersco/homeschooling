@@ -3,7 +3,7 @@ import { mount, flushPromises } from "@vue/test-utils";
 import SubscriptionAdmin from "./SubscriptionAdmin.vue";
 import UserAccountsAdmin from "./UserAccountsAdmin.vue";
 import * as admin from "@/services/admin";
-vi.mock("@/services/admin", () => ({ getSubscriptionAdmin: vi.fn(), setPricingPlans: vi.fn(), setFamilySubscription: vi.fn(), listPlatformUsers: vi.fn(), listFamilies: vi.fn(), createPlatformUser: vi.fn(), updatePlatformUser: vi.fn(), setPlatformUserSuspended: vi.fn(), setPlatformUserPassword: vi.fn(), getPlatformPasswordResetLink: vi.fn(), setMemberRole: vi.fn() }));
+vi.mock("@/services/admin", () => ({ getSubscriptionAdmin: vi.fn(), setPricingPlans: vi.fn(), setFamilySubscription: vi.fn(), reviewPlanRequest: vi.fn(), listPlatformUsers: vi.fn(), listFamilies: vi.fn(), createPlatformUser: vi.fn(), updatePlatformUser: vi.fn(), setPlatformUserSuspended: vi.fn(), setPlatformUserPassword: vi.fn(), getPlatformPasswordResetLink: vi.fn(), setMemberRole: vi.fn() }));
 const plan = (name, price, days) => ({ name, price, durationDays: days, currency: "PKR", limits: { text: 25, image: 5, tts: 15, liveMinutes: 10 }, daily: { text: 25, image: 5, tts: 15, liveMinutes: 10 }, sessionMinutes: 5, maxOutputTokens: 8192, thinkingBudget: 512 });
 const click = async (wrapper, text) => { await wrapper.findAll("button").find((b) => b.text() === text).trigger("click"); await flushPromises(); };
 beforeEach(() => {
@@ -13,6 +13,17 @@ beforeEach(() => {
   admin.listFamilies.mockResolvedValue({ families: [{ id: "f", name: "Family" }] });
 });
 describe("manual subscriptions", () => {
+  it("requires payment confirmation before approval and retains failed reviews", async () => {
+    const base = await admin.getSubscriptionAdmin();
+    admin.getSubscriptionAdmin.mockResolvedValue({ ...base, requests: [{ id: "r", familyName: "Family", planName: "Premium", currency: "PKR", price: 15000, durationDays: 30, emailStatus: "QUEUED" }] });
+    admin.reviewPlanRequest.mockRejectedValue(new Error("Payment could not be confirmed"));
+    const w = mount(SubscriptionAdmin); await flushPromises(); await click(w, "Review request");
+    expect(w.findAll("button").find((b) => b.text() === "Approve and activate").element.disabled).toBe(true);
+    await w.find('input[type="checkbox"]').setValue(true); await click(w, "Approve and activate");
+    expect(admin.reviewPlanRequest).toHaveBeenCalledWith(expect.objectContaining({ requestId: "r", decision: "approve", paymentConfirmed: true }));
+    expect(w.find(".request-review").exists()).toBe(true);
+    expect(w.find('[role="alert"]').text()).toContain("could not be confirmed");
+  });
   it("saves editable prices and quotas while keeping an existing agreed subscription price", async () => {
     const w = mount(SubscriptionAdmin); await flushPromises();
     await w.findAll('input[type="number"]')[0].setValue("2000");

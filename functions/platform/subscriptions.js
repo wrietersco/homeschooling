@@ -3,6 +3,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { DEFAULT_PLANS, PLAN_IDS, plansRef, subscriptionRef, usageRef, validatePlans, subscriptionState, allowancePeriod } from "../lib/subscriptions.js";
 import { requirePlatformAdmin } from "./userAdmin.js";
 import { resolveCaller } from "../lib/caller.js";
+import { publicRequest } from "./planRequests.js";
 
 const plain = (sub) => sub ? { ...sub, startsAt: sub.startsAt?.toMillis?.() ?? sub.startsAt?.getTime?.() ?? sub.startsAt, endsAt: sub.endsAt?.toMillis?.() ?? sub.endsAt?.getTime?.() ?? sub.endsAt, updatedAt: sub.updatedAt?.toMillis?.() ?? null, effectiveStatus: subscriptionState(sub) } : { planId: "trial", status: "pending", effectiveStatus: "pending" };
 
@@ -16,7 +17,13 @@ export const getSubscriptionAdmin = onCall(async (request) => {
     const usage = await usageRef(db, d.id, allowancePeriod(sub.data())).get();
     return { familyId: d.id, name: d.data().name || d.id, subscription: plain(sub.exists ? sub.data() : null), usage: usage.data() || {} };
   }));
-  return { plans: { ...DEFAULT_PLANS, ...config.data()?.plans }, families: rows, month };
+  const requests = await db.collection("platformPlanRequests").where("status", "==", "pending").get();
+  const requestRows = await Promise.all(requests.docs.map(async (d) => {
+    const r = d.data(), mail = (await db.collection("mail").doc(d.id).get()).data();
+    return { ...publicRequest(r), familyId: r.familyId, familyName: r.familyName, requesterName: r.requesterName, requesterEmail: r.requesterEmail, emailStatus: mail?.delivery?.state || "QUEUED (sender setup required if this persists)" };
+  }));
+  requestRows.sort((a, b) => a.createdAt - b.createdAt);
+  return { plans: { ...DEFAULT_PLANS, ...config.data()?.plans }, families: rows, month, requests: requestRows };
 });
 
 export const setPricingPlans = onCall(async (request) => {
@@ -66,5 +73,6 @@ export const getMySubscription = onCall(async (request) => {
   const current = plain(sub.exists ? sub.data() : null);
   // Internal payment references and notes remain admin-only.
   const { notes, paymentReference, updatedBy, ...publicSub } = current;
-  return { plans: { ...DEFAULT_PLANS, ...config.data()?.plans }, subscription: publicSub, usage: usage.data() || {} };
+  const planRequest = (await db.collection("families").doc(familyId).collection("billing").doc("planRequest").get()).data();
+  return { plans: { ...DEFAULT_PLANS, ...config.data()?.plans }, subscription: publicSub, usage: usage.data() || {}, planRequest: publicRequest(planRequest) };
 });

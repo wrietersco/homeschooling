@@ -1,12 +1,13 @@
 <script setup>
 import { ref, onMounted } from "vue";
-import { getSubscriptionAdmin, setPricingPlans, setFamilySubscription } from "@/services/admin";
+import { getSubscriptionAdmin, setPricingPlans, setFamilySubscription, reviewPlanRequest } from "@/services/admin";
 const plans = ref({}), families = ref([]), busy = ref(false), error = ref(""), message = ref(""), selected = ref(null);
+const requests = ref([]), reviewing = ref(null), paymentConfirmed = ref(false), paymentReference = ref(""), rejectionReason = ref("");
 const labels = { text: "AI text calls", image: "New images", tts: "New speech clips", liveMinutes: "Live voice minutes" };
 const localDate = (ms) => { const d = new Date(ms); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 async function load() {
   busy.value = true; error.value = "";
-  try { const r = await getSubscriptionAdmin(); plans.value = structuredClone(r.plans); families.value = r.families; }
+  try { const r = await getSubscriptionAdmin(); plans.value = structuredClone(r.plans); families.value = r.families; requests.value = r.requests || []; }
   catch (e) { error.value = e.message; } finally { busy.value = false; }
 }
 async function savePlans() {
@@ -43,6 +44,12 @@ async function saveSubscription() {
   } catch (e) { error.value = e.message; } finally { busy.value = false; }
 }
 onMounted(load);
+function openReview(r) { reviewing.value = r; paymentConfirmed.value = false; paymentReference.value = ""; rejectionReason.value = ""; error.value = ""; }
+async function review(decision) {
+  busy.value = true; error.value = "";
+  try { await reviewPlanRequest({ requestId: reviewing.value.id, decision, paymentConfirmed: paymentConfirmed.value, paymentReference: paymentReference.value, reason: rejectionReason.value }); reviewing.value = null; await load(); message.value = decision === "approve" ? "Request approved. The family's new paid package is active." : "Request rejected. The existing subscription is unchanged."; }
+  catch (e) { error.value = e.message; } finally { busy.value = false; }
+}
 </script>
 
 <template>
@@ -51,6 +58,8 @@ onMounted(load);
     <p>Payments are collected outside the app. Assign a paid trial or subscription after agreeing payment with the family. There is no free tier.</p>
     <p class="muted">Allowances are shared by all members of a family. Each model call and retry counts; cached audio does not consume new speech allowance. Live sessions reserve their full allowed duration, even when ended early. Daily limits reset at midnight UTC; period limits reset when a renewal starts. Speech also depends on shared provider capacity, configured in Quotas; family weights do not override paid-plan allowances.</p>
     <p v-if="error" role="alert" class="error">{{ error }}</p><p v-if="message" role="status" class="success">{{ message }}</p>
+    <article class="card"><h3>Package requests ({{ requests.length }})</h3><p class="muted">Email notifications are queued for visitwritersco@gmail.com through Firebase Trigger Email. A queued email is not confirmation of delivery; the extension requires sender setup.</p><p v-if="!requests.length">No requests awaiting review.</p><div v-for="r in requests" :key="r.id" class="toolbar"><div><strong>{{ r.familyName }} → {{ r.planName }}</strong><p>{{ r.requesterName }} · {{ r.requesterEmail }}<br />{{ r.currency }} {{ r.price.toLocaleString() }} · {{ r.durationDays }} days · Email: {{ r.emailStatus }}</p></div><button class="btn" :disabled="busy" @click="openReview(r)">Review request</button></div></article>
+    <article v-if="reviewing" class="card request-review"><h3>Review {{ reviewing.familyName }} — {{ reviewing.planName }}</h3><p>{{ reviewing.currency }} {{ reviewing.price.toLocaleString() }} for {{ reviewing.durationDays }} days. Approval starts a new paid period now, replacing the current package and resetting its allowances. The price quoted when requested is preserved.</p><label><input v-model="paymentConfirmed" type="checkbox" /> I confirm the offline payment has been received.</label><label>Payment reference<input v-model="paymentReference" maxlength="200" /></label><label>Reason if rejecting<textarea v-model="rejectionReason" maxlength="500" /></label><div class="toolbar"><button class="btn primary" :disabled="busy || !paymentConfirmed" @click="review('approve')">Approve and activate</button><button class="btn" :disabled="busy" @click="review('reject')">Reject request</button><button class="btn" :disabled="busy" @click="reviewing = null">Close review</button></div></article>
     <form @submit.prevent="savePlans">
       <div class="plan-grid">
         <article v-for="(p, id) in plans" :key="id" class="card">

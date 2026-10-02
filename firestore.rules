@@ -89,6 +89,8 @@ service cloud.firestore {
       allow read: if isSuperAdmin();
       allow write: if false;
     }
+    match /platformPlanRequests/{requestId} { allow read: if isSuperAdmin(); allow write: if false; }
+    match /mail/{messageId} { allow read: if isSuperAdmin(); allow write: if false; }
 
     // Global skill registry (top-level collection): readable by any signed-in
     // user so families can pick from it. Writes are server-side only — when a

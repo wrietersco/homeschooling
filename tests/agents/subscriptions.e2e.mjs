@@ -11,6 +11,8 @@ import { createPlatformUser, updatePlatformUser, setPlatformUserSuspended, setPl
 import { setPricingPlans, setFamilySubscription } from "../../functions/platform/subscriptions.js";
 import { DEFAULT_PLANS, consumePlanUsage, subscriptionRef, allowancePeriod, usageRef } from "../../functions/lib/subscriptions.js";
 import { assertUserAccess } from "../../functions/lib/caller.js";
+import { requestPlanChange, reviewPlanRequest, ADMIN_EMAIL } from "../../functions/platform/planRequests.js";
+import { getMySubscription, getSubscriptionAdmin } from "../../functions/platform/subscriptions.js";
 
 const enabled = Boolean(process.env.FIRESTORE_EMULATOR_HOST && process.env.FIREBASE_AUTH_EMULATOR_HOST);
 let adminRequest;
@@ -58,4 +60,39 @@ test("manual subscriptions and account management through actual Auth/Firestore 
   assert.ok(users.some((u) => u.uid === uid && !u.disabled && u.familyId === familyId));
   const persisted = JSON.stringify({ user: (await db.collection("users").doc(uid).get()).data(), audit: (await db.collection("platformAudit").get()).docs.map((d) => d.data()) });
   assert.equal(persisted.includes(password), false); assert.equal(persisted.includes(changedPassword), false); assert.equal(persisted.includes(reset.link), false);
+});
+
+test("package requests require review, preserve quotes and atomically activate only after approval", { skip: !enabled }, async () => {
+  const db = getFirestore();
+  const admin = (data) => ({ ...adminRequest, data });
+  const user = (await createPlatformUser.run(admin({ email: `requester-${Date.now()}@example.test`, displayName: "Requesting parent", password: "Initial-pass-123", familyName: "Request family" }))).user;
+  const caller = (data) => ({ auth: { uid: user.uid, token: { email: user.email, auth_time: Math.ceil(Date.now() / 1000) + 10 } }, data });
+  await assert.rejects(requestPlanChange.run(caller({ planId: "free" })), { code: "invalid-argument" });
+  const results = await Promise.allSettled([requestPlanChange.run(caller({ planId: "premium", price: 1, familyId: "other", to: "attacker@example.test" })), requestPlanChange.run(caller({ planId: "basic" }))]);
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+  assert.equal(results.find((r) => r.status === "rejected").reason.code, "already-exists");
+  const pending = results.find((r) => r.status === "fulfilled").value.request;
+  assert.ok(pending.price >= 4500);
+  assert.equal((await getMySubscription.run(caller({}))).subscription.effectiveStatus, "pending");
+  const email = (await db.collection("mail").doc(pending.id).get()).data();
+  assert.deepEqual(email.to, [ADMIN_EMAIL]);
+  assert.equal(email.requestId, pending.id);
+  assert.ok(email.message.text.includes("/platform"));
+  const queue = (await getSubscriptionAdmin.run(admin({}))).requests;
+  assert.ok(queue.some((r) => r.id === pending.id && r.familyId === user.familyId));
+  await assert.rejects(reviewPlanRequest.run(caller({ requestId: pending.id, decision: "approve", paymentConfirmed: true })), { code: "permission-denied" });
+  await assert.rejects(reviewPlanRequest.run(admin({ requestId: pending.id, decision: "approve" })), { code: "failed-precondition" });
+  const plans = structuredClone(DEFAULT_PLANS); plans[pending.planId].price = 19000;
+  await setPricingPlans.run(admin({ plans }));
+  const approvals = await Promise.allSettled([1, 2].map(() => reviewPlanRequest.run(admin({ requestId: pending.id, decision: "approve", paymentConfirmed: true, paymentReference: "CASH-REQUEST" }))));
+  assert.equal(approvals.filter((r) => r.status === "fulfilled").length, 1);
+  assert.equal(approvals.find((r) => r.status === "rejected").reason.code, "failed-precondition");
+  const sub = (await subscriptionRef(db, user.familyId).get()).data();
+  assert.equal(sub.planId, pending.planId); assert.equal(sub.agreedPrice, pending.price); assert.equal(sub.paymentStatus, "paid");
+  assert.equal(sub.endsAt.toMillis() - sub.startsAt.toMillis(), pending.durationDays * 86400000);
+  await assert.rejects(requestPlanChange.run(caller({ planId: pending.planId })), { code: "failed-precondition" });
+  const rejected = await requestPlanChange.run(caller({ planId: pending.planId === "premium" ? "basic" : "premium" }));
+  await reviewPlanRequest.run(admin({ requestId: rejected.request.id, decision: "reject", reason: "Payment pending" }));
+  assert.equal((await subscriptionRef(db, user.familyId).get()).data().planId, sub.planId);
+  assert.equal((await getMySubscription.run(caller({}))).planRequest.rejectionReason, "Payment pending");
 });

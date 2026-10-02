@@ -77,6 +77,7 @@ export { rebuildKnowledgeBrief, getActivityJourney } from "./agents/knowledgeBri
 // Phase 8 — Super Admin callables.
 export { listFamilies, setFamilyStatus, listFamilyMembers, setMemberRole, removeMember, deleteFamily, getLlmConfig, setLlmConfig } from "./platform/admin.js";
 export { getSubscriptionAdmin, setPricingPlans, setFamilySubscription, getMySubscription } from "./platform/subscriptions.js";
+export { requestPlanChange, reviewPlanRequest } from "./platform/planRequests.js";
 export { listPlatformUsers, createPlatformUser, updatePlatformUser, setPlatformUserSuspended, setPlatformUserPassword, getPlatformPasswordResetLink } from "./platform/userAdmin.js";
 
 // Cost reporting (superadmin) — platform/per-family cost overview + deep event log.
