@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_PLANS, validatePlans, subscriptionState, consumePlanUsage, allowancePeriod } from "../lib/subscriptions.js";
+import { DEFAULT_PLANS, validatePlans, subscriptionState, consumePlanUsage, savePreparedActivity, resolvePlan, allowancePeriod } from "../lib/subscriptions.js";
 import { validateSubscription } from "../platform/subscriptions.js";
 import { validateAccount } from "../platform/userAdmin.js";
 import { withCostMetering } from "../agents/agentConfig.js";
@@ -97,4 +97,24 @@ test("text client checks quota before invoking provider and clamps retries to pl
   assert.equal(received.maxOutputTokens, 8192); assert.equal(received.thinkingBudget, 1024);
   db.store.set("families/f/billing/subscription", { ...sub, status: "suspended" });
   await assert.rejects(client.generate({}), { code: "failed-precondition" }); assert.equal(calls, 1);
+});
+
+test("successful activity saves and quota commit together under concurrent requests", async () => {
+  const current = new Date();
+  const sub = { ...active, startsAt: new Date(current.getTime()-60000), endsAt: new Date(current.getTime()+86400000) };
+  const plans = structuredClone(DEFAULT_PLANS); plans.basic.limits.activities = 2;
+  const db = database({ sub, config: { plans } });
+  const before = await consumePlanUsage(db, "f", "activities", { uid: "u", dryRun: true });
+  assert.equal(before.remaining, 2); assert.equal(db.store.has(`families/f/planUsage/${allowancePeriod(sub)}`), false);
+  await assert.rejects(savePreparedActivity(db, "f", db.collection("families").doc("f").collection("activities").doc("empty"), {}, "u"));
+  const results = await Promise.allSettled(Array.from({length: 8}, (_, i) => savePreparedActivity(db, "f", db.collection("families").doc("f").collection("activities").doc(`a${i}`), { content: { kind: "tips", tips: ["Read together"] } }, "u")));
+  assert.equal(results.filter(r => r.status === "fulfilled").length, 2);
+  assert.equal([...db.store.keys()].filter(k => k.startsWith("families/f/activities/")).length, 2);
+  assert.equal(db.store.get(`families/f/planUsage/${allowancePeriod(sub)}`).activities, 2);
+});
+
+test("older custom plans retain their prices and inherit the new activity allowance", () => {
+  const legacy = { plans: { basic: { price: 6000, limits: { text: 123 } } } };
+  const resolved = resolvePlan(legacy, { planId: "basic" });
+  assert.equal(resolved.price, 6000); assert.equal(resolved.limits.text, 123); assert.equal(resolved.limits.activities, 80);
 });

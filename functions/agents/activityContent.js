@@ -27,6 +27,7 @@ import { describeGuardian, summarizeChildPerformance } from "./grounding.js";
 import { enrichQuranContent } from "./quranSource.js";
 import { enrichQaidaContent } from "./qaidaLibrary.js";
 import { generateActivityImage, generateObjectImages, imageApiKeyFor } from "./imageGen.js";
+import { consumePlanUsage, savePreparedActivity } from "../lib/subscriptions.js";
 import { loadSubjectPlans, buildPlanContextString } from "./contentPlan.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
 
@@ -591,6 +592,10 @@ export function describeNoContent(result, kind = "") {
 export async function generateContentForActivity({ activity, children = [], guardians = [], guidingLight = "", childPerformance = "", llm, genConfig, db = null, geminiApiKey = "", openaiApiKey = process.env.OPENAI_API_KEY || "", storagePrefix = "", planContext = "", guidance = "", uid = null }) {
   const kind = contentKindForType(activity.type);
   const familyId = storagePrefix || "";
+  if (db && familyId) {
+    const allowance = await consumePlanUsage(db, familyId, "activities", { uid, dryRun: true });
+    if (!allowance.remaining || !allowance.dailyRemaining) throw new HttpsError("resource-exhausted", "Your prepared activity allowance is used. Saved activities remain available.");
+  }
 
   // Anti-repetition ledger (#3): read the family's recently-used passages so the
   // prompt can steer non-Qur'an activities away from the same few surahs/duas.
@@ -793,10 +798,10 @@ export async function runGenerateContent({ db, familyId, activityId, uid, llm, g
     throw new HttpsError("internal", reason || "The content generator did not return any content. Please try again.");
   }
 
-  await activityRef.update({
+  await savePreparedActivity(db, familyId, activityRef, {
     content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "",
     contentProvider: provider || "", contentModel: model || "",
-  });
+  }, uid);
   return { kind, content, provider, model };
 }
 
@@ -850,10 +855,10 @@ export async function runBackfill({ db, familyId, uid, llm, genConfig, limit, sh
         guidance,
       });
       if (content) {
-        await d.ref.update({
+        await savePreparedActivity(db, familyId, d.ref, {
           content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "",
           contentProvider: provider || "", contentModel: model || "", ...stamp,
-        });
+        }, uid);
         processed++;
         advanced++;
       } else {
@@ -979,10 +984,10 @@ export const requestContentSample = onCall(
           guidance,
         });
         if (content) {
-          await aRef.update({
+          await savePreparedActivity(db, familyId, aRef, {
             content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "",
             contentProvider: provider || "", contentModel: model || "",
-          });
+          }, uid);
         } else {
           // Persist the reason so it's visible on the activity, not just in the sample.
           await aRef.update({ contentError: reason || "No content produced." });
@@ -990,6 +995,7 @@ export const requestContentSample = onCall(
         }
         items.push({ id: activity.id, title: activity.title || "Activity", kind, ok: Boolean(content), error: content ? "" : (reason || "No content produced.") });
       } catch (e) {
+        if (["resource-exhausted", "permission-denied", "failed-precondition", "unavailable"].includes(e?.code)) throw e;
         const msg = String(e?.message || e).slice(0, 200);
         console.error(`[content] sample errored for ${activity.id}: ${msg}`);
         items.push({ id: activity.id, title: activity.title || "Activity", kind: "", ok: false, error: msg });
@@ -1043,16 +1049,17 @@ export const regenerateFailedContent = onCall(
           guidance,
         });
         if (content) {
-          await aRef.update({
+          await savePreparedActivity(db, familyId, aRef, {
             content, contentGeneratedAt: new Date(), contentBy: uid, contentError: "",
             contentProvider: provider || "", contentModel: model || "",
-          });
+          }, uid);
         } else {
           await aRef.update({ contentError: reason || "No content produced." });
           console.warn(`[content] retry still failed for ${activity.id} (${activity.type}): ${reason}`);
         }
         items.push({ id: activity.id, title: activity.title || "Activity", kind, ok: Boolean(content), error: content ? "" : (reason || "No content produced.") });
       } catch (e) {
+        if (["resource-exhausted", "permission-denied", "failed-precondition", "unavailable"].includes(e?.code)) throw e;
         const msg = String(e?.message || e).slice(0, 200);
         await aRef.update({ contentError: msg }).catch(() => {});
         items.push({ id: activity.id, title: activity.title || "Activity", kind: "", ok: false, error: msg });

@@ -1,9 +1,11 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
-import { DEFAULT_PLANS, PLAN_IDS, plansRef, subscriptionRef, usageRef, validatePlans, subscriptionState, allowancePeriod } from "../lib/subscriptions.js";
+import { DEFAULT_PLANS, PLAN_IDS, resolvePlan, plansRef, subscriptionRef, usageRef, validatePlans, subscriptionState, allowancePeriod } from "../lib/subscriptions.js";
 import { requirePlatformAdmin } from "./userAdmin.js";
 import { resolveCaller } from "../lib/caller.js";
 import { publicRequest } from "./planRequests.js";
+
+const publicPlans = (config) => Object.fromEntries(PLAN_IDS.map(id => { const { id: ignored, ...plan } = resolvePlan(config, { planId: id }); return [id, plan]; }));
 
 const plain = (sub) => sub ? { ...sub, startsAt: sub.startsAt?.toMillis?.() ?? sub.startsAt?.getTime?.() ?? sub.startsAt, endsAt: sub.endsAt?.toMillis?.() ?? sub.endsAt?.getTime?.() ?? sub.endsAt, updatedAt: sub.updatedAt?.toMillis?.() ?? null, effectiveStatus: subscriptionState(sub) } : { planId: "trial", status: "pending", effectiveStatus: "pending" };
 
@@ -23,7 +25,7 @@ export const getSubscriptionAdmin = onCall(async (request) => {
     return { ...publicRequest(r), familyId: r.familyId, familyName: r.familyName, requesterName: r.requesterName, requesterEmail: r.requesterEmail, emailStatus: mail?.delivery?.state || "QUEUED (sender setup required if this persists)" };
   }));
   requestRows.sort((a, b) => a.createdAt - b.createdAt);
-  return { plans: { ...DEFAULT_PLANS, ...config.data()?.plans }, families: rows, month, requests: requestRows };
+  return { plans: publicPlans(config.data()), families: rows, month, requests: requestRows };
 });
 
 export const setPricingPlans = onCall(async (request) => {
@@ -57,7 +59,7 @@ export const setFamilySubscription = onCall(async (request) => {
   if (!familyId || familyId.includes("/")) throw new HttpsError("invalid-argument", "Choose a family.");
   const [family, config] = await Promise.all([db.collection("families").doc(familyId).get(), plansRef(db).get()]);
   if (!family.exists) throw new HttpsError("not-found", "Family not found.");
-  const sub = validateSubscription(request.data, { ...DEFAULT_PLANS, ...config.data()?.plans });
+  const sub = validateSubscription(request.data, publicPlans(config.data()));
   const batch = db.batch();
   const update = { ...sub, updatedAt: new Date(), updatedBy: uid };
   batch.set(subscriptionRef(db, familyId), update);
@@ -74,5 +76,5 @@ export const getMySubscription = onCall(async (request) => {
   // Internal payment references and notes remain admin-only.
   const { notes, paymentReference, updatedBy, ...publicSub } = current;
   const planRequest = (await db.collection("families").doc(familyId).collection("billing").doc("planRequest").get()).data();
-  return { plans: { ...DEFAULT_PLANS, ...config.data()?.plans }, subscription: publicSub, usage: usage.data() || {}, planRequest: publicRequest(planRequest) };
+  return { plans: publicPlans(config.data()), subscription: publicSub, usage: usage.data() || {}, planRequest: publicRequest(planRequest) };
 });

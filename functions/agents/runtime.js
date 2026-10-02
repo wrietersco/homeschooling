@@ -51,6 +51,7 @@ export async function runAgent({
         try {
           result = tool ? await tool(fc.args || {}) : { error: `unknown tool "${fc.name}"` };
         } catch (e) {
+          if (["resource-exhausted", "permission-denied", "failed-precondition", "unavailable"].includes(e?.code)) throw e;
           result = { error: e.message };
         }
         const step = { step: steps.length + 1, tool: fc.name, args: fc.args || {}, result };

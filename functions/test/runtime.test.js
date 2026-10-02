@@ -120,3 +120,11 @@ test("runAgent stops at the step budget if the model never finalizes", async () 
   assert.equal(result.stoppedAt, "limit");
   assert.equal(result.steps.length, 3);
 });
+
+test("quota failures stop the agent rather than triggering further paid tool retries", async () => {
+  let calls = 0;
+  const llm = { generate: async () => { calls++; return { functionCalls: [{ name: "save", args: {} }] }; } };
+  const error = Object.assign(new Error("Activity allowance used"), { code: "resource-exhausted" });
+  await assert.rejects(runAgent({ llm, system: "test", userMessage: "prepare", toolDeclarations: [], tools: { save: async () => { throw error; } } }), { code: "resource-exhausted" });
+  assert.equal(calls, 1);
+});

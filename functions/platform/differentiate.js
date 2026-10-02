@@ -27,6 +27,7 @@ import { loadSubjectPlans, buildPlanContextString } from "../agents/contentPlan.
 import { generateContentForActivity } from "../agents/activityContent.js";
 import { classifyActivity } from "./activityAudit.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
+import { savePreparedActivity } from "../lib/subscriptions.js";
 
 const str = (v) => (typeof v === "string" ? v.trim() : "");
 
@@ -216,7 +217,7 @@ export async function runDifferentiation({ db, familyId, uid, types = [], limit 
       }
 
       if (Object.keys(byChild).length) {
-        await aRef.update({
+        await savePreparedActivity(db, familyId, aRef, {
           contentByChild: byChild,
           differentiatedLevels: usedLevels,
           differentiatedAt: new Date(),
@@ -224,7 +225,7 @@ export async function runDifferentiation({ db, familyId, uid, types = [], limit 
           differentiatedProvider,
           differentiatedModel,
           differentiationError: perChildErrors.join("; "),
-        });
+        }, uid);
         items.push({
           id: activity.id, title: activity.title || "Activity",
           ok: true, children: Object.keys(byChild).length, error: perChildErrors.join("; "),
@@ -234,6 +235,7 @@ export async function runDifferentiation({ db, familyId, uid, types = [], limit 
         items.push({ id: activity.id, title: activity.title || "Activity", ok: false, children: 0, error: perChildErrors.join("; ") || "No content produced." });
       }
     } catch (e) {
+      if (["resource-exhausted", "permission-denied", "failed-precondition", "unavailable"].includes(e?.code)) throw e;
       const msg = String(e?.message || e).slice(0, 200);
       await aRef.update({ differentiationError: msg }).catch(() => {});
       items.push({ id: activity.id, title: activity.title || "Activity", ok: false, children: 0, error: msg });

@@ -4,7 +4,7 @@ import SubscriptionAdmin from "./SubscriptionAdmin.vue";
 import UserAccountsAdmin from "./UserAccountsAdmin.vue";
 import * as admin from "@/services/admin";
 vi.mock("@/services/admin", () => ({ getSubscriptionAdmin: vi.fn(), setPricingPlans: vi.fn(), setFamilySubscription: vi.fn(), reviewPlanRequest: vi.fn(), listPlatformUsers: vi.fn(), listFamilies: vi.fn(), createPlatformUser: vi.fn(), updatePlatformUser: vi.fn(), setPlatformUserSuspended: vi.fn(), setPlatformUserPassword: vi.fn(), getPlatformPasswordResetLink: vi.fn(), setMemberRole: vi.fn() }));
-const plan = (name, price, days) => ({ name, price, durationDays: days, currency: "PKR", limits: { text: 25, image: 5, tts: 15, liveMinutes: 10 }, daily: { text: 25, image: 5, tts: 15, liveMinutes: 10 }, sessionMinutes: 5, maxOutputTokens: 8192, thinkingBudget: 512 });
+const plan = (name, price, days) => ({ name, price, durationDays: days, currency: "PKR", limits: { activities: 10, text: 25, image: 5, tts: 15, liveMinutes: 10 }, daily: { activities: 10, text: 25, image: 5, tts: 15, liveMinutes: 10 }, sessionMinutes: 5, maxOutputTokens: 8192, thinkingBudget: 512 });
 const click = async (wrapper, text) => { await wrapper.findAll("button").find((b) => b.text() === text).trigger("click"); await flushPromises(); };
 beforeEach(() => {
   vi.resetAllMocks();
@@ -27,8 +27,10 @@ describe("manual subscriptions", () => {
   it("saves editable prices and quotas while keeping an existing agreed subscription price", async () => {
     const w = mount(SubscriptionAdmin); await flushPromises();
     await w.findAll('input[type="number"]')[0].setValue("2000");
+    await w.find('input[aria-label="Trial Prepared learning activities period limit"]').setValue("12");
     await w.find("form").trigger("submit"); await flushPromises();
     expect(admin.setPricingPlans.mock.calls[0][0].trial.price).toBe(2000);
+    expect(admin.setPricingPlans.mock.calls[0][0].trial.limits.activities).toBe(12);
     await click(w, "Manage");
     expect(w.find(".editor input[type=number]").element.value).toBe("4500");
     expect(w.text()).toContain("7 / 25");

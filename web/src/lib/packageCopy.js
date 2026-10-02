@@ -1,19 +1,20 @@
-// These are descriptions of the existing meters, not promises of lesson counts.
+// One successful saved activity is the parent-facing package unit.
 export const learningAllowances = {
-  text: { label: "Learning preparation credits", description: "Used to plan curricula, prepare activities and learning materials, organize schedules, and answer questions in Guide. One task can use several credits." },
-  image: { label: "Activity illustrations", description: "Preparation of new pictures for stories and learning activities. Requests count toward this allowance, including attempts that need to be retried." },
-  tts: { label: "Read-aloud recordings", description: "Preparation of new audio to read words, stories, and activity instructions aloud. Preparation requests count toward this allowance; replaying saved audio does not." },
-  liveMinutes: { label: "Explore conversation minutes", description: "Time for your child to talk with the interactive Explore learning companion. These are not live teacher sessions." },
+  activities: { label: "Prepared learning activities", description: "One new or refreshed activity with ready-to-use learning content. Includes parent guidance and age-appropriate exercises, stories, reading or practice. Illustrations are included where relevant. Saved activities can be reused without another activity charge." },
+  text: { label: "Preparation requests", description: "Supporting limit for curriculum planning, activity preparation, scheduling and Guide. Each model call or retry counts; these are not additional activities." },
+  image: { label: "Illustration requests", description: "Supporting limit for new activity pictures, including generation retries. Not every activity needs a picture." },
+  tts: { label: "Read-aloud recordings", description: "New audio for learning materials. Requests count; replaying saved audio does not." },
+  liveMinutes: { label: "Learning companion minutes", description: "Optional Explore conversations with the interactive companion. These are not teacher-led classes. Starting a session reserves its allowed minutes." },
 };
 export const learningFeatures = [
-  { title: "A curriculum for your child", description: "Plan learning around your child's age, interests, and developing skills." },
-  { title: "Activities that bring learning to life", description: "Prepare reading, language, maths, and other activities from your curriculum." },
-  { title: "A routine your family can follow", description: "Organize activities in the planner and record your child's progress." },
-  { title: "Support along the way", description: "Ask Guide for help, listen to learning materials, and explore through conversation." },
+  { title: "Learning planned for your child", description: "Build a curriculum around age, interests and developing skills, across the subjects you choose." },
+  { title: "Activities ready to use", description: "Reading, stories, maths problems, language practice and more, with learning content and clear parent guidance." },
+  { title: "A practical family routine", description: "Put activities in your planner, record progress and return to saved activities for more practice." },
+  { title: "Help teaching at home", description: "Worked examples and learning guidance help you lead each activity. Ask Guide when you need support." },
 ];
 export const packageDescriptions = {
-  trial: { eyebrow: "Try your learning routine", description: "Get a feel for your child's learning journey before choosing a longer package." },
-  basic: { eyebrow: "Build a steady routine", description: "Plan and prepare learning for your family, with read-aloud support and Explore conversations." },
-  premium: { eyebrow: "More room to learn", description: "The same learning tools with larger allowances for preparing materials, illustrations, audio, and Explore conversations." },
+  trial: { eyebrow: "A first day of learning", description: "Try a small collection of prepared activities and see how learning at home works for your child." },
+  basic: { eyebrow: "Your monthly learning routine", description: "Build a balanced collection of activities across your child's subjects, ready for regular learning at home." },
+  premium: { eyebrow: "A larger learning collection", description: "Prepare more activities for wider subject coverage, extra practice or learning together as a family." },
 };
 export const packageStates = { pending: "Not activated", active: "Ready to learn", scheduled: "Starts soon", expired: "Ready for renewal", suspended: "Access paused", cancelled: "Cancelled", invalid: "Contact the administrator" };

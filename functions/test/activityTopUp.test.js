@@ -363,7 +363,7 @@ function makeWorkerDb({ subject, children = [], existingActivities = [] }) {
       where(field, _op, value) {
         return { async get() { return snapFromArray(existingActivities.filter((a) => a[field] === value), "existing"); } };
       },
-      async add(doc) { created.push(doc); return { id: `new${created.length}` }; },
+      doc() { const id = `new${created.length + 1}`; return { id, path: `families/fam1/activities/${id}`, async set(doc) { created.push(doc); } }; },
     },
     curriculum: { doc: () => ({ collection: () => ({ doc: () => ({ async get() { return { exists: true, data: () => subject }; } }) }) }) },
   };
@@ -466,4 +466,12 @@ test("runSyllabusWorker omits the guidance block when no guidance is given", asy
 
   assert.ok(captured, "worker LLM was never called");
   assert.equal(captured.system.includes("PARENT'S INSTRUCTIONS FOR THIS BATCH"), false);
+});
+
+test("package budget spreads ready activities across subjects without exceeding targets", async () => {
+  const { allocateActivityBudget } = await import("../agents/syllabus.js");
+  const subjects = { maths: { targetActivityCount: 48 }, reading: { targetActivityCount: 48 }, dormant: { targetActivityCount: 48, matched: false } };
+  assert.deepEqual(allocateActivityBudget(subjects, {}, 10), { maths: 5, reading: 5, dormant: 0 });
+  assert.deepEqual(allocateActivityBudget(subjects, { maths: 47 }, 10), { maths: 1, reading: 9, dormant: 0 });
+  assert.deepEqual(allocateActivityBudget(subjects, { maths: 48, reading: 48 }, 80), { maths: 0, reading: 0, dormant: 0 });
 });

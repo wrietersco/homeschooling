@@ -9,7 +9,7 @@ const { getAuth } = require("firebase-admin/auth");
 const { getFirestore } = require("firebase-admin/firestore");
 import { createPlatformUser, updatePlatformUser, setPlatformUserSuspended, setPlatformUserPassword, getPlatformPasswordResetLink, listPlatformUsers } from "../../functions/platform/userAdmin.js";
 import { setPricingPlans, setFamilySubscription } from "../../functions/platform/subscriptions.js";
-import { DEFAULT_PLANS, consumePlanUsage, subscriptionRef, allowancePeriod, usageRef } from "../../functions/lib/subscriptions.js";
+import { DEFAULT_PLANS, savePreparedActivity, consumePlanUsage, subscriptionRef, allowancePeriod, usageRef } from "../../functions/lib/subscriptions.js";
 import { assertUserAccess } from "../../functions/lib/caller.js";
 import { requestPlanChange, reviewPlanRequest, ADMIN_EMAIL } from "../../functions/platform/planRequests.js";
 import { getMySubscription, getSubscriptionAdmin } from "../../functions/platform/subscriptions.js";
@@ -95,4 +95,20 @@ test("package requests require review, preserve quotes and atomically activate o
   await reviewPlanRequest.run(admin({ requestId: rejected.request.id, decision: "reject", reason: "Payment pending" }));
   assert.equal((await subscriptionRef(db, user.familyId).get()).data().planId, sub.planId);
   assert.equal((await getMySubscription.run(caller({}))).planRequest.rejectionReason, "Payment pending");
+});
+
+test("ready activity quota atomically persists only allowed content in Firestore", { skip: !enabled }, async () => {
+  const db = getFirestore(), request = (data) => ({ ...adminRequest, data });
+  const { user } = await createPlatformUser.run(request({ email: `activities-${Date.now()}@example.test`, displayName: "Activity parent", password: "Activity-pass-123", familyName: "Activity quota family" }));
+  const plans = structuredClone(DEFAULT_PLANS); plans.basic.limits.activities = 2;
+  await setPricingPlans.run(request({ plans }));
+  const start = Date.now() - 60000;
+  await setFamilySubscription.run(request({ familyId: user.familyId, planId: "basic", status: "active", startsAt: start, endsAt: start + 86400000 }));
+  const collection = db.collection("families").doc(user.familyId).collection("activities");
+  await assert.rejects(savePreparedActivity(db, user.familyId, collection.doc("empty"), {}, user.uid));
+  const results = await Promise.allSettled(Array.from({length: 4}, (_, i) => savePreparedActivity(db, user.familyId, collection.doc(`a${i}`), { title: "Read together", content: { kind: "tips", tips: ["Read a story"] } }, user.uid)));
+  assert.equal(results.filter(r => r.status === "fulfilled").length, 2);
+  assert.equal((await collection.get()).size, 2);
+  const subscription = (await subscriptionRef(db, user.familyId).get()).data();
+  assert.equal((await usageRef(db, user.familyId, allowancePeriod(subscription)).get()).data().activities, 2);
 });

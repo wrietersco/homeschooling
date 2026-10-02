@@ -18,6 +18,7 @@ import { resolveLlm, secretNameForProvider } from "./agentConfig.js";
 import { loadPlatformInstructions, describeGuardian, summarizeChildPerformance } from "./grounding.js";
 import { generateContentForActivity, clampGuidance } from "./activityContent.js";
 import { regenerateBriefSafe } from "./knowledgeBrief.js";
+import { consumePlanUsage, savePreparedActivity } from "../lib/subscriptions.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
 
 // The three text-provider API keys, read fresh each call so a resolveLlm() can
@@ -358,11 +359,12 @@ export async function runSyllabusWorker({
       // complete. Uses the dedicated 'content' agent runtime; when none is wired
       // (e.g. unit tests inject only a syllabus fake), creation proceeds without
       // inline content and it can be backfilled later. A content failure must
-      // never block activity creation.
+      // leave a draft for later backfill; subscription/quota failures stop work.
+      const ref = activitiesRef.doc();
       if (contentLlm) {
         try {
           const { kind, content, provider, model } = await generateContentForActivity({
-            activity: activityDoc, children, guardians, guidingLight, childPerformance, uid,
+            activity: { id: ref.id, ...activityDoc }, children, guardians, guidingLight, childPerformance, uid,
             llm: contentLlm,
             genConfig: contentGenConfig,
             db,
@@ -379,11 +381,13 @@ export async function runSyllabusWorker({
             activityDoc.contentKind = kind; // record intended kind even if generation came back empty
           }
         } catch (e) {
+          if (["resource-exhausted", "permission-denied", "failed-precondition", "unavailable"].includes(e?.code)) throw e;
           activityDoc.contentError = String(e?.message || e).slice(0, 300);
         }
       }
 
-      const ref = await activitiesRef.add(activityDoc);
+      if (activityDoc.content) await savePreparedActivity(db, familyId, ref, activityDoc, uid);
+      else await ref.set(activityDoc);
       activitiesCreated.push({ id: ref.id, title, complexityRank: Number(complexityRank) || 1 });
       return { id: ref.id, created: true, contentProvisioned: Boolean(activityDoc.content) };
     },
@@ -428,6 +432,21 @@ export async function runSyllabusWorker({
   };
 }
 
+export function allocateActivityBudget(subjects, existing, budget) {
+  const allocations = Object.fromEntries(Object.keys(subjects).map(id => [id, 0]));
+  let remaining = Math.max(0, Math.floor(budget));
+  while (remaining > 0) {
+    let changed = false;
+    for (const [id, s] of Object.entries(subjects)) {
+      if (s.matched === false || (existing[id] || 0) + allocations[id] >= s.targetActivityCount) continue;
+      allocations[id]++; remaining--; changed = true;
+      if (!remaining) break;
+    }
+    if (!changed) break;
+  }
+  return allocations;
+}
+
 // ─── Master runner (exported for integration tests) ───────────────────────────
 export async function startSyllabusRun({
   db,
@@ -437,6 +456,7 @@ export async function startSyllabusRun({
   role = "owner",
   targetActivitiesPerSubject = DEFAULT_ACTIVITIES_PER_SUBJECT,
   batchActivities = DEFAULT_BATCH_ACTIVITIES,
+  activityBudget = Infinity,
 }) {
   // Make sure the default subject catalog exists (idempotent) so the parent
   // always sees — and can top-up — Geography/Social Studies/History/Politics.
@@ -478,6 +498,15 @@ export async function startSyllabusRun({
     };
   }
 
+  if (Number.isFinite(activityBudget)) {
+    const allocations = allocateActivityBudget(subjectsMap, countsBySubject, activityBudget);
+    for (const [id, n] of Object.entries(allocations)) {
+      const subject = subjectsMap[id];
+      subject.activityCount = countsBySubject[id] || 0;
+      subject.targetActivityCount = subject.activityCount + n;
+      if (!n) subject.status = "done";
+    }
+  }
   // Create the agent-run progress doc.
   const activeCount = subjectsSnap.size - dormantCount;
   const runRef = db.collection("families").doc(familyId).collection("agentRuns").doc();
@@ -493,7 +522,7 @@ export async function startSyllabusRun({
     totalActivities: 0,
     targetActivitiesPerSubject,
     batchActivities,
-    targetTotalActivities: activeCount * targetActivitiesPerSubject,
+    targetTotalActivities: Object.values(subjectsMap).filter(s => s.matched !== false).reduce((sum, s) => sum + s.targetActivityCount, 0),
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -521,7 +550,7 @@ export async function startSyllabusRun({
 // addCount" so the existing gap-based logic in runSyllabusWorker creates
 // exactly addCount new activities, then stops.
 export async function startActivityTopUp({
-  db, familyId, curriculumId, uid, role = "owner", onlyTypes, onlySubjects, addCount, guidance: rawGuidance,
+  db, familyId, curriculumId, uid, role = "owner", onlyTypes, onlySubjects, addCount, guidance: rawGuidance, activityBudget = Infinity,
 }) {
   const types = Array.isArray(onlyTypes) ? onlyTypes.filter((t) => ACTIVITY_TYPES.includes(t)) : [];
   const subjectFilter = Array.isArray(onlySubjects)
@@ -586,6 +615,7 @@ export async function startActivityTopUp({
     );
   }
 
+  if (matchingSubjects * count > activityBudget) throw new HttpsError("resource-exhausted", `This request needs ${matchingSubjects * count} activities; ${activityBudget} remain available today. Choose fewer activities or subjects.`);
   const runRef = db.collection("families").doc(familyId).collection("agentRuns").doc();
   await runRef.set({
     type: "syllabus",
@@ -924,7 +954,10 @@ export const generateSyllabus = onCall(
       // Only count when STARTING a new build (polling via runId is free). (audit #12)
       await enforceDailyLimit(db, familyId, "syllabus");
       const targetActivitiesPerSubject = Math.min(120, Math.max(4, Number(request.data?.targetActivitiesPerSubject) || DEFAULT_ACTIVITIES_PER_SUBJECT));
-      const started = await startSyllabusRun({ db, familyId, curriculumId, uid, role, targetActivitiesPerSubject });
+      const allowance = await consumePlanUsage(db, familyId, "activities", { uid, dryRun: true });
+      const activityBudget = Math.min(allowance.remaining, allowance.dailyRemaining);
+      if (!activityBudget) throw new HttpsError("resource-exhausted", "Your prepared activity allowance is used. Saved activities remain available.");
+      const started = await startSyllabusRun({ db, familyId, curriculumId, uid, role, targetActivitiesPerSubject, activityBudget });
       return { configured: true, ...started };
     }
 
@@ -973,7 +1006,8 @@ export const requestActivityTopUp = onCall(
       const onlySubjects = Array.isArray(request.data?.onlySubjects) ? request.data.onlySubjects.map((s) => String(s || "").trim()) : [];
       const addCount = Math.min(12, Math.max(1, Number(request.data?.addCount) || DEFAULT_BATCH_ACTIVITIES));
       const guidance = clampGuidance(request.data?.guidance);
-      const started = await startActivityTopUp({ db, familyId, curriculumId, uid, role, onlyTypes, onlySubjects, addCount, guidance });
+      const allowance = await consumePlanUsage(db, familyId, "activities", { uid, dryRun: true });
+      const started = await startActivityTopUp({ db, familyId, curriculumId, uid, role, onlyTypes, onlySubjects, addCount, guidance, activityBudget: Math.min(allowance.remaining, allowance.dailyRemaining) });
       return { configured: true, ...started };
     }
 
