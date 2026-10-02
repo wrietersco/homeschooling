@@ -63,7 +63,7 @@ onBeforeUnmount(() => {
           <span class="material-symbols-rounded">family_restroom</span>
           <span class="lbl">Profile</span>
         </RouterLink>
-        <RouterLink to="/subscription" class="nav-link c-lavender"><span class="material-symbols-rounded">card_membership</span><span class="lbl">Subscription</span></RouterLink>
+        <RouterLink to="/subscription" class="nav-link c-lavender"><span class="material-symbols-rounded">card_membership</span><span class="lbl">Learning package</span></RouterLink>
         <RouterLink to="/guardians" class="nav-link c-peach">
           <span class="material-symbols-rounded">supervisor_account</span>
           <span class="lbl">Guardians</span>
