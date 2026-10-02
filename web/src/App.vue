@@ -1,13 +1,14 @@
 <script setup>
-import { RouterView } from "vue-router";
+import { RouterView, useRoute } from "vue-router";
 import AppNav from "@/components/AppNav.vue";
 import ContentBackfill from "@/components/ContentBackfill.vue";
+const route = useRoute();
 </script>
 
 <template>
   <div class="app-shell">
     <AppNav />
-    <main class="app-main">
+    <main class="app-main" :class="{ 'app-main-wide': route.path === '/platform' }">
       <RouterView />
     </main>
     <ContentBackfill />
@@ -27,4 +28,7 @@ import ContentBackfill from "@/components/ContentBackfill.vue";
   margin: 0 auto;
   padding: 1.5rem 1.25rem 3rem;
 }
+</style>
+<style scoped>
+.app-main-wide { max-width: none; padding: 0; background: #f5f6fa; }
 </style>

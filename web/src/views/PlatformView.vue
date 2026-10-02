@@ -16,12 +16,27 @@ import {
 
 // ── Tabs ─────────────────────────────────────────────────────────────────────
 const tab = ref("families");
+const navGroups = [
+  { label: "People & access", items: [{ id: "families", label: "Families", icon: "family", description: "A clear view of every family, their members, and account access." }, { id: "subscriptions", label: "Plans & subscriptions", icon: "card", description: "Review package requests, manage subscriptions, and set your prices." }, { id: "users", label: "User accounts", icon: "user", description: "Manage accounts, passwords, and individual access." }] },
+  { label: "Insights & controls", items: [{ id: "usage", label: "Usage & health", icon: "chart", description: "Understand activity, usage trends, and service health." }, { id: "costs", label: "Cost reports", icon: "wallet", description: "Track your platform spending and costs by family." }, { id: "quota", label: "Provider capacity", icon: "sliders", description: "Set shared provider capacity and platform reserves." }] },
+  { label: "AI & learning", items: [{ id: "llm", label: "AI configuration", icon: "spark", description: "Configure the models and instructions powering each learning agent." }, { id: "live", label: "Models & pricing", icon: "grid", description: "Compare available models, capabilities, and provider prices." }, { id: "quran", label: "Quran library", icon: "book", description: "Import and maintain your shared Quran resources." }, { id: "qaida", label: "Qaida library", icon: "book", description: "Manage lessons and shared audio for Noorani Qaida." }] },
+];
+const currentSection = computed(() => navGroups.flatMap((g) => g.items).find((i) => i.id === tab.value));
+const iconPaths = { family: "M3 20v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6M17 5a3 3 0 0 1 0 6m1 3a4 4 0 0 1 3 4v2", user: "M20 21v-2a7 7 0 0 0-14 0v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8", card: "M3 5h18v14H3zM3 10h18M7 15h3", chart: "M4 3v17h17M8 15v-4m5 4V6m5 9V9", wallet: "M3 5h17v15H3zM3 8h17m-5 5h6v4h-6z", sliders: "M5 3v5m0 4v9M12 3v10m0 4v4M19 3v2m0 4v12M2 8h6m1 9h6m1-12h6", spark: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z", grid: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z", book: "M12 5c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v15" };
+function selectSection(id) {
+  if (id === "usage") openUsageTab(); else if (id === "quota") openQuotaTab(); else if (id === "costs") openCostsTab(); else if (id === "qaida") openQaidaTab(); else tab.value = id;
+}
 
 // ── Families ─────────────────────────────────────────────────────────────────
 const families = ref([]);
 const familiesLoading = ref(false);
 const familiesError = ref("");
 const expanded = ref({});
+const familySearch = ref(""), familyFilter = ref("all");
+const activeFamilyCount = computed(() => families.value.filter((f) => f.status === "active").length);
+const totalMembers = computed(() => families.value.reduce((n, f) => n + Number(f.memberCount || 0), 0));
+const filteredFamilies = computed(() => families.value.filter((f) => (familyFilter.value === "all" || f.status === familyFilter.value) && `${f.name} ${f.id}`.toLowerCase().includes(familySearch.value.trim().toLowerCase())));
+function initials(name) { return String(name || "Family").split(/\s+/).slice(0, 2).map((s) => s[0]).join("").toUpperCase(); }
 
 async function loadFamilies() {
   familiesLoading.value = true;
@@ -957,55 +972,42 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
 
 <template>
   <section class="platform">
-    <header class="head">
-      <h1>Platform admin</h1>
-      <nav class="tabs">
-        <button :class="{ active: tab === 'families' }" @click="tab = 'families'">Families</button>
-        <button :class="{ active: tab === 'subscriptions' }" @click="tab = 'subscriptions'">Plans &amp; subscriptions</button>
-        <button :class="{ active: tab === 'users' }" @click="tab = 'users'">User accounts</button>
-        <button :class="{ active: tab === 'usage' }" @click="openUsageTab">Usage</button>
-        <button :class="{ active: tab === 'quota' }" @click="openQuotaTab">Quota</button>
-        <button :class="{ active: tab === 'costs' }" @click="openCostsTab">Costs</button>
-        <button :class="{ active: tab === 'llm' }" @click="tab = 'llm'">LLM config</button>
-        <button :class="{ active: tab === 'live' }" @click="tab = 'live'">Models &amp; pricing</button>
-        <button :class="{ active: tab === 'quran' }" @click="tab = 'quran'">Quran</button>
-        <button :class="{ active: tab === 'qaida' }" @click="openQaidaTab">Qaida</button>
-      </nav>
-    </header>
+    <aside class="admin-sidebar">
+      <div class="workspace-brand"><span class="workspace-mark">D<span>H</span></span><div><strong>Platform workspace</strong><span>Dar-al-Hikmah OS</span></div></div>
+      <label class="mobile-section-picker">Workspace section<select :value="tab" @change="selectSection($event.target.value)"><optgroup v-for="group in navGroups" :key="group.label" :label="group.label"><option v-for="item in group.items" :key="item.id" :value="item.id">{{ item.label }}</option></optgroup></select></label>
+      <nav aria-label="Platform sections"><div v-for="group in navGroups" :key="group.label" class="nav-group"><p>{{ group.label }}</p><button v-for="item in group.items" :key="item.id" :class="{ active: tab === item.id }" :aria-current="tab === item.id ? 'page' : undefined" @click="selectSection(item.id)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="iconPaths[item.icon]" /></svg><span>{{ item.label }}</span><span v-if="tab === item.id" class="nav-indicator" /></button></div></nav>
+      <div class="workspace-note"><span class="access-dot" /><div><strong>Superadmin access</strong><p>Your platform, in one place.</p></div></div>
+    </aside>
+    <div class="admin-content">
+    <header class="workspace-header"><p class="breadcrumb">Platform <span>/</span> {{ currentSection.label }}</p><span class="admin-pill">Superadmin</span></header>
+    <header class="head"><div><p class="eyebrow">PLATFORM MANAGEMENT</p><h1>{{ currentSection.label }}</h1><p class="section-description">{{ currentSection.description }}</p></div><button v-if="tab === 'families'" class="btn refresh-button" @click="loadFamilies" :disabled="familiesLoading"><span aria-hidden="true">↻</span> {{ familiesLoading ? 'Refreshing…' : 'Refresh data' }}</button></header>
     <SubscriptionAdmin v-if="tab === 'subscriptions'" />
     <UserAccountsAdmin v-if="tab === 'users'" />
 
     <!-- ── Families tab ─────────────────────────────────────────────────── -->
     <div v-if="tab === 'families'">
-      <div class="toolbar">
-        <button class="btn" @click="loadFamilies" :disabled="familiesLoading">
-          {{ familiesLoading ? "Loading…" : "Refresh" }}
-        </button>
-        <span class="count" v-if="families.length">{{ families.length }} famil{{ families.length === 1 ? 'y' : 'ies' }}</span>
-      </div>
+      <div class="overview-grid"><article class="overview-card"><span>Total families</span><strong>{{ familiesLoading ? '—' : families.length }}</strong><small>Registered on your platform</small></article><article class="overview-card"><span>Active families</span><strong>{{ familiesLoading ? '—' : activeFamilyCount }}</strong><small><i class="access-dot" /> Family access enabled</small></article><article class="overview-card"><span>Suspended families</span><strong>{{ familiesLoading ? '—' : families.filter(f => f.status === 'disabled').length }}</strong><small>Family access paused</small></article><article class="overview-card"><span>Family memberships</span><strong>{{ familiesLoading ? '—' : totalMembers }}</strong><small>Memberships across all families</small></article></div>
+      <div class="directory-heading"><div><h2>Family directory</h2><p>Manage members and access without losing the big picture.</p></div><button class="btn primary" @click="tab = 'subscriptions'">Manage subscriptions <span aria-hidden="true">↗</span></button></div>
+      <div class="directory-tools"><label class="family-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg><input v-model="familySearch" type="search" aria-label="Search families" placeholder="Search by family name or ID…" /></label><label class="filter-label">Status <select v-model="familyFilter" aria-label="Filter families by status"><option value="all">All statuses</option><option value="active">Active</option><option value="disabled">Suspended</option></select></label><span class="result-count">{{ filteredFamilies.length }} of {{ families.length }} families</span></div>
 
       <p v-if="familiesError" class="error">{{ familiesError }}</p>
       <p v-if="!familiesLoading && !families.length && !familiesError" class="empty">No families found.</p>
+      <p v-else-if="!familiesLoading && !filteredFamilies.length && !familiesError" class="empty">No families match your search. Try another name or status.</p>
+      <p v-if="familiesLoading && !families.length" class="empty" role="status">Loading your family directory…</p>
 
-      <div v-for="fam in families" :key="fam.id" class="family-card">
+      <div v-for="fam in filteredFamilies" :key="fam.id" class="family-card">
         <div class="family-row">
+          <div class="family-avatar" aria-hidden="true">{{ initials(fam.name) }}</div>
           <div class="family-info">
             <strong class="family-name">{{ fam.name }}</strong>
             <span class="fam-meta muted">{{ fam.memberCount }} member{{ fam.memberCount === 1 ? '' : 's' }} · created {{ fmtDate(fam.createdAt) }}</span>
-            <code class="fam-id">{{ fam.id }}</code>
           </div>
           <div class="family-actions">
-            <span class="status-badge" :class="fam.status">{{ fam.status }}</span>
-            <button class="btn sm" @click="toggleStatus(fam)">
-              {{ fam.status === 'active' ? 'Disable' : 'Enable' }}
+            <span class="status-badge" :class="fam.status"><i />{{ fam.status === 'disabled' ? 'Suspended' : fam.status }}</span>
+            <button class="btn sm" :aria-expanded="!!expanded[fam.id]" :aria-label="`${expanded[fam.id] ? 'Close' : 'Manage'} ${fam.name} members`" @click="toggleExpand(fam)">
+              {{ expanded[fam.id] ? 'Close members' : 'Manage members' }}
             </button>
-            <button class="btn sm" @click="toggleExpand(fam)">
-              {{ expanded[fam.id] ? 'Collapse' : 'Members' }}
-            </button>
-            <button class="btn sm danger" :disabled="nukingSyllabus[fam.id]" @click="nukeSyllabus(fam)">
-              {{ nukingSyllabus[fam.id] ? '…' : 'Del syllabus' }}
-            </button>
-            <button class="btn sm danger" @click="nukeFam(fam)">Delete</button>
+            <details class="family-menu"><summary :aria-label="`More actions for ${fam.name}`">•••</summary><div><span>Family access</span><button @click="toggleStatus(fam)">{{ fam.status === 'active' ? 'Suspend family' : 'Reactivate family' }}</button><span>Data management</span><button class="danger" :disabled="nukingSyllabus[fam.id]" @click="nukeSyllabus(fam)">{{ nukingSyllabus[fam.id] ? 'Deleting…' : 'Delete generated syllabus' }}</button><button class="danger" @click="nukeFam(fam)">Delete family permanently</button><code class="fam-id">{{ fam.id }}</code></div></details>
           </div>
         </div>
 
@@ -1915,6 +1917,7 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
         </div>
       </template>
     </div>
+    </div>
   </section>
 </template>
 
@@ -2143,4 +2146,30 @@ small { color: #94a3b8; font-size: 0.8rem; }
 .quran-translit { font-size: 0.77rem; font-style: italic; }
 .quran-translation { font-size: 0.82rem; color: #334155; }
 .quran-play-btn { flex-shrink: 0; align-self: flex-start; margin-top: 0.2rem; min-width: 2.2rem; }
+</style>
+<style scoped>
+.platform { --admin-accent:#6554c0; --admin-ink:#20283f; display:grid; grid-template-columns:246px minmax(0,1fr); max-width:none; gap:0; min-height:calc(100vh - 70px); color:var(--admin-ink); font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+.admin-sidebar { background:#fff; border-right:1px solid #e5e7ef; padding:30px 18px 22px; display:flex; flex-direction:column; gap:26px; position:sticky; top:0; height:calc(100vh - 70px); overflow:auto; }
+.workspace-brand { display:flex; align-items:center; gap:10px; padding:0 8px 7px; }.workspace-brand strong { display:block; font-size:13px; letter-spacing:-.2px; }.workspace-brand div>span { display:block; font-size:11px; color:#8990a3; margin-top:4px; }.workspace-mark { background:#6554c0; color:white; width:36px; height:38px; border-radius:11px; display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:750; letter-spacing:-2px; flex-shrink:0; }.workspace-mark span { opacity:.7; }
+.nav-group { margin-bottom:23px; }.nav-group>p { padding:0 12px; margin:0 0 9px; color:#9096a7; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:1.15px; }.nav-group button { display:flex; align-items:center; gap:12px; width:100%; padding:12px; margin:3px 0; border:0; background:transparent; border-radius:8px; cursor:pointer; text-align:left; font:inherit; font-size:12px; font-weight:550; color:#677087; transition:background .15s,color .15s; }.nav-group svg { width:18px; height:18px; flex-shrink:0; }.nav-group button:hover { background:#f5f4fb; color:#4d3d9c; }.nav-group button.active { background:#eeebfa; color:#6351b8; font-weight:700; }.nav-indicator { width:5px; height:5px; border-radius:50%; background:currentColor; margin-left:auto; }.workspace-note { margin-top:auto; display:flex; align-items:flex-start; gap:10px; padding:15px 8px 0; border-top:1px solid #eef0f5; }.workspace-note strong { font-size:11px; }.workspace-note p { font-size:10px; color:#8990a3; margin:5px 0 0; }.access-dot { display:inline-block; height:6px; width:6px; background:#25a67d; border-radius:50%; flex-shrink:0; margin-top:5px; }
+.admin-content { padding:0 38px 60px; min-width:0; }.workspace-header { display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #e4e6ef; min-height:70px; margin-bottom:34px; }.breadcrumb { margin:0; font-size:11px; color:#747e94; }.breadcrumb span { padding:0 12px; color:#bec4d1; }.admin-pill { font-size:10px; letter-spacing:.2px; color:#7562b4; background:#eae6f6; padding:6px 10px; border:1px solid #ddd6ef; border-radius:6px; }
+.head { margin-bottom:28px; display:flex; align-items:center; gap:20px; }.eyebrow { margin:0 0 9px; font-size:9px; font-weight:750; letter-spacing:1.6px; color:#8c83a6; }.head h1 { font-size:30px; font-weight:730; letter-spacing:-1px; color:#222b43; }.section-description { color:#7b8397; font-size:12px; margin:11px 0 0; line-height:1.65; }.refresh-button { display:flex; align-items:center; gap:8px; }.refresh-button span { font-size:18px; line-height:1; }
+.overview-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; margin-bottom:34px; }.overview-card { background:white; border:1px solid #e5e7ef; border-radius:12px; padding:20px 22px; box-shadow:0 2px 4px #222b4303; }.overview-card>span { display:block; font-size:11px; color:#747e93; font-weight:550; }.overview-card>strong { display:block; margin:12px 0 11px; font-size:30px; font-weight:650; letter-spacing:-1px; font-variant-numeric:tabular-nums; }.overview-card small { font-size:10px; color:#8c94a7; display:flex; gap:6px; align-items:center; }.overview-card .access-dot { margin:0; height:5px; width:5px; }
+.directory-heading { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:21px; }.directory-heading h2 { font-size:16px; letter-spacing:-.3px; margin:0; }.directory-heading p { font-size:11px; color:#8a92a4; margin:7px 0 0; }.directory-tools { display:flex; align-items:center; gap:18px; background:#fff; border:1px solid #e5e7ef; border-radius:12px; padding:15px 18px; margin-bottom:14px; flex-wrap:wrap; }.family-search { display:flex; align-items:center; gap:10px; flex:1; min-width:170px; }.family-search svg { width:17px; height:17px; color:#929aae; flex-shrink:0; }.family-search input { border:0; outline:0; padding:7px 0; background:transparent; font:inherit; font-size:12px; width:100%; color:#283248; }.family-search input::placeholder { color:#959daf; }.filter-label { display:flex; align-items:center; gap:9px; font-size:11px; color:#8a92a4; }.filter-label select { border:1px solid #e4e7ef; border-radius:6px; background:#fafbfe; padding:8px 10px; font:inherit; font-size:11px; color:#535e75; }.result-count { font-size:10px; color:#9098a9; white-space:nowrap; }
+.family-card { overflow:visible; margin-bottom:0; border-radius:0; border:1px solid #e7e9f0; border-top:0; }.family-card:has(+ .family-card) { border-bottom:1px solid #eef0f5; }.family-row { display:flex; align-items:center; flex-wrap:nowrap; padding:19px 22px; gap:15px; }.family-avatar { display:flex; align-items:center; justify-content:center; width:40px; height:40px; border-radius:11px; background:#eeeafb; color:#8877bc; font-size:12px; font-weight:700; flex-shrink:0; }.family-card:nth-of-type(3n) .family-avatar { background:#e8f3ef; color:#6b9a86; }.family-card:nth-of-type(3n+1) .family-avatar { background:#eaf0fa; color:#738bad; }.family-info { flex:1; gap:5px; }.family-name { font-size:13px; font-weight:650; }.fam-meta { font-size:10px; color:#929aae; }.family-actions { gap:16px; }.status-badge { display:inline-flex; align-items:center; gap:5px; font-size:10px; font-weight:550; padding:5px 9px; text-transform:capitalize; }.status-badge.active { background:#edf8f2; color:#3e9775; }.status-badge.disabled { background:#fff2e8; color:#b57943; }.status-badge i { width:4px; height:4px; border-radius:50%; background:currentColor; }
+.platform :deep(.btn) { border:1px solid #dfe3ed; border-radius:7px; background:#fff; padding:9px 13px; color:#515c74; font:inherit; font-size:11px; font-weight:550; box-shadow:0 1px 2px #222b4303; cursor:pointer; transition:background .15s; }.platform :deep(.btn:hover:not(:disabled)) { background:#f2effa; border-color:#b7a8dc; }.platform :deep(.btn.primary) { background:#6c58bb; border-color:#6c58bb; color:#fff; box-shadow:0 3px 7px #6c58bb20; }.platform :deep(.btn:disabled) { opacity:.5; cursor:wait; }.platform :deep(.card) { border-color:#e5e7ef; border-radius:12px; box-shadow:0 2px 4px #222b4303; }.platform :deep(h2) { color:#29324a; }.platform :deep(input),.platform :deep(select),.platform :deep(textarea) { font-family:inherit; }.platform :deep(input:focus-visible),.platform :deep(select:focus-visible),.platform :deep(textarea:focus-visible),.platform :deep(button:focus-visible),summary:focus-visible { outline:2px solid #a393d3; outline-offset:3px; }.platform :deep(table) { color:#4a5670; }.platform :deep(th) { background:#f8f9fc; font-size:10px; letter-spacing:.3px; color:#7a8499; padding-top:12px; padding-bottom:12px; }.platform :deep(td) { padding-top:14px; padding-bottom:14px; }.platform :deep(.toolbar h2) { font-size:18px; }.platform :deep(.pair) { gap:20px; }.platform :deep(label) { color:#69748b; }.platform :deep(.success) { border:1px solid #d7eedd; background:#eff9f2; border-radius:8px; padding:12px; }.platform :deep(.error) { background:#fff2f2; border:1px solid #f3dada; border-radius:8px; padding:12px; }
+.family-menu { position:relative; }.family-menu summary { list-style:none; cursor:pointer; color:#8b94a7; letter-spacing:2px; padding:9px 5px; font-size:11px; }.family-menu summary::-webkit-details-marker { display:none; }.family-menu[open]>div { position:absolute; right:0; top:36px; z-index:5; background:#fff; border:1px solid #e2e5ef; box-shadow:0 12px 40px #25324b20; border-radius:10px; padding:10px; width:245px; }.family-menu div>span { display:block; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:#a0a7b6; padding:8px; }.family-menu button { display:block; border:0; background:transparent; width:100%; text-align:left; padding:10px 8px; font:inherit; font-size:11px; border-radius:5px; cursor:pointer; }.family-menu button:hover { background:#f6f3fb; }.family-menu .danger { color:#bd6666; }.family-menu .fam-id { display:block; margin:8px; overflow-wrap:anywhere; }.members-panel { padding:22px; }.empty { border:1px dashed #d9dcea; padding:36px; text-align:center; background:#fff; border-radius:10px; color:#8991a4; }
+@media(min-width:1700px) { .admin-content { padding-left:54px; padding-right:54px; } }
+@media(max-width:1100px) { .platform { grid-template-columns:215px minmax(0,1fr); }.admin-content { padding:0 24px 40px; }.overview-grid { gap:10px; }.overview-card { padding:18px 14px; }.family-row { padding:17px 15px; }.family-actions { gap:8px; }.result-count { display:none; } }
+@media(max-width:800px) { .platform { display:block; }.admin-sidebar { height:auto; position:static; padding:18px 20px 8px; border-right:0; border-bottom:1px solid #e5e7ef; gap:14px; }.workspace-brand { padding:0; }.admin-sidebar nav { display:flex; overflow:auto; gap:8px; }.nav-group { display:contents; }.nav-group>p,.workspace-note,.nav-indicator { display:none; }.nav-group button { width:auto; flex-shrink:0; white-space:nowrap; padding:10px 12px; font-size:11px; }.nav-group svg { width:15px; }.workspace-header { min-height:55px; margin-bottom:24px; }.overview-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.head h1 { font-size:27px; }.family-row { flex-wrap:wrap; }.family-info { flex-basis:calc(100% - 60px); }.family-actions { width:100%; justify-content:flex-end; }.family-actions .status-badge { margin-right:auto; }.directory-heading { align-items:flex-start; }.directory-heading p { max-width:220px; }.head { align-items:flex-start; }.directory-tools { gap:10px; }.directory-heading .btn { white-space:nowrap; } }
+@media(max-width:450px) { .admin-content { padding:0 16px 35px; }.head { flex-wrap:wrap; }.directory-heading { flex-wrap:wrap; }.directory-tools { padding:12px; }.family-search { flex-basis:100%; }.overview-card small { font-size:9px; }.workspace-header .breadcrumb { max-width:70%; }.members-panel { overflow:auto; }.platform :deep(.plan-grid) { grid-template-columns:1fr; } }
+@media(prefers-reduced-motion:reduce) { * { transition:none!important; } }
+.platform { background:#f5f6fa; --primary:#6554c0; --primary-soft:#eeebfa; --border:#e5e7ef; }
+.family-search,.filter-label { flex-direction:row; margin:0; }.platform .family-search input { border:0!important; border-radius:0!important; }.filter-label { white-space:nowrap; }
+.platform :deep(.btn.primary) { background:#6c58bb!important; border-color:#6c58bb!important; box-shadow:0 3px 7px #6c58bb20!important; }.platform :deep(input:not([type="checkbox"]):not([type="radio"]):not([type="range"])),.platform :deep(select),.platform :deep(textarea) { border-color:#dfe3ed!important; border-radius:7px!important; }
+.platform :deep(input:focus-visible),.platform :deep(select:focus-visible),.platform :deep(textarea:focus-visible) { outline:2px solid #a393d3!important; box-shadow:none!important; }
+.platform :deep(.table-wrap) { background:#fff; border:1px solid #e5e7ef; border-radius:12px; }.nav-group button { font-size:13px; }.family-name { font-size:14px; }.fam-meta,.overview-card small,.directory-heading p { font-size:11px; }.section-description { font-size:13px; }.platform :deep(.btn) { font-size:12px; }.family-search input { font-size:13px; }.overview-card>span { font-size:12px; }.result-count { font-size:11px; }
+.family-card:last-child { border-radius:0 0 12px 12px; }.family-card:has(.family-row):not(.family-card ~ .family-card) { border-top:1px solid #e5e7ef; border-radius:12px 12px 0 0; }
+.mobile-section-picker { display:none; }.fam-meta,.overview-card small,.directory-heading p,.section-description,.result-count,.workspace-brand div>span,.breadcrumb { color:#6d778d; }.family-search input::placeholder { color:#7c869c; }.overview-card>span { color:#657087; }
+@media(max-width:800px) { .admin-sidebar nav { display:none; }.mobile-section-picker { display:flex; gap:7px; margin:0 0 10px; color:#778199; font-size:11px; }.mobile-section-picker select { width:100%; padding:10px; font:inherit; font-size:13px; color:#4e5870; background:#fafbfe; border:1px solid #e1e5ef; } }
 </style>
