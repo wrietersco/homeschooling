@@ -7,7 +7,7 @@
 // with the platform image model into Storage; spoken audio falls back to the
 // runtime TTS chain (the developer's Kokoro script can attach recordings later,
 // exactly as for hand-authored packs).
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   generateWikidoTopic, addWikidoChildScene, suggestWikidoScenes, planWikidoOutline, generateWikidoSceneImage, generateWikidoImages,
   generateWikidoSpotDetails, planWikidoDepth,
@@ -37,6 +37,7 @@ async function refresh(keepSelection = true) {
     }
   } finally {
     loading.value = false;
+    scheduleAutoRecord();
   }
 }
 
@@ -69,6 +70,7 @@ const voBusy = ref(false);
 const voProgress = ref({ done: 0, total: 0 });
 const voForce = ref(false);
 const voFailed = ref([]);
+let bridgeProbeTimer = null;
 
 async function probeBridge() {
   bridge.value = await checkVoiceoverBridge(BRIDGE_URL);
@@ -76,24 +78,28 @@ async function probeBridge() {
 
 // Record every missing clip on the local Kokoro bridge, then attach each MP3 to
 // the topic through the superadmin callable (Storage + pack audio fields).
-async function generateVoiceovers() {
-  if (voBusy.value || !form.value) return;
+// Runs from the manual button AND automatically whenever the bridge is online
+// and clips are missing — Kokoro is the default voice for published topics.
+async function generateVoiceovers({ auto = false } = {}) {
+  if (voBusy.value || !form.value) return { recorded: 0, failed: [] };
   voBusy.value = true;
   voFailed.value = [];
-  error.value = "";
+  if (!auto) error.value = "";
+  let recorded = 0;
   try {
     // the callable checks the SAVED topic — freshly added hotspots must ship
     // first; if the save fails (validation), recording must not run at all
     if (dirty.value) {
       const ok = await save();
-      if (!ok) { voBusy.value = false; return; }
+      if (!ok) return { recorded: 0, failed: [] };
     }
-    const items = planVoiceoverClips(form.value, { force: voForce.value });
+    const items = planVoiceoverClips(form.value, { force: voForce.value && !auto });
     voProgress.value = { done: 0, total: items.length };
     if (!items.length) {
-      message.value = "Every scene and hotspot already has a voiceover (use “re-record all” to refresh).";
-      return;
+      if (!auto) message.value = "Every scene and hotspot already has a voiceover (use “re-record all” to refresh).";
+      return { recorded: 0, failed: [] };
     }
+    if (auto) message.value = `Recording voiceovers (Kokoro)… 0/${items.length}`;
     const failedIds = [];
     const chunkSize = 5;
     for (let i = 0; i < items.length; i += chunkSize) {
@@ -104,39 +110,66 @@ async function generateVoiceovers() {
         const sceneId = dot < 0 ? clip.id : clip.id.slice(0, dot);
         const hotspotId = dot < 0 ? "" : clip.id.slice(dot + 1);
         try {
-          await attachWikidoAudio({ topicId: selectedId.value, sceneId, hotspotId: hotspotId || undefined, audioBase64: clip.mp3, mime: "audio/mpeg" });
+          const attached = await attachWikidoAudio({ topicId: selectedId.value, sceneId, hotspotId: hotspotId || undefined, audioBase64: clip.mp3, mime: "audio/mpeg" });
+          recorded += 1;
+          // reflect the REAL recording url in the form so dirty-state and
+          // skip-logic stay accurate
+          const scene = form.value.scenes[sceneId];
+          if (scene) {
+            if (hotspotId) {
+              const spot = scene.hotspots?.find((h) => h.id === hotspotId);
+              if (spot) spot.audio = attached.url;
+            } else {
+              scene.audio = attached.url;
+            }
+          }
         } catch (e) {
           failedIds.push(`${clip.id}: ${String(e?.message || e).replace(/^[a-z-]+: /i, "").slice(0, 90)}`);
           voFailed.value = [...failedIds];
           continue;
         }
-        // reflect it in the form so dirty-state and skip-logic stay accurate
-        const scene = form.value.scenes[sceneId];
-        if (scene) {
-          if (hotspotId) {
-            const spot = scene.hotspots?.find((h) => h.id === hotspotId);
-            if (spot) spot.audio = "attached";
-          } else {
-            scene.audio = "attached";
-          }
-        }
         voProgress.value.done += 1;
+        if (auto) message.value = `Recording voiceovers (Kokoro)… ${voProgress.value.done}/${items.length}`;
       }
       failedIds.push(...failed.map((f) => f.id));
       voFailed.value = [...failedIds];
     }
-    message.value = `Voiceovers attached: ${voProgress.value.done}/${items.length}${failedIds.length ? ` · failed: ${failedIds.join(", ")}` : ""}.`;
+    if (!auto) message.value = `Voiceovers attached: ${voProgress.value.done}/${items.length}${failedIds.length ? ` · failed: ${failedIds.join(", ")}` : ""}.`;
     snapshot();
+    return { recorded, failed: failedIds };
   } catch (e) {
-    error.value = e?.message?.replace("internal: ", "") || "Voiceover generation failed.";
+    if (!auto) error.value = e?.message?.replace("internal: ", "") || "Voiceover generation failed.";
+    return { recorded, failed: failedIds || [] };
   } finally {
     voBusy.value = false;
   }
 }
+
+// Auto-managed voice: while the bridge is online, missing clips are recorded
+// without any click — after loads, saves, and content additions settle.
+const autoVoice = ref(true);
+let autoVoiceTimer = null;
+function scheduleAutoRecord() {
+  if (!autoVoice.value || !bridge.value.online) return;
+  clearTimeout(autoVoiceTimer);
+  autoVoiceTimer = setTimeout(async () => {
+    if (autoVoice.value && bridge.value.online && form.value && !voBusy.value && !dirty.value) {
+      const missing = planVoiceoverClips(form.value).length;
+      if (missing > 0) await generateVoiceovers({ auto: true });
+    }
+  }, 2500);
+}
 onMounted(() => {
   refresh(false);
-  probeBridge();
+  probeBridge().then(() => scheduleAutoRecord());
+  // keep probing — the bridge may start after this page
+  bridgeProbeTimer = setInterval(async () => {
+    const was = bridge.value.online;
+    await probeBridge();
+    if (!was && bridge.value.online) scheduleAutoRecord();
+  }, 15000);
 });
+onBeforeUnmount(() => clearInterval(bridgeProbeTimer));
 
 const selectedDoc = computed(() => topics.value.find((t) => t.id === selectedId.value) || null);
 
@@ -494,6 +527,18 @@ async function togglePublish() {
   const next = selectedDoc.value?.status === "published" ? "draft" : "published";
   // unsaved edits ship with the publish save
   if (dirty.value) await save();
+  // a published topic gets its full Kokoro voice first (when the bridge can)
+  if (next === "published" && bridge.value.online && !voBusy.value) {
+    const missing = planVoiceoverClips(form.value).length;
+    if (missing > 0) {
+      message.value = `Recording ${missing} missing voiceovers before publishing…`;
+      const { failed } = await generateVoiceovers({ auto: true });
+      if (failed.length) {
+        error.value = `Some voiceovers failed (${failed.length}) — publish anyway? Press publish again to retry.`;
+        return;
+      }
+    }
+  }
   try {
     await setWikidoTopicStatus({ topicId: selectedId.value, status: next });
     message.value = next === "published" ? "Published! Families can now explore this world." : "Moved back to draft.";
@@ -572,6 +617,7 @@ async function writeSpotWithAgent(spot, { auto = false } = {}) {
     else error.value = text;
   } finally {
     spotAgentBusy.value = "";
+    scheduleAutoRecord();
   }
 }
 
@@ -806,7 +852,7 @@ function confirmDeleteScene(withDeeper) {
           <div class="vo-copy">
             <strong>Voiceovers</strong>
             <span v-if="bridge.online">
-              {{ bridge.engine }} bridge online ({{ bridge.voice }}) · {{ voStats.recorded }}/{{ voStats.total }} clips recorded
+              {{ bridge.engine }} bridge online ({{ bridge.voice }}) · {{ voStats.recorded }}/{{ voStats.total }} clips recorded · missing clips record automatically
             </span>
             <span v-else>
               Offline — start the local bridge with <code>npm run wikido:bridge</code> to record studio-quality narration (Kokoro).
@@ -819,7 +865,7 @@ function confirmDeleteScene(withDeeper) {
             v-if="bridge.online"
             class="btn primary"
             :disabled="voBusy || !voStats.total"
-            @click="generateVoiceovers"
+            @click="generateVoiceovers()"
           >
             {{ voBusy ? `Recording… ${voProgress.done}/${voProgress.total}` : voStats.recorded ? `Record missing (${voStats.total - voStats.recorded})` : `Record all ${voStats.total} clips` }}
           </button>
