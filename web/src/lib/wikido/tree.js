@@ -72,3 +72,61 @@ export function moveSceneSibling(scenes, sceneId, dir) {
   [hotspots[a], hotspots[b]] = [hotspots[b], hotspots[a]];
   return next;
 }
+
+// ── Free drag-and-drop ────────────────────────────────────────────────────────
+
+// Ids of every scene inside sceneId's subtree (including itself).
+export function subtreeSceneIds(scenes, sceneId) {
+  const out = new Set();
+  const walk = (id) => {
+    if (out.has(id) || !scenes?.[id]) return;
+    out.add(id);
+    for (const h of scenes[id].hotspots || []) if (h.childSceneId) walk(h.childSceneId);
+  };
+  walk(sceneId);
+  return [...out];
+}
+
+// Whether sceneId may be re-parented under targetParentId:
+// both must exist; the moved scene can't be the root; the target can't be the
+// scene itself or inside its subtree (that would disconnect the branch); and
+// the target picture has room for one more spot.
+export function canMoveScene(scenes, sceneId, targetParentId) {
+  if (!scenes?.[sceneId] || !scenes?.[targetParentId]) return false;
+  if (sceneId === targetParentId) return false;
+  if ((scenes[targetParentId].hotspots || []).length >= 8) return false;
+  return !subtreeSceneIds(scenes, sceneId).includes(targetParentId);
+}
+
+// Move a scene (with its whole subtree) under targetParentId. The doorway that
+// opened it travels along (label/blurb/info kept) and is re-inserted into the
+// target parent's spots at insertIndex (end when null). Removing the old
+// doorway first shifts later insert positions, which is handled here.
+// Returns a NEW scenes map, or null when the move isn't allowed.
+export function moveSceneTo(scenes, sceneId, targetParentId, insertIndex = null) {
+  if (!canMoveScene(scenes, sceneId, targetParentId)) return null;
+  const next = JSON.parse(JSON.stringify(scenes));
+  const oldParentId = findParentSceneId(next, sceneId);
+  let doorway = null;
+  if (oldParentId) {
+    const hotspots = next[oldParentId].hotspots;
+    const idx = hotspots.findIndex((h) => h.childSceneId === sceneId);
+    if (idx >= 0) { doorway = hotspots[idx]; hotspots.splice(idx, 1); }
+  }
+  if (!doorway) {
+    doorway = {
+      id: `open-${sceneId}`,
+      label: next[sceneId].title,
+      blurb: "",
+      x: 50, y: 50,
+      childSceneId: sceneId,
+      info: { title: next[sceneId].title, body: [next[sceneId].narration || ""].filter(Boolean) },
+    };
+  }
+  doorway.childSceneId = sceneId;
+  const target = next[targetParentId];
+  if (target.hotspots.some((h) => h.id === doorway.id)) doorway.id = `${doorway.id}-moved`;
+  const at = insertIndex === null ? target.hotspots.length : Math.max(0, Math.min(insertIndex, target.hotspots.length));
+  target.hotspots.splice(at, 0, doorway);
+  return next;
+}

@@ -15,7 +15,7 @@ import {
   checkVoiceoverBridge, synthesizeOnBridge, planVoiceoverClips, attachWikidoAudio, BRIDGE_URL,
   reorderWikidoTopics, sortStudioTopics,
 } from "@/services/wikidoAdmin";
-import { buildSceneTree, moveSceneSibling } from "@/lib/wikido/tree";
+import { buildSceneTree, moveSceneSibling, subtreeSceneIds, canMoveScene, moveSceneTo } from "@/lib/wikido/tree";
 import { useCoverPlacement } from "@/composables/useCoverPlacement";
 import { spotOutcome, sceneStatus, deletePlan, deleteSceneFrom, topicHealth, undoBuiltScenes, spotNeedsDetails } from "@/lib/wikido/studioModel";
 import { withKeys, countOutline, removeOutlineNode, runOutline, summarizeRun, retryFailedItems } from "@/lib/wikido/outlineBuild";
@@ -271,6 +271,60 @@ function startDeeperLayer(sceneId) {
 
 function moveScene(sceneId, dir) {
   const next = moveSceneSibling(form.value.scenes, sceneId, dir);
+  if (next) form.value.scenes = next;
+}
+
+// ── free drag-and-drop on the map ─────────────────────────────────────────────
+// Hold the ⠿ grip and drop a scene:
+//   · between two rows  → reorder among those siblings
+//   · onto a row        → re-parent the scene (and its whole branch) under it
+// The tree helpers guard cycles, the root, and crowded pictures.
+const dragSceneId = ref("");
+const dropHint = ref(null); // { rowId, mode: "before"|"after"|"into" } | null
+
+function onDragStart(e, sceneId) {
+  dragSceneId.value = sceneId;
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", sceneId);
+}
+function onDragEnd() {
+  dragSceneId.value = "";
+  dropHint.value = null;
+}
+function onRowDragLeave(sceneId) {
+  if (dropHint.value?.rowId === sceneId) dropHint.value = null;
+}
+function onRowDragOver(e, rowSceneId) {
+  if (!dragSceneId.value || rowSceneId === dragSceneId.value) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = canMoveScene(form.value.scenes, dragSceneId.value, rowSceneId) ? "move" : "none";
+  const rect = e.currentTarget.getBoundingClientRect();
+  const rel = (e.clientY - rect.top) / rect.height;
+  dropHint.value = { rowId: rowSceneId, mode: rel < 0.3 ? "before" : rel > 0.7 ? "after" : "into" };
+}
+function onRowDrop(e, rowSceneId) {
+  const hint = dropHint.value;
+  onDragEnd();
+  if (!hint || hint.rowId !== rowSceneId || !dragSceneId.value) {
+    const id = e.dataTransfer?.getData?.("text/plain") || "";
+    if (!id || id === rowSceneId) return;
+    applyMove(id, rowSceneId, "into");
+    return;
+  }
+  applyMove(dragSceneId.value, rowSceneId, hint.mode);
+}
+function applyMove(dragId, rowSceneId, mode) {
+  const scenes = form.value.scenes;
+  if (mode === "into") {
+    const next = moveSceneTo(scenes, dragId, rowSceneId);
+    if (next) form.value.scenes = next;
+    return;
+  }
+  // before/after a row: insert into that row's parent at the row's position
+  const parent = Object.values(scenes).find((s) => (s.hotspots || []).some((h) => h.childSceneId === rowSceneId));
+  if (!parent) return; // the root and orphans have no parent to insert into
+  const idx = parent.hotspots.findIndex((h) => h.childSceneId === rowSceneId);
+  const next = moveSceneTo(scenes, dragId, parent.id, mode === "after" ? idx + 1 : idx);
   if (next) form.value.scenes = next;
 }
 
@@ -896,13 +950,28 @@ function confirmDeleteScene(withDeeper) {
         <!-- map of scenes -->
         <nav class="scene-tree" aria-label="Map of scenes">
           <h3 class="pane-title">Map of scenes</h3>
+          <p class="tree-hint">Hold ⠿ and drag a scene anywhere: drop between rows to reorder, or onto a scene to nest it deeper.</p>
           <div
             v-for="{ id, depth } in orderedScenes"
             :key="id"
             class="scene-row"
-            :class="{ active: id === selectedSceneId, nested: depth > 0 }"
+            :class="[
+              { active: id === selectedSceneId, nested: depth > 0, dragging: dragSceneId === id },
+              dropHint && dropHint.rowId === id ? `drop-${dropHint.mode}` : '',
+            ]"
             :style="{ marginLeft: `${Math.min(depth, 4) * 0.9}rem` }"
+            @dragover="onRowDragOver($event, id)"
+            @dragleave="onRowDragLeave(id)"
+            @drop="onRowDrop($event, id)"
           >
+            <span
+              class="drag-grip"
+              draggable="true"
+              :aria-label="`Drag to move ${form.scenes[id].title}`"
+              title="Drag to move this scene"
+              @dragstart="onDragStart($event, id)"
+              @dragend="onDragEnd"
+            >⠿</span>
             <button type="button" class="scene-main" :aria-current="id === selectedSceneId" @click="selectScene(id)">
               <span class="scene-thumb">
                 <img v-if="hasArt(form.scenes[id])" :src="form.scenes[id].image.src" alt="" />
@@ -1266,6 +1335,17 @@ function confirmDeleteScene(withDeeper) {
 .scene-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .thumb-empty { font-size: 0.8rem; color: var(--muted); }
 .scene-name { flex: 1; font-size: 0.86rem; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+/* free drag-and-drop on the map */
+.drag-grip {
+  cursor: grab; color: var(--muted); font-size: 0.8rem; line-height: 1;
+  padding: 0.2rem 0.15rem; border-radius: 6px; user-select: none; flex-shrink: 0;
+}
+.drag-grip:hover { background: var(--primary-soft); color: var(--primary); }
+.drag-grip:active { cursor: grabbing; }
+.scene-row.dragging { opacity: 0.35; }
+.scene-row.drop-into { outline: 2px dashed var(--primary); outline-offset: -2px; background: var(--primary-soft); }
+.scene-row.drop-before { box-shadow: inset 0 3px 0 var(--primary); }
+.scene-row.drop-after { box-shadow: inset 0 -3px 0 var(--primary); }
 .scene-sub { font-size: 0.72rem; color: var(--muted); padding-left: 0.1rem; }
 .scene-actions { display: flex; flex-wrap: wrap; gap: 0.3rem; padding-top: 0.25rem; }
 .mini { border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 0.2rem 0.5rem; font-size: 0.72rem; font-weight: 700; cursor: pointer; font-family: inherit; color: var(--text2); }

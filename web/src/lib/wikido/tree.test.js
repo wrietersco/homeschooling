@@ -58,3 +58,61 @@ describe("siblings", () => {
     expect(moveSceneSibling(scenes, "root", "up")).toBeNull(); // no parent
   });
 });
+
+import { subtreeSceneIds, canMoveScene, moveSceneTo } from "./tree.js";
+
+describe("free drag-and-drop (moveSceneTo)", () => {
+  const zoo = {
+    root: { id: "root", title: "Root", hotspots: [
+      { id: "d-a", label: "Animals", childSceneId: "animals" },
+      { id: "d-p", label: "Plants", childSceneId: "plants" },
+    ] },
+    animals: { id: "animals", title: "Animals", hotspots: [
+      { id: "d-cats", label: "Cats", childSceneId: "cats" },
+      { id: "d-birds", label: "Birds", childSceneId: "birds" },
+    ] },
+    cats: { id: "cats", title: "Cats", hotspots: [
+      { id: "d-kitten", label: "Kittens", childSceneId: "kittens" },
+    ] },
+    birds: { id: "birds", title: "Birds", hotspots: [] },
+    plants: { id: "plants", title: "Plants", hotspots: [] },
+    kittens: { id: "kittens", title: "Kittens", hotspots: [] },
+    lost: { id: "lost", title: "Lost", hotspots: [] },
+  };
+
+  it("guards: root, self, own subtree, missing targets, crowded parents", () => {
+    expect(canMoveScene(zoo, "root", "cats")).toBe(false);           // root can't move
+    expect(canMoveScene(zoo, "cats", "cats")).toBe(false);           // onto itself
+    expect(canMoveScene(zoo, "animals", "kittens")).toBe(false);     // into own subtree (cycle)
+    expect(canMoveScene(zoo, "cats", "nowhere")).toBe(false);        // missing target
+    const crowded = { ...zoo, root: { ...zoo.root, hotspots: zoo.root.hotspots.concat(Array.from({ length: 6 }, (_, i) => ({ id: `x${i}`, childSceneId: null }))) } };
+    expect(canMoveScene(crowded, "cats", "root")).toBe(false);       // 8 spots already
+  });
+
+  it("re-parents a scene and carries its doorway onto the new parent", () => {
+    const next = moveSceneTo(zoo, "birds", "plants");
+    expect(next).not.toBe(zoo);
+    // doorway left the old parent
+    expect(zoo.animals.hotspots.some((h) => h.childSceneId === "birds")).toBe(true); // original untouched
+    expect(next.animals.hotspots.some((h) => h.childSceneId === "birds")).toBe(false);
+    expect(next.plants.hotspots.some((h) => h.childSceneId === "birds")).toBe(true);
+    // subtree travels with the moved scene
+    expect(next.birds).toEqual(zoo.birds);
+  });
+
+  it("inserts at the requested index, adjusting for the removal shift", () => {
+    // move "birds" to before "cats" in the same parent: remove idx0, insert at 0
+    const next = moveSceneTo(zoo, "birds", "birds" && "animals", 0).next ?? moveSceneTo(zoo, "birds", "animals", 0);
+    expect(next.animals.hotspots.map((h) => h.childSceneId)).toEqual(["birds", "cats"]);
+  });
+
+  it("adopts orphan scenes and gives the doorway a usable label", () => {
+    const next = moveSceneTo(zoo, "lost", "plants");
+    expect(next.plants.hotspots.some((h) => h.childSceneId === "lost")).toBe(true);
+    expect(next.plants.hotspots.find((h) => h.childSceneId === "lost").label).toBe("Lost");
+  });
+
+  it("returns null for disallowed moves", () => {
+    expect(moveSceneTo(zoo, "animals", "kittens")).toBeNull();
+  });
+});
