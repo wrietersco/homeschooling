@@ -9,7 +9,7 @@ describe("router", () => {
 
   it("exposes the core named routes", () => {
     const names = routes.map((r) => r.name);
-    for (const expected of ["home", "login", "dashboard", "curriculum", "syllabus", "planner", "activity", "platform", "invite", "child-player", "not-found"]) {
+    for (const expected of ["home", "login", "dashboard", "curriculum", "syllabus", "planner", "activity", "platform", "wikido", "invite", "child-player", "not-found"]) {
       expect(names).toContain(expected);
     }
   });
@@ -27,5 +27,11 @@ describe("router", () => {
     const platform = routes.find((r) => r.name === "platform");
     expect(platform.meta.requiresAuth).toBe(true);
     expect(platform.meta.role).toBe("superadmin");
+  });
+
+  it("runs Wikido fullscreen (immersive) behind auth", () => {
+    const wikido = routes.find((r) => r.name === "wikido");
+    expect(wikido.meta.requiresAuth).toBe(true);
+    expect(wikido.meta.immersive).toBe(true);
   });
 });

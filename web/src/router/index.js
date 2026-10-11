@@ -66,6 +66,14 @@ const routes = [
     component: () => import("@/views/ExploreView.vue"),
     meta: { requiresAuth: true },
   },
+  // Wikido — immersive picture encyclopedia for children. `immersive` hides the
+  // app nav: the scene owns the whole screen (App.vue).
+  {
+    path: "/wikido",
+    name: "wikido",
+    component: () => import("@/views/WikidoView.vue"),
+    meta: { requiresAuth: true, immersive: true },
+  },
   {
     path: "/curriculum",
     name: "curriculum",

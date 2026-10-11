@@ -4,6 +4,7 @@ import { collection, doc, getDocs, onSnapshot, orderBy, query } from "firebase/f
 import { db } from "@/lib/firebase";
 import SubscriptionAdmin from "@/components/SubscriptionAdmin.vue";
 import UserAccountsAdmin from "@/components/UserAccountsAdmin.vue";
+import WikidoStudio from "@/components/platform/WikidoStudio.vue";
 import {
   listFamilies, setFamilyStatus, listFamilyMembers,
   setMemberRole, removeMember, deleteFamily,
@@ -19,7 +20,7 @@ const tab = ref("families");
 const navGroups = [
   { label: "People & access", items: [{ id: "families", label: "Families", icon: "family", description: "A clear view of every family, their members, and account access." }, { id: "subscriptions", label: "Plans & subscriptions", icon: "card", description: "Review family learning-package requests, manage learning access, and set prices and support allowances." }, { id: "users", label: "User accounts", icon: "user", description: "Manage accounts, passwords, and individual access." }] },
   { label: "Insights & controls", items: [{ id: "usage", label: "Usage & health", icon: "chart", description: "Understand activity, usage trends, and service health." }, { id: "costs", label: "Cost reports", icon: "wallet", description: "Track your platform spending and costs by family." }, { id: "quota", label: "Provider capacity", icon: "sliders", description: "Set shared provider capacity and platform reserves." }] },
-  { label: "AI & learning", items: [{ id: "llm", label: "AI configuration", icon: "spark", description: "Configure the models and instructions powering each learning agent." }, { id: "live", label: "Models & pricing", icon: "grid", description: "Compare available models, capabilities, and provider prices." }, { id: "quran", label: "Quran library", icon: "book", description: "Import and maintain your shared Quran resources." }, { id: "qaida", label: "Qaida library", icon: "book", description: "Manage lessons and shared audio for Noorani Qaida." }] },
+  { label: "AI & learning", items: [{ id: "llm", label: "AI configuration", icon: "spark", description: "Configure the models and instructions powering each learning agent." }, { id: "live", label: "Models & pricing", icon: "grid", description: "Compare available models, capabilities, and provider prices." }, { id: "wikido", label: "Wikido Studio", icon: "grid", description: "Generate immersive picture-encyclopedia worlds on any subject, grow them layer by layer, and publish them for every family." }, { id: "quran", label: "Quran library", icon: "book", description: "Import and maintain your shared Quran resources." }, { id: "qaida", label: "Qaida library", icon: "book", description: "Manage lessons and shared audio for Noorani Qaida." }] },
 ];
 const currentSection = computed(() => navGroups.flatMap((g) => g.items).find((i) => i.id === tab.value));
 const iconPaths = { family: "M3 20v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6M17 5a3 3 0 0 1 0 6m1 3a4 4 0 0 1 3 4v2", user: "M20 21v-2a7 7 0 0 0-14 0v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8", card: "M3 5h18v14H3zM3 10h18M7 15h3", chart: "M4 3v17h17M8 15v-4m5 4V6m5 9V9", wallet: "M3 5h17v15H3zM3 8h17m-5 5h6v4h-6z", sliders: "M5 3v5m0 4v9M12 3v10m0 4v4M19 3v2m0 4v12M2 8h6m1 9h6m1-12h6", spark: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z", grid: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z", book: "M12 5c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v15" };
@@ -983,6 +984,7 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
     <header class="head"><div><p class="eyebrow">PLATFORM MANAGEMENT</p><h1>{{ currentSection.label }}</h1><p class="section-description">{{ currentSection.description }}</p></div><button v-if="tab === 'families'" class="btn refresh-button" @click="loadFamilies" :disabled="familiesLoading"><span aria-hidden="true">↻</span> {{ familiesLoading ? 'Refreshing…' : 'Refresh data' }}</button></header>
     <SubscriptionAdmin v-if="tab === 'subscriptions'" />
     <UserAccountsAdmin v-if="tab === 'users'" />
+    <WikidoStudio v-if="tab === 'wikido'" />
 
     <!-- ── Families tab ─────────────────────────────────────────────────── -->
     <div v-if="tab === 'families'">

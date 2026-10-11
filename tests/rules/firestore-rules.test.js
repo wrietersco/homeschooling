@@ -150,6 +150,24 @@ test("global skill registry: signed-in users cannot write directly (server-only)
   await assertSucceeds(setDoc(doc(asSuper, "skillRegistry", "newSkill"), { name: "x" }));
 });
 
+test("wikido topics: published readable by signed-in users, drafts superadmin-only, writes superadmin-only", async () => {
+  const asSuper = db("rootAdmin", { platformRole: "superadmin" });
+  const asUser = db("parentA");
+  const signedOut = testEnv.unauthenticatedContext().firestore();
+  // studio callables (Admin SDK / superadmin) create topic docs
+  await assertSucceeds(setDoc(doc(asSuper, "wikidoTopics", "water-cycle"), { title: "The Water Cycle", status: "draft" }));
+  // drafts: superadmin may read, other signed-in users may not
+  await assertSucceeds(getDoc(doc(asSuper, "wikidoTopics", "water-cycle")));
+  await assertFails(getDoc(doc(asUser, "wikidoTopics", "water-cycle")));
+  // publishing flips it to signed-in readable
+  await assertSucceeds(updateDoc(doc(asSuper, "wikidoTopics", "water-cycle"), { status: "published" }));
+  await assertSucceeds(getDoc(doc(asUser, "wikidoTopics", "water-cycle")));
+  await assertFails(getDoc(doc(signedOut, "wikidoTopics", "water-cycle")));
+  // nobody but the superadmin writes
+  await assertFails(setDoc(doc(asUser, "wikidoTopics", "own-topic"), { title: "x", status: "published" }));
+  await assertFails(updateDoc(doc(asUser, "wikidoTopics", "water-cycle"), { status: "draft" }));
+});
+
 test("child skill binding: parent may write, viewer may not", async () => {
   const asParent = db("parentA");
   await assertSucceeds(

@@ -7,8 +7,12 @@ const route = useRoute();
 
 <template>
   <div class="app-shell">
-    <AppNav />
-    <main class="app-main" :class="{ 'app-main-wide': route.path === '/platform' }">
+    <!-- Immersive routes (Wikido) own the whole screen — no nav chrome. -->
+    <AppNav v-if="!route.meta.immersive" />
+    <main
+      class="app-main"
+      :class="{ 'app-main-wide': route.path === '/platform', 'app-main-immersive': route.meta.immersive }"
+    >
       <RouterView />
     </main>
     <ContentBackfill />
@@ -31,4 +35,5 @@ const route = useRoute();
 </style>
 <style scoped>
 .app-main-wide { max-width: none; padding: 0; background: #f5f6fa; }
+.app-main-immersive { max-width: none; padding: 0; overflow: hidden; }
 </style>

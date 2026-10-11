@@ -11,7 +11,9 @@ const route = useRoute();
 // click, Escape, route change, or submenu navigation.
 const gamesOpen = ref(false);
 const gamesMenu = ref(null);
-const gamesActive = computed(() => route.path.startsWith("/explore") || route.path.startsWith("/phonics"));
+const gamesActive = computed(() =>
+  route.path.startsWith("/explore") || route.path.startsWith("/phonics") || route.path.startsWith("/wikido")
+);
 
 function toggleGames() {
   gamesOpen.value = !gamesOpen.value;
@@ -103,6 +105,10 @@ onBeforeUnmount(() => {
             <RouterLink to="/explore" class="nav-link c-peach" @click="closeGames">
               <span class="material-symbols-rounded">rocket_launch</span>
               <span class="lbl">Explore</span>
+            </RouterLink>
+            <RouterLink to="/wikido" class="nav-link c-yellow" @click="closeGames">
+              <span class="material-symbols-rounded">travel_explore</span>
+              <span class="lbl">Wikido</span>
             </RouterLink>
             <RouterLink to="/phonics" class="nav-link c-mint" @click="closeGames">
               <span class="material-symbols-rounded">abc</span>

@@ -23,6 +23,7 @@ function makeRouter() {
     routes: [
       { path: "/", component: { template: "<div>home</div>" } },
       { path: "/explore", component: { template: "<div>explore</div>" } },
+      { path: "/wikido", component: { template: "<div>wikido</div>" } },
       { path: "/phonics", component: { template: "<div>phonics</div>" } },
     ],
   });
@@ -59,7 +60,7 @@ describe("AppNav GAMES menu", () => {
     expect(wrapper.find(".games-menu").exists()).toBe(false);
   });
 
-  it("shows a Games toggle that reveals Explore + Phonics submenu links", async () => {
+  it("shows a Games toggle that reveals Explore + Wikido + Phonics submenu links", async () => {
     authState.user = { uid: "u1" };
     authState.hasFamily = true;
     const { wrapper } = await mountNav();
@@ -73,11 +74,13 @@ describe("AppNav GAMES menu", () => {
     await toggle.trigger("click");
     expect(toggle.attributes("aria-expanded")).toBe("true");
     const items = wrapper.findAll(".games-dropdown .nav-link");
-    expect(items).toHaveLength(2);
+    expect(items).toHaveLength(3);
     expect(items[0].attributes("href")).toBe("/explore");
     expect(items[0].text()).toContain("Explore");
-    expect(items[1].attributes("href")).toBe("/phonics");
-    expect(items[1].text()).toContain("Phonics");
+    expect(items[1].attributes("href")).toBe("/wikido");
+    expect(items[1].text()).toContain("Wikido");
+    expect(items[2].attributes("href")).toBe("/phonics");
+    expect(items[2].text()).toContain("Phonics");
     // The submenu entries must stay ORDINARY LINKS. role="menuitem" hid them
     // from every link-role query (and promised menu keyboard behaviour we don't
     // implement) — a real browser then couldn't find "Phonics" by link role.
@@ -92,7 +95,7 @@ describe("AppNav GAMES menu", () => {
     const { wrapper, router } = await mountNav();
 
     await wrapper.find(".games-toggle").trigger("click");
-    await wrapper.findAll(".games-dropdown .nav-link")[1].trigger("click");
+    await wrapper.findAll(".games-dropdown .nav-link")[2].trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.path).toBe("/phonics");
     expect(wrapper.find(".games-dropdown").exists()).toBe(false);
@@ -126,6 +129,10 @@ describe("AppNav GAMES menu", () => {
 
     await router.push("/explore");
     await router.isReady();
+    expect(toggle.classes()).toContain("router-link-active");
+
+    await router.push("/wikido");
+    await flushPromises();
     expect(toggle.classes()).toContain("router-link-active");
   });
 });

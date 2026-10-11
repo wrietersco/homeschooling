@@ -110,6 +110,25 @@ export { importQaida, getQaidaStatus, requestQaidaAudio, stopQaidaAudio, qaidaAu
 // Superadmin model tooling — catalog, live preview, and a test-all health check.
 export { getModelCatalog, previewModel, testAllModels } from "./platform/modelTools.js";
 
+// Wikido Studio (superadmin) — generate immersive picture-encyclopedia topics
+// on any subject, grow them layer by layer, curate, and publish. Topics live in
+// the wikidoTopics collection; artwork in Storage under wikido/.
+export {
+  generateWikidoTopic,
+  addWikidoChildScene,
+  suggestWikidoScenes,
+  planWikidoOutline,
+  generateWikidoSceneImage,
+  generateWikidoImages,
+  saveWikidoTopic,
+  setWikidoTopicStatus,
+  deleteWikidoTopic,
+  attachWikidoAudio,
+  generateWikidoSpotDetails,
+  planWikidoDepth,
+  reorderWikidoTopics,
+} from "./agents/wikido.js";
+
 // Scheduled maintenance — reap stale queue claims, delete expired player tokens,
 // and reconcile agent-index counts. (audit #6, #15)
 export { maintenanceWorker } from "./platform/maintenance.js";

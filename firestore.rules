@@ -119,6 +119,15 @@ service cloud.firestore {
       allow write: if isSuperAdmin();
     }
 
+    // Wikido encyclopedia topics (top-level): generated and curated by the
+    // superadmin in the Wikido Studio. Published topics are readable by any
+    // signed-in user (drafts stay superadmin-only for previewing). All writes
+    // go through the studio callables — clients never write directly.
+    match /wikidoTopics/{topicId} {
+      allow read: if isSuperAdmin() || (signedIn() && resource.data.status == 'published');
+      allow write: if isSuperAdmin();
+    }
+
     match /families/{familyId} {
       // Family creation/deletion is server-side only (callables w/ Admin SDK).
       allow read: if isMember(familyId) || isSuperAdmin();
