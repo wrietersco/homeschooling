@@ -451,16 +451,30 @@ export const setWikidoTopicStatus = onCall(async (request) => {
   const status = String(request.data?.status || "");
   if (!topicId) throw new HttpsError("invalid-argument", "Missing topic.");
   if (!["draft", "published"].includes(status)) throw new HttpsError("invalid-argument", "Status must be draft or published.");
+  const docRef = topicsCol().doc(topicId);
+  const snap = await docRef.get();
+  if (!snap.exists) throw new HttpsError("not-found", "That topic no longer exists.");
+  const pack = snap.data();
+  const nextDoc = { ...pack, status, updatedAt: Date.now() };
   if (status === "published") {
-    // every scene must have real artwork before children can see the topic
-    const snap = await topicsCol().doc(topicId).get();
-    if (!snap.exists) throw new HttpsError("not-found", "That topic no longer exists.");
-    const errors = validateTopicPack(snap.data());
-    if (errors.length) {
-      throw new HttpsError("failed-precondition", `Cannot publish yet: ${errors.slice(0, 5).join(" · ")}`);
+    // Publishing is the strict gate — but the system repairs what is trivially
+    // repairable first (missing hotspot ids from older builds, etc.), persists
+    // the repaired pack, and blocks only on what genuinely cannot ship.
+    const { pack: normalized } = normalizeForSave(pack, topicId);
+    nextDoc.id = topicId;
+    nextDoc.discoveryCount = countDiscoveries(normalized);
+    nextDoc.scenes = normalized.scenes;
+    nextDoc.rootSceneId = normalized.rootSceneId;
+    nextDoc.title = normalized.title || nextDoc.title;
+    nextDoc.tagline = normalized.tagline || nextDoc.tagline;
+    nextDoc.emoji = normalized.emoji || nextDoc.emoji;
+    nextDoc.artStyle = normalized.artStyle || nextDoc.artStyle;
+    const strictErrors = validateTopicPack(nextDoc);
+    if (strictErrors.length) {
+      throw new HttpsError("failed-precondition", `Cannot publish yet: ${strictErrors.slice(0, 5).join(" · ")}`);
     }
   }
-  await topicsCol().doc(topicId).set({ status, updatedAt: Date.now() }, { merge: true });
+  await docRef.set(withoutUndefined(nextDoc));
   return { status };
 });
 
