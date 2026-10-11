@@ -14,7 +14,7 @@ const props = defineProps({
   placement: { type: Object, default: null },
 });
 const emit = defineEmits(["select", "activate"]);
-const style = computed(() =>
+const placementStyle = computed(() =>
   props.placement
     ? { left: `${props.placement.left}px`, top: `${props.placement.top}px` }
     : { left: `${props.spot.x}%`, top: `${props.spot.y}%` }
@@ -33,7 +33,7 @@ const edgeClass = computed(() => {
     type="button"
     class="wd-hot"
     :class="[edgeClass, { open, seen }]"
-    :style="style"
+    :style="placementStyle"
     :aria-label="`${spot.label}${spot.childSceneId ? ' — step inside' : ''}`"
     @click="emit('select')"
     @dblclick.stop="emit('activate')"

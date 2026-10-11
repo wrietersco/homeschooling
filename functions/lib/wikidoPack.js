@@ -332,7 +332,7 @@ export function buildOutlinePrompt({ topicTitle, parentScene, existingTitles = [
 Plan a BRANCH of new deeper scenes under the scene "${parentScene.title}" ("${parentScene.narration}"), which already has the spots: ${(parentScene.hotspots || []).map((h) => h.label).join(", ") || "none"}.
 Scenes that already exist (never repeat or near-duplicate them): ${existingTitles.length ? existingTitles.join(", ") : "none"}.
 
-Plan about ${total} new scenes in total, at most ${depth} levels deep and at most ${OUTLINE_LIMITS.maxChildren} children under any scene. Each scene must zoom INTO one concrete, drawable thing. Order siblings by learning flow (what a child should meet first comes first); a child scene must build on its parent.
+Plan about ${total} new scenes in total, at most ${depth} levels deep and at most ${OUTLINE_LIMITS.maxChildren} children under any scene. Each scene must zoom INTO one concrete, drawable thing, and its artPrompt must visually CONTINUE the parent picture (same world, style, palette, lighting — a zoom-in, not a new world). Order siblings by learning flow (what a child should meet first comes first); a child scene must build on its parent.
 
 Output ONLY this JSON, no fences or commentary:
 { "outline": [ { "label": "short scene name, max 5 words", "focus": "one sentence on what it teaches", "children": [ same shape, optional ] } ] }`;
@@ -495,4 +495,26 @@ export function normalizeDepthPlan(raw, pack, maxScenes = 3) {
     branches.push({ parentSceneId, outline: branch.outline });
   }
   return { branches, skipped };
+}
+
+// ── Visual coherence across depth ─────────────────────────────────────────────
+// The scene whose doorway opens this one (null for roots and orphans).
+export function parentSceneOf(scenes, sceneId) {
+  for (const s of Object.values(scenes || {})) {
+    if ((s.hotspots || []).some((h) => h.childSceneId === sceneId)) return s;
+  }
+  return null;
+}
+
+// Coherence instruction prepended to a child scene's artwork generation: the
+// reference (parent picture) anchors style, palette, lighting and textures so
+// deeper layers read as the same world.
+export function coherencePrompt(referenceTitle) {
+  return (
+    `The reference image is the parent scene of this picture-book page. Create the NEXT page: ` +
+    `keep the EXACT same illustration style, color palette, lighting mood, texture quality ` +
+    `and level of detail, so the two pictures read as one continuous world` +
+    (referenceTitle ? ` — this page zooms deeper from "${referenceTitle}"` : "") +
+    `.`
+  );
 }

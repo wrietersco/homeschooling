@@ -38,7 +38,7 @@ const sceneEl = ref(null);
 // spot pins must land on the object they mark even though the artwork is
 // displayed with `cover` (cropped) — map picture % → on-screen px
 const artEl = ref(null);
-const { onArtworkLoad, pinStyle } = useCoverPlacement(artEl);
+const { onArtworkLoad, pinPosition } = useCoverPlacement(artEl);
 
 function onMove(e) {
   if (!calibrating.value || !sceneEl.value) return;
@@ -112,7 +112,7 @@ async function toggleFullscreen() {
           v-for="spot in scene.hotspots"
           :key="spot.id"
           :spot="spot"
-          :placement="pinStyle(spot.x, spot.y)"
+          :placement="pinPosition(spot.x, spot.y)"
           :seen="seen(topic.id, `hotspot:${scene.id}:${spot.id}`)"
           :open="selectedId === spot.id"
           @select="pick(spot)"

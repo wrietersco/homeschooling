@@ -14,6 +14,8 @@ import {
   normalizeSpotDetails,
   buildDepthPrompt,
   normalizeDepthPlan,
+  parentSceneOf,
+  coherencePrompt,
 } from "../lib/wikidoPack.js";
 import { audioClipPath, validateAudioPayload, withoutUndefined } from "../agents/wikido.js";
 import { normalizeForSave } from "../lib/wikidoPack.js";
@@ -391,4 +393,19 @@ test("withoutUndefined strips undefined values from write payloads", () => {
   assert.equal(factSpot.label, "What is a star");
   assert.equal(clean["scenes.astronomy-overview.hotspots"][1].audio, "https://x/m.mp3");
   assert.equal(clean.updatedAt, 123);
+});
+
+test("parentSceneOf finds the scene whose doorway opens the target", () => {
+  const scenes = {
+    root: { id: "root", title: "Root", hotspots: [{ id: "d", childSceneId: "deep" }] },
+    deep: { id: "deep", title: "Deep", hotspots: [] },
+  };
+  assert.equal(parentSceneOf(scenes, "deep").id, "root");
+  assert.equal(parentSceneOf(scenes, "root"), null);
+});
+
+test("coherencePrompt anchors the child picture to the parent world", () => {
+  const p = coherencePrompt("The Moon's Surface");
+  assert.ok(p.includes("EXACT same illustration style"));
+  assert.ok(p.includes("The Moon's Surface"));
 });

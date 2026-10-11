@@ -31,9 +31,14 @@ export function useCoverPlacement(containerRef) {
     measure();
   }
 
-  // → { left: "123px", top: "456px" } for :style binding
+  // → { left: 123, top: 456 } in CONTAINER PIXELS (numbers — callers add units)
+  function pinPosition(percentX, percentY) {
+    return coverMap(percentX, percentY, box.value.w, box.value.h, natural.value.w, natural.value.h);
+  }
+
+  // ready-to-bind :style variant
   function pinStyle(percentX, percentY) {
-    const { left, top } = coverMap(percentX, percentY, box.value.w, box.value.h, natural.value.w, natural.value.h);
+    const { left, top } = pinPosition(percentX, percentY);
     return { left: `${left}px`, top: `${top}px` };
   }
 
@@ -55,5 +60,5 @@ export function useCoverPlacement(containerRef) {
     };
   }
 
-  return { onArtworkLoad, pinStyle, picturePercent };
+  return { onArtworkLoad, pinPosition, pinStyle, picturePercent };
 }

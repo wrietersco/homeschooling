@@ -27,6 +27,8 @@ import {
   uniquePackId,
   slugify,
   parseLlmJson,
+  parentSceneOf,
+  coherencePrompt,
   buildDepthPrompt,
   normalizeDepthPlan,
 } from "../lib/wikidoPack.js";
@@ -61,13 +63,16 @@ export function withoutUndefined(value) {
 
 // Image model call pinned to a 16:9 canvas (the platform's storybook helper is
 // 1:1 — scenes need widescreen). Same endpoint + retry posture as imageGen.
-async function callImageModelWide({ prompt, apiKey, fetchImpl = globalThis.fetch }) {
+async function callImageModelWide({ prompt, apiKey, reference = null, fetchImpl = globalThis.fetch }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${IMAGE_MODEL}:generateContent`;
+  const parts = reference
+    ? [{ text: prompt }, { inlineData: { mimeType: reference.mime, data: reference.data } }]
+    : [{ text: prompt }];
   const res = await fetchImpl(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
+      contents: [{ parts }],
       generationConfig: { responseModalities: ["IMAGE"], imageConfig: { aspectRatio: "16:9" } },
     }),
   });
@@ -326,10 +331,37 @@ export const planWikidoOutline = onCall(
 );
 
 // ── Artwork ───────────────────────────────────────────────────────────────────
+// Scene artwork is generated WITH the parent scene's picture as a visual
+// reference (when one exists), so deeper layers keep the same style, palette,
+// lighting and textures as the world they belong to.
 async function generateSceneImageFor(pack, topicId, sceneId) {
   const scene = pack.scenes[sceneId];
-  const prompt = [pack.artStyle, scene.artPrompt || scene.image?.alt || scene.title].filter(Boolean).join(" ");
-  const { data, mime } = await callImageModelWide({ prompt, apiKey: process.env.GEMINI_API_KEY });
+  const parent = parentSceneOf(pack.scenes, sceneId);
+  const parentArt = String(parent?.image?.src || "");
+  const prompt = [
+    pack.artStyle,
+    scene.artPrompt || scene.image?.alt || scene.title,
+    parentArt.startsWith("http") ? coherencePrompt(parent?.title) : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  let reference = null;
+  if (parentArt.startsWith("http")) {
+    try {
+      const res = await fetch(parentArt);
+      if (res.ok) {
+        reference = {
+          mime: res.headers.get("content-type") || "image/jpeg",
+          data: Buffer.from(await res.arrayBuffer()).toString("base64"),
+        };
+      }
+    } catch (e) {
+      console.warn(`[wikido] reference fetch failed for ${sceneId}:`, e?.message || e);
+    }
+  }
+
+  const { data, mime } = await callImageModelWide({ prompt, apiKey: process.env.GEMINI_API_KEY, reference });
   const url = await uploadSceneImage(topicId, sceneId, data, mime);
   const alt = scene.image?.alt || scene.title;
   await topicsCol().doc(topicId).set(
