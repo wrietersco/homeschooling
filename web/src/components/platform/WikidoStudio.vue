@@ -651,6 +651,7 @@ async function addMoreDepth() {
     }
     let added = 0;
     const createdScenes = [];
+    const failedItems = [];
     for (const branch of plan.branches) {
       const outline = withKeys(branch.outline);
       depthNote.value = `Writing “${branch.outline[0]?.label || "new scenes"}” under “${branch.parentTitle}”…`;
@@ -665,11 +666,21 @@ async function addMoreDepth() {
       });
       added += run.created.length;
       createdScenes.push(...run.created);
+      for (const item of run.items) {
+        if (item.status === "failed") failedItems.push(`${item.label}: ${item.error}`);
+      }
     }
     await refresh(true);
     loadSelected();
     if (createdScenes[0] && form.value.scenes[createdScenes[0]]) selectedSceneId.value = createdScenes[0];
-    message.value = `Added ${added} new deeper scenes with full content — paint them with “Generate artwork”.`;
+    if (added && failedItems.length) {
+      error.value = `Some scenes failed: ${failedItems.slice(0, 3).join(" · ")} — press ✦ Add more depth again for the rest.`;
+    }
+    if (added) {
+      message.value = `Added ${added} new deeper scenes with full content — paint them with “Generate artwork”.`;
+    } else {
+      error.value = error.value || `No scenes could be added: ${failedItems[0] || "the assessment came back empty — try again."}`;
+    }
   } catch (e) {
     error.value = e?.message?.replace("internal: ", "") || "Could not add more depth.";
   } finally {

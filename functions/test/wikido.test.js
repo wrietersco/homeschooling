@@ -15,7 +15,7 @@ import {
   buildDepthPrompt,
   normalizeDepthPlan,
 } from "../lib/wikidoPack.js";
-import { audioClipPath, validateAudioPayload } from "../agents/wikido.js";
+import { audioClipPath, validateAudioPayload, withoutUndefined } from "../agents/wikido.js";
 import { normalizeForSave } from "../lib/wikidoPack.js";
 
 const validPack = {
@@ -376,4 +376,19 @@ test("normalizeDepthPlan validates parents, dedupes and caps the budget", () => 
   assert.equal(branches[0].parentSceneId, "root");
   assert.equal(branches[0].outline[0].children[0].label, "Streetlights");
   assert.equal(branches[1].parentSceneId, "thin");
+});
+
+test("withoutUndefined strips undefined values from write payloads", () => {
+  // exactly the crash from prod: a fact spot has no audio and no doorway
+  const hotspots = [
+    { id: "fact-spot", label: "What is a star", info: { title: "t", body: ["b"] }, childSceneId: undefined, audio: undefined, x: 22, y: 30 },
+    { id: "door", label: "Moon", childSceneId: "moon", audio: "https://x/m.mp3", x: 10, y: 10 },
+  ];
+  const clean = withoutUndefined({ "scenes.astronomy-overview.hotspots": hotspots, updatedAt: 123 });
+  const factSpot = clean["scenes.astronomy-overview.hotspots"][0];
+  assert.ok(!("childSceneId" in factSpot));
+  assert.ok(!("audio" in factSpot));
+  assert.equal(factSpot.label, "What is a star");
+  assert.equal(clean["scenes.astronomy-overview.hotspots"][1].audio, "https://x/m.mp3");
+  assert.equal(clean.updatedAt, 123);
 });

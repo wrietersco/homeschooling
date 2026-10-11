@@ -45,6 +45,20 @@ function topicsCol() {
   return getFirestore().collection(COLLECTION);
 }
 
+// Firestore rejects undefined values — strip them from any write payload.
+export function withoutUndefined(value) {
+  if (Array.isArray(value)) return value.map((v) => withoutUndefined(v)).filter((v) => v !== undefined);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v === undefined) continue;
+      out[k] = withoutUndefined(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 // Image model call pinned to a 16:9 canvas (the platform's storybook helper is
 // 1:1 — scenes need widescreen). Same endpoint + retry posture as imageGen.
 async function callImageModelWide({ prompt, apiKey, fetchImpl = globalThis.fetch }) {
@@ -393,7 +407,7 @@ export const saveWikidoTopic = onCall(async (request) => {
     throw new HttpsError("invalid-argument", `Fix these before saving: ${errors.slice(0, 5).join(" · ")}`);
   }
   await docRef.set(
-    { ...normalized, updatedAt: Date.now() },
+    withoutUndefined({ ...normalized, updatedAt: Date.now() }),
     { merge: true }
   );
   return { saved: true, discoveryCount: countDiscoveries(normalized) };
@@ -526,9 +540,9 @@ export const attachWikidoAudio = onCall(
 
     if (hotspotId) {
       const hotspots = scene.hotspots.map((h) => (h.id === hotspotId ? { ...h, audio: url } : h));
-      await docRef.update({ [`scenes.${sceneId}.hotspots`]: hotspots, updatedAt: Date.now() });
+      await docRef.update(withoutUndefined({ [`scenes.${sceneId}.hotspots`]: hotspots, updatedAt: Date.now() }));
     } else {
-      await docRef.update({ [`scenes.${sceneId}.audio`]: url, updatedAt: Date.now() });
+      await docRef.update(withoutUndefined({ [`scenes.${sceneId}.audio`]: url, updatedAt: Date.now() }));
     }
     return { url, path: filePath };
   }
@@ -591,8 +605,8 @@ export const generateWikidoSpotDetails = onCall(
     }
     if (!details) throw new HttpsError("internal", `The agent could not write this spot's details: ${lastError?.message || "unknown error"}`);
 
-    const hotspots = scene.hotspots.map((h) => (h.id === hotspotId ? { ...h, ...details, childSceneId: h.childSceneId, audio: h.audio, x: h.x, y: h.y } : h));
-    await docRef.update({ [`scenes.${sceneId}.hotspots`]: hotspots, updatedAt: Date.now() });
+    const hotspots = scene.hotspots.map((h) => (h.id === hotspotId ? withoutUndefined({ ...h, ...details }) : h));
+    await docRef.update(withoutUndefined({ [`scenes.${sceneId}.hotspots`]: hotspots, updatedAt: Date.now() }));
     return { spot: hotspots[spotIndex] };
   }
 );
