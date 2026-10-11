@@ -130,3 +130,15 @@ export function moveSceneTo(scenes, sceneId, targetParentId, insertIndex = null)
   target.hotspots.splice(at, 0, doorway);
   return next;
 }
+
+// Resolve a drag-drop onto a row: mode "before"/"after" inserts next to that
+// row (same parent), "into" nests under it. Returns a NEW scenes map, or null
+// when the drop is a no-op or disallowed.
+export function moveSceneByDrop(scenes, dragSceneId, rowSceneId, mode) {
+  if (!dragSceneId || dragSceneId === rowSceneId) return null;
+  if (mode !== "after" && mode !== "before") return moveSceneTo(scenes, dragSceneId, rowSceneId);
+  const parent = Object.values(scenes).find((s) => (s.hotspots || []).some((h) => h.childSceneId === rowSceneId));
+  if (!parent) return null;
+  const idx = parent.hotspots.findIndex((h) => h.childSceneId === rowSceneId);
+  return moveSceneTo(scenes, dragSceneId, parent.id, mode === "after" ? idx + 1 : idx);
+}

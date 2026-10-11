@@ -59,7 +59,7 @@ describe("siblings", () => {
   });
 });
 
-import { subtreeSceneIds, canMoveScene, moveSceneTo } from "./tree.js";
+import { subtreeSceneIds, canMoveScene, moveSceneTo, moveSceneByDrop } from "./tree.js";
 
 describe("free drag-and-drop (moveSceneTo)", () => {
   const zoo = {
@@ -115,4 +115,25 @@ describe("free drag-and-drop (moveSceneTo)", () => {
   it("returns null for disallowed moves", () => {
     expect(moveSceneTo(zoo, "animals", "kittens")).toBeNull();
   });
+});
+
+test("moveSceneByDrop resolves row drops: reorder, nest, and rejects no-ops", () => {
+  const scenes = {
+    root: { id: "root", title: "Root", hotspots: [
+      { id: "d-a", childSceneId: "alpha" },
+      { id: "d-b", childSceneId: "beta" },
+    ] },
+    alpha: { id: "alpha", title: "Alpha", hotspots: [{ id: "d-c", childSceneId: "child-c" }] },
+    "child-c": { id: "child-c", title: "Child C", hotspots: [] },
+    beta: { id: "beta", title: "Beta", hotspots: [] },
+  };
+  // drop "beta" BEFORE "alpha" → becomes the first child of root
+  const reordered = moveSceneByDrop(scenes, "beta", "alpha", "before");
+  expect(reordered.root.hotspots.map((h) => h.childSceneId)).toEqual(["beta", "alpha"]);
+  // drop "beta" ONTO "child-c" → nested under it
+  const nested = moveSceneByDrop(scenes, "beta", "child-c", "into");
+  expect(nested.scenes === undefined).toBe(true); // scenes map keyed, beta re-parented
+  expect(nested["child-c"].hotspots.some((h) => h.childSceneId === "beta")).toBe(true);
+  // dropping a scene onto itself is a no-op
+  expect(moveSceneByDrop(scenes, "alpha", "alpha", "into")).toBeNull();
 });

@@ -15,7 +15,7 @@ import {
   checkVoiceoverBridge, synthesizeOnBridge, planVoiceoverClips, attachWikidoAudio, BRIDGE_URL,
   reorderWikidoTopics, sortStudioTopics,
 } from "@/services/wikidoAdmin";
-import { buildSceneTree, moveSceneSibling, subtreeSceneIds, canMoveScene, moveSceneTo } from "@/lib/wikido/tree";
+import { buildSceneTree, moveSceneSibling, subtreeSceneIds, canMoveScene, moveSceneTo, moveSceneByDrop } from "@/lib/wikido/tree";
 import { useCoverPlacement } from "@/composables/useCoverPlacement";
 import { spotOutcome, sceneStatus, deletePlan, deleteSceneFrom, topicHealth, undoBuiltScenes, spotNeedsDetails } from "@/lib/wikido/studioModel";
 import { withKeys, countOutline, removeOutlineNode, runOutline, summarizeRun, retryFailedItems } from "@/lib/wikido/outlineBuild";
@@ -303,29 +303,14 @@ function onRowDragOver(e, rowSceneId) {
   dropHint.value = { rowId: rowSceneId, mode: rel < 0.3 ? "before" : rel > 0.7 ? "after" : "into" };
 }
 function onRowDrop(e, rowSceneId) {
+  // read the drag id BEFORE onDragEnd clears the state
+  const dragId = dragSceneId.value || e.dataTransfer?.getData("text/plain") || "";
   const hint = dropHint.value;
   onDragEnd();
-  if (!hint || hint.rowId !== rowSceneId || !dragSceneId.value) {
-    const id = e.dataTransfer?.getData?.("text/plain") || "";
-    if (!id || id === rowSceneId) return;
-    applyMove(id, rowSceneId, "into");
-    return;
-  }
-  applyMove(dragSceneId.value, rowSceneId, hint.mode);
-}
-function applyMove(dragId, rowSceneId, mode) {
-  const scenes = form.value.scenes;
-  if (mode === "into") {
-    const next = moveSceneTo(scenes, dragId, rowSceneId);
-    if (next) form.value.scenes = next;
-    return;
-  }
-  // before/after a row: insert into that row's parent at the row's position
-  const parent = Object.values(scenes).find((s) => (s.hotspots || []).some((h) => h.childSceneId === rowSceneId));
-  if (!parent) return; // the root and orphans have no parent to insert into
-  const idx = parent.hotspots.findIndex((h) => h.childSceneId === rowSceneId);
-  const next = moveSceneTo(scenes, dragId, parent.id, mode === "after" ? idx + 1 : idx);
-  if (next) form.value.scenes = next;
+  const next = moveSceneByDrop(form.value.scenes, dragId, rowSceneId, hint?.mode || "into");
+  if (!next) return;
+  form.value.scenes = next;
+  message.value = "Scene moved — remember to save your edits.";
 }
 
 const canMove = (sceneId, dir) => {
