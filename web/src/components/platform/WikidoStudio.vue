@@ -18,7 +18,7 @@ import {
 import { buildSceneTree, moveSceneSibling } from "@/lib/wikido/tree";
 import { useCoverPlacement } from "@/composables/useCoverPlacement";
 import { spotOutcome, sceneStatus, deletePlan, deleteSceneFrom, topicHealth, undoBuiltScenes, spotNeedsDetails } from "@/lib/wikido/studioModel";
-import { withKeys, countOutline, removeOutlineNode, runOutline, summarizeRun } from "@/lib/wikido/outlineBuild";
+import { withKeys, countOutline, removeOutlineNode, runOutline, summarizeRun, retryFailedItems } from "@/lib/wikido/outlineBuild";
 
 // ── topic list ────────────────────────────────────────────────────────────────
 const topics = ref([]);
@@ -425,6 +425,16 @@ async function buildOutline() {
       onUpdate: (items) => { buildItems.value = items; },
       shouldStop: () => stopRequested.value,
     });
+    // the system retries transient failures automatically — once
+    if (run.items.some((i) => i.status === 'failed')) {
+      buildNote.value = 'Retrying failed scenes…';
+      await retryFailedItems({
+        items: run.items,
+        createScene: (args) => addWikidoChildScene({ topicId: selectedId.value, ...args }),
+        rootParentSceneId: parentId,
+        onUpdate: (items) => { buildItems.value = items; },
+      });
+    }
   } finally {
     building.value = false;
   }
@@ -658,12 +668,25 @@ async function addMoreDepth() {
       const run = await runOutline({
         outline,
         parentSceneId: branch.parentSceneId,
-        createScene: addWikidoChildScene,
+        createScene: (args) => addWikidoChildScene({ topicId: selectedId.value, ...args }),
         onUpdate: (items) => {
           const s = summarizeRun(items);
           depthNote.value = `Writing scenes… ${s.done} done${s.failed ? `, ${s.failed} failed` : ""}.`;
         },
       });
+      // the system retries transient failures automatically — once
+      if (run.items.some((i) => i.status === "failed")) {
+        depthNote.value = "Retrying failed scenes…";
+        await retryFailedItems({
+          items: run.items,
+          createScene: (args) => addWikidoChildScene({ topicId: selectedId.value, ...args }),
+          rootParentSceneId: branch.parentSceneId,
+          onUpdate: (items) => {
+            const s = summarizeRun(items);
+            depthNote.value = `Retrying… ${s.done} done${s.failed ? `, ${s.failed} failed` : ""}.`;
+          },
+        });
+      }
       added += run.created.length;
       createdScenes.push(...run.created);
       for (const item of run.items) {

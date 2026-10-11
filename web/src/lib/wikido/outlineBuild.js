@@ -91,3 +91,36 @@ export function summarizeRun(items) {
   const count = (s) => items.filter((i) => i.status === s).length;
   return { done: count("done"), failed: count("failed"), skipped: count("skipped"), pending: count("pending") };
 }
+
+// One automatic retry pass over failed scenes whose parent was built — the
+// system's way of handling transient agent failures without user effort.
+// Mutates the items array in place (status/sceneId), updates live via onUpdate,
+// and returns the number of scenes rescued. Items whose parent also failed are
+// left failed (retrying them can't succeed yet).
+export async function retryFailedItems({ items, createScene, rootParentSceneId = null, onUpdate = () => {} }) {
+  const byKey = new Map(items.map((i) => [i.key, i]));
+  const failed = items.filter((i) => i.status === "failed");
+  let rescued = 0;
+  const emit = () => onUpdate(items.map((i) => ({ ...i })));
+  for (const item of failed) {
+    const parent = item.parentKey ? byKey.get(item.parentKey) : null;
+    if (parent && parent.status !== "done") continue;
+    item.status = "running";
+    emit();
+    try {
+      const res = await createScene({
+        parentSceneId: parent ? parent.sceneId : rootParentSceneId,
+        label: item.label,
+        focus: item.focus,
+      });
+      item.sceneId = res.sceneId;
+      item.status = "done";
+      rescued += 1;
+    } catch (e) {
+      item.status = "failed";
+      item.error = String(e?.message || e).replace(/^(internal|invalid-argument|failed-precondition): /, "").slice(0, 200);
+    }
+    emit();
+  }
+  return { rescued };
+}
