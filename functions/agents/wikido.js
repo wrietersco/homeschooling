@@ -19,6 +19,8 @@ import {
   normalizeOutline,
   OUTLINE_LIMITS,
   buildSpotDetailsPrompt,
+  buildSpotPlacementPrompt,
+  normalizeSpotPlacements,
   normalizeSpotDetails,
   normalizeGeneratedPack,
   normalizeForSave,
@@ -364,11 +366,46 @@ async function generateSceneImageFor(pack, topicId, sceneId) {
   const { data, mime } = await callImageModelWide({ prompt, apiKey: process.env.GEMINI_API_KEY, reference });
   const url = await uploadSceneImage(topicId, sceneId, data, mime);
   const alt = scene.image?.alt || scene.title;
+
+  // ── agent-placed spot coordinates ─────────────────────────────────────────
+  // A vision pass reads the FINISHED picture and returns where every spot
+  // belongs (percentages of this exact picture) — the system places the spots,
+  // the curator fine-tunes by dragging pins afterwards.
+  let placements = null;
+  try {
+    const db = getFirestore();
+    const { llm, genConfig, provider } = await resolveLlm(db, "wikido", { gemini: process.env.GEMINI_API_KEY });
+    if (llm) {
+      const vision = await llm.generate({
+        system: buildSpotPlacementPrompt({ scene: { ...scene, image: { src: "(attached)", alt } } }),
+        contents: [{
+          role: "user",
+          parts: [
+            { text: "Place every spot now. Output the JSON object only." },
+            { inlineData: { mimeType: mime, data: data.toString("base64") } },
+          ],
+        }],
+        config: { ...genConfig, temperature: genConfig?.temperature ?? 0.2, maxOutputTokens: Math.max(genConfig?.maxOutputTokens || 0, 2048) },
+      });
+      const { placements: placed } = normalizeSpotPlacements(parseLlmJson(vision.text), scene.hotspots);
+      placements = placed;
+    }
+  } catch (e) {
+    console.warn(`[wikido] spot placement failed for ${sceneId}:`, e?.message || e);
+  }
+
+  const hotspots = (scene.hotspots || []).map((h) => {
+    const placed = placements?.find((p) => p.id === h.id);
+    return placed ? { ...h, x: placed.x, y: placed.y } : h;
+  });
   await topicsCol().doc(topicId).set(
-    { scenes: { [sceneId]: { ...scene, image: { src: url, alt } } }, updatedAt: Date.now() },
+    {
+      scenes: { [sceneId]: { ...scene, image: { src: url, alt }, hotspots } },
+      updatedAt: Date.now(),
+    },
     { merge: true }
   );
-  return url;
+  return { url, placed: placements?.length || 0 };
 }
 
 export const generateWikidoSceneImage = onCall(

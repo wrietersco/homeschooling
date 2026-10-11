@@ -518,3 +518,46 @@ export function coherencePrompt(referenceTitle) {
     `.`
   );
 }
+
+// ── Agent-placed spot coordinates ─────────────────────────────────────────────
+// After artwork is generated, a vision call reads the finished picture and
+// returns where each spot belongs, in percentages of that exact picture.
+
+export function buildSpotPlacementPrompt({ scene }) {
+  const spots = (scene.hotspots || [])
+    .map((h) => ({ id: h.id, label: h.label, blurb: h.blurb, info: h.info }));
+  return `You are a precise art director for a children's picture-encyclopedia.
+
+Below is the FINISHED illustration for the scene "${scene.title}". For each spot listed, decide the very best (x, y) position — in percentages of the picture, where x=0 is the left edge, x=100 the right edge, y=0 the top, y=100 the bottom — so the spot's dot sits exactly on the object or area it describes. Use what is actually visible in the picture.
+
+Spots to place:
+${JSON.stringify(spots, null, 2)}
+
+Rules:
+1. Positions must match what is really drawn in THIS picture (a label about a giraffe goes on the giraffe).
+2. Keep spots inside 5–95 on both axes, away from the exact edges.
+3. Two spots must not overlap.
+4. Output ONLY this JSON, no fences or commentary:
+{ "placements": [ { "id": "spot-id", "x": 42, "y": 30 } ] }`;
+}
+
+// Match the model's placements back onto the scene's hotspots. Spots the model
+// couldn't place keep their current coordinates. Returns
+// { placements: [{ id, x, y }], unmatched: string[] }.
+export function normalizeSpotPlacements(parsed, hotspots) {
+  const byId = new Map((hotspots || []).map((h) => [h.id, h.id]));
+  const byLabel = new Map((hotspots || []).map((h) => [h.label.toLowerCase().trim(), h.id]));
+  const placements = [];
+  const unmatched = [];
+  const seen = new Set();
+  for (const p of Array.isArray(parsed?.placements) ? parsed.placements : []) {
+    const id = String(p?.id || "");
+    const x = Math.round(Math.min(95, Math.max(5, Number(p?.x) || 0)) * 10) / 10;
+    const y = Math.round(Math.min(95, Math.max(5, Number(p?.y) || 0)) * 10) / 10;
+    let hotspotId = byId.has(id) ? id : byLabel.get(id.toLowerCase().trim());
+    if (!hotspotId || seen.has(hotspotId)) { unmatched.push(id || "(none)"); continue; }
+    seen.add(hotspotId);
+    placements.push({ id: hotspotId, x, y });
+  }
+  return { placements, unmatched };
+}

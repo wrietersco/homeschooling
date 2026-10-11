@@ -360,6 +360,7 @@ async function save() {
 
 async function generateAllImages() {
   if (generatingImages.value) return;
+  if (dirty.value) { const ok = await save(); if (!ok) return; }
   generatingImages.value = true;
   error.value = "";
   message.value = "Generating artwork… this takes a while (one picture per scene).";

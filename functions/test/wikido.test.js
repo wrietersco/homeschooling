@@ -13,6 +13,8 @@ import {
   buildSpotDetailsPrompt,
   normalizeSpotDetails,
   buildDepthPrompt,
+  buildSpotPlacementPrompt,
+  normalizeSpotPlacements,
   normalizeDepthPlan,
   parentSceneOf,
   coherencePrompt,
@@ -408,4 +410,42 @@ test("coherencePrompt anchors the child picture to the parent world", () => {
   const p = coherencePrompt("The Moon's Surface");
   assert.ok(p.includes("EXACT same illustration style"));
   assert.ok(p.includes("The Moon's Surface"));
+});
+
+test("buildSpotPlacementPrompt lists spots and asks for bounded percentages", () => {
+  const scene = {
+    id: "s", title: "Look Up!", narration: "n",
+    image: { src: "(attached)", alt: "a" },
+    hotspots: [
+      { id: "moon", label: "The Moon", blurb: "b", x: 50, y: 50, info: { title: "t", body: ["x"] } },
+      { id: "scope", label: "Telescope", blurb: "b", x: 80, y: 70, info: { title: "t", body: ["x"] } },
+    ],
+  };
+  const prompt = buildSpotPlacementPrompt({ scene });
+  assert.ok(prompt.includes('"id": "moon"'));
+  assert.ok(prompt.includes("Telescope"));
+  assert.ok(prompt.includes("5–95"));
+  assert.ok(prompt.includes("percentages of the picture"));
+});
+
+test("normalizeSpotPlacements matches by id or label, clamps, and dedupes", () => {
+  const hotspots = [
+    { id: "moon", label: "The Moon", x: 50, y: 50 },
+    { id: "scope", label: "Telescope", x: 50, y: 50 },
+  ];
+  const { placements, unmatched } = normalizeSpotPlacements(
+    { placements: [
+      { id: "moon", x: 22, y: 30 },
+      { id: "Telescope", x: 120, y: -5 },       // matched by label, clamped
+      { id: "ghost", x: 10, y: 10 },            // unknown — ignored
+      { id: "moon", x: 60, y: 60 },             // duplicate — ignored
+    ] },
+    hotspots
+  );
+  assert.equal(placements.length, 2);
+  const moon = placements.find((p) => p.id === "moon");
+  const scope = placements.find((p) => p.id === "scope");
+  assert.deepEqual([moon.x, moon.y], [22, 30]);
+  assert.deepEqual([scope.x, scope.y], [95, 5]);
+  assert.deepEqual(unmatched, ["ghost", "moon"]);
 });
