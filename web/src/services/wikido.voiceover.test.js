@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { planVoiceoverClips, checkVoiceoverBridge, synthesizeOnBridge } from "./wikidoAdmin.js";
+import { planVoiceoverClips, checkVoiceoverBridge, synthesizeOnBridge, startVoiceoverBridge, bridgeLauncherStatus } from "./wikidoAdmin.js";
 import { sortStudioTopics } from "./wikidoAdmin.js";
 
 const pack = {
@@ -80,5 +80,40 @@ describe("voiceover bridge client", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("http://localhost:8787/generate");
     expect(JSON.parse(init.body).items[0].text).toBe("Hello");
+  });
+});
+
+describe("bridge launcher client (dev server)", () => {
+  it("start reports the launched process when the launcher answers", async () => {
+    globalThis.fetch = vi.fn(async (url) => ({
+      ok: true,
+      json: async () => ({ ok: true, pid: 7, alive: true, url }),
+    }));
+    const res = await startVoiceoverBridge();
+    expect(res).toMatchObject({ supported: true, ok: true, pid: 7 });
+  });
+
+  it("start is unsupported when there is no launcher (production hosting, fetch failure, or HTML)", async () => {
+    globalThis.fetch = vi.fn(async () => { throw new TypeError("Failed to fetch"); });
+    expect((await startVoiceoverBridge()).supported).toBe(false);
+    // a rewrite to the SPA's index.html is not JSON → unsupported, not a crash
+    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => { throw new Error("Unexpected token <"); } }));
+    expect((await startVoiceoverBridge()).supported).toBe(false);
+    // the launcher answered with a business error → still unsupported, reason carried
+    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ ok: false, error: "Bridge script not found: x" }) }));
+    const res = await startVoiceoverBridge();
+    expect(res.supported).toBe(false);
+    expect(res.error).toContain("not found");
+  });
+
+  it("status reports the real process state", async () => {
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, managed: true, alive: false, pid: 7, exit: { code: 1 }, output: ["boom"] }),
+    }));
+    const res = await bridgeLauncherStatus();
+    expect(res).toMatchObject({ supported: true, alive: false, exit: { code: 1 }, output: ["boom"] });
+    globalThis.fetch = vi.fn(async () => { throw new TypeError("Failed to fetch"); });
+    expect((await bridgeLauncherStatus()).supported).toBe(false);
   });
 });

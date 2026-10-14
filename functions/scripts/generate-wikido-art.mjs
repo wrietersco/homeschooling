@@ -5,13 +5,15 @@
 // commits the chosen files. Usage:
 //
 //   cd functions
-//   GEMINI_API_KEY=... node scripts/generate-wikido-art.mjs [--topic civilizations]
-//                            [--scene bull-capitals] [--model gemini-3.1-flash-image]
+//   GEMINI_API_KEY=... node scripts/generate-wikido-art.mjs [--topic living-things]
+//                            [--scene human-body] [--model gemini-3.1-flash-image]
 //                            [--dry-run]
 //
 // For every scene the script:
 //   1. composes `pack.artStyle + scene.artPrompt` (both live in the topic pack,
-//      so prompts are curated and versioned next to the content they serve),
+//      so prompts are curated and versioned next to the content they serve)
+//      plus the shared encyclopedia-realism directive (wikidoPack.js), which
+//      rides last so scene art always stays true to life,
 //   2. calls the Gemini image model on a 16:9 canvas,
 //   3. writes web/public/wikido/<topicId>/<sceneId>.jpg, and
 //   4. patches the pack's image src for that scene (.svg placeholder → .jpg).
@@ -22,6 +24,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { wikidoTopicPacks } from "../../web/src/lib/wikido/index.js";
+import { composeSceneArtPrompt } from "../lib/wikidoPack.js";
 
 const args = process.argv.slice(2);
 function argOf(name, fallback = "") {
@@ -104,7 +107,7 @@ for (const pack of packs) {
       console.log(`• ${scene.id}: no artPrompt — skipped (write one in the pack first)`);
       continue;
     }
-    const prompt = `${pack.artStyle || ""} ${scene.artPrompt}`.trim();
+    const prompt = composeSceneArtPrompt({ artStyle: pack.artStyle || "", artPrompt: scene.artPrompt });
     console.log(`• ${scene.id}`);
     if (dryRun) {
       console.log(`  [dry-run] ${prompt}\n`);

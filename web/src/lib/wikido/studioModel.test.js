@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { spotOutcome, sceneStatus, descendantSceneIds, deletePlan, deleteSceneFrom, topicHealth, spotNeedsDetails } from "./studioModel";
+import { spotOutcome, sceneStatus, descendantSceneIds, deletePlan, deleteSceneFrom, topicHealth, spotNeedsDetails, bundledTopicSummaries } from "./studioModel";
 
 const img = { src: "https://x/y.png", alt: "a" };
 const spot = (id, childSceneId) => ({ id, label: id, x: 1, y: 1, blurb: `The ${id} teaser.`, info: { title: id, body: [`About ${id}.`], fact: `A ${id} fact.` }, ...(childSceneId ? { childSceneId } : {}) });
@@ -16,6 +16,25 @@ describe("spotOutcome", () => {
     expect(spotOutcome(s, spot("a", "mid"))).toMatchObject({ kind: "scene", targetId: "mid", text: "Opens “Mid”" });
     expect(spotOutcome(s, spot("z", "gone")).kind).toBe("broken");
   });
+
+  it("describes cross-topic doorways as doors into another world", () => {
+    const s = scenes();
+    const worlds = new Map([["astronomy", { id: "astronomy", title: "Astronomy", status: "published", scenes: { "solar-system": { id: "solar-system", title: "The Solar System" } } }]]);
+    const worldDoor = { ...spot("w", "solar-system"), childTopicId: "astronomy" };
+
+    expect(spotOutcome(s, worldDoor, worlds)).toMatchObject({
+      kind: "world",
+      worldId: "astronomy",
+      text: "Opens “The Solar System” in the world “Astronomy”",
+    });
+    // without the worlds catalog the door still reads sensibly
+    expect(spotOutcome(s, worldDoor)).toMatchObject({ kind: "world", text: /another world/ });
+    // a draft world says so
+    const draft = new Map([["astronomy", { ...worlds.get("astronomy"), status: "draft" }]]);
+    expect(spotOutcome(s, worldDoor, draft).text).toContain("(draft)");
+    // an unknown world says which one is missing
+    expect(spotOutcome(s, worldDoor, new Map()).text).toContain("astronomy");
+  });
 });
 
 describe("sceneStatus", () => {
@@ -25,6 +44,15 @@ describe("sceneStatus", () => {
     expect(sceneStatus(s, s.leaf).key).toBe("needs-artwork");
     expect(sceneStatus(s, { ...s.mid, hotspots: [] }).key).toBe("needs-spots");
     expect(sceneStatus(s, { ...s.mid, hotspots: [spot("q", "gone")] }).key).toBe("broken-link");
+  });
+
+  it("treats cross-topic doorways as healthy when their world is known", () => {
+    const s = scenes();
+    const worldDoor = { ...spot("w", "solar-system"), childTopicId: "astronomy" };
+    const worlds = new Map([["astronomy", { id: "astronomy", title: "Astronomy", status: "published" }]]);
+    expect(sceneStatus(s, { ...s.mid, hotspots: [worldDoor] }, worlds).key).toBe("ready");
+    // …and needs attention when the world is unknown
+    expect(sceneStatus(s, { ...s.mid, hotspots: [worldDoor] }, new Map()).key).toBe("broken-link");
   });
 });
 
@@ -42,6 +70,7 @@ describe("delete helpers", () => {
     const next = deleteSceneFrom(scenes(), "mid");
     expect(Object.keys(next)).toEqual(["root", "leaf"]);
     expect(next.root.hotspots[0].childSceneId).toBeUndefined();
+    expect(next.root.hotspots.some(h => h.childSceneId === "leaf")).toBe(true);
   });
 
   it("deleting with deeper scenes removes the subtree and leaves no dangling links", () => {
@@ -64,6 +93,20 @@ describe("topicHealth", () => {
     const s = scenes();
     s.leaf.image = img;
     expect(topicHealth(s, "root")).toEqual([]);
+  });
+
+  it("warns about cross-topic doorways into unknown or draft worlds", () => {
+    const s = scenes();
+    s.leaf.image = img;
+    s.leaf.hotspots = [{ ...spot("w", "solar-system"), childTopicId: "astronomy" }];
+    const worlds = new Map([["astronomy", { id: "astronomy", title: "Astronomy", status: "published" }]]);
+    expect(topicHealth(s, "root", worlds)).toEqual([]);
+
+    const unknown = topicHealth(s, "root", new Map());
+    expect(unknown.some((i) => i.level === "warn" && i.text.includes("unknown world"))).toBe(true);
+
+    const draft = topicHealth(s, "root", new Map([["astronomy", { id: "astronomy", title: "Astronomy", status: "draft" }]]));
+    expect(draft.some((i) => i.level === "warn" && i.text.includes("still a draft"))).toBe(true);
   });
 });
 
@@ -126,5 +169,32 @@ describe("topicHealth placeholder reporting", () => {
     const warn = issues.find((i) => i.text.includes("placeholder details"));
     expect(warn?.level).toBe("warn");
     expect(warn?.sceneId).toBe("root");
+  });
+});
+
+describe("bundledTopicSummaries", () => {
+  const packs = [
+    {
+      id: "living-things", title: "Living Things", tagline: "t", emoji: "🌿",
+      rootSceneId: "root",
+      scenes: {
+        root: { id: "root", hotspots: [{ id: "a" }, { id: "b" }] },
+        leaf: { id: "leaf", hotspots: [{ id: "c" }] },
+      },
+    },
+  ];
+
+  it("summarises every bundled pack with a bundled flag and discovery counts", () => {
+    const [summary] = bundledTopicSummaries(packs);
+    expect(summary).toMatchObject({
+      id: "living-things", title: "Living Things", emoji: "🌿",
+      rootSceneId: "root", discoveryCount: 3, status: "bundled", bundled: true,
+    });
+    expect(Object.keys(summary.scenes)).toEqual(["root", "leaf"]);
+  });
+
+  it("flags unsaved entries as bundled so the studio can create their first draft", () => {
+    expect(bundledTopicSummaries(packs).every((t) => t.bundled && t.status === "bundled")).toBe(true);
+    expect(bundledTopicSummaries([])).toEqual([]);
   });
 });

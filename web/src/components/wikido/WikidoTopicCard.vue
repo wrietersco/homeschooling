@@ -13,8 +13,12 @@ const emit = defineEmits(["open"]);
 <template>
   <button type="button" class="wd-topic" @click="emit('open', topic)">
     <span class="wd-topic-cover">
-      <img :src="topic.cover.src" :alt="topic.cover.alt" loading="lazy" draggable="false" />
+      <img v-if="topic.cover" :src="topic.cover.src" :alt="topic.cover.alt" loading="lazy" draggable="false" />
+      <span v-else class="wd-topic-cover-fallback" aria-hidden="true"></span>
       <span class="wd-topic-emoji" aria-hidden="true">{{ topic.emoji }}</span>
+      <span v-if="topic.view === 'globe'" class="wd-topic-globe">
+        <span class="material-symbols-rounded" aria-hidden="true">public</span> 3D globe
+      </span>
       <span v-if="draft" class="wd-topic-draft">Draft preview</span>
     </span>
     <span class="wd-topic-body">
@@ -59,6 +63,29 @@ const emit = defineEmits(["open"]);
 
 .wd-topic-cover { position: relative; display: block; aspect-ratio: 16 / 8; overflow: hidden; }
 .wd-topic-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.wd-topic-cover-fallback {
+  display: block; width: 100%; height: 100%;
+  background:
+    radial-gradient(80% 120% at 70% 20%, rgba(125, 211, 252, .5), transparent 60%),
+    radial-gradient(60% 100% at 20% 80%, rgba(52, 211, 153, .35), transparent 60%),
+    linear-gradient(150deg, #2E1A5E, #16336E);
+}
+.wd-topic-globe {
+  position: absolute;
+  left: 12px;
+  top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: #164E63;
+  background: #A5F3FC;
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .35);
+}
+.wd-topic-globe .material-symbols-rounded { font-size: 14px; }
 .wd-topic-emoji {
   position: absolute;
   left: 12px;

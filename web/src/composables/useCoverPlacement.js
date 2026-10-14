@@ -1,7 +1,7 @@
 // Shared placement logic for spot pins drawn over cover-fitted artwork: tracks
 // the container box and the artwork's natural size, and maps picture
 // percentages to on-screen pixels through the cover transform.
-import { ref, onMounted, onBeforeUnmount } from "vue";
+import { ref, watch, onBeforeUnmount } from "vue";
 import { coverMap } from "@/lib/wikido/cover";
 
 export function useCoverPlacement(containerRef) {
@@ -14,13 +14,15 @@ export function useCoverPlacement(containerRef) {
     if (el) box.value = { w: el.clientWidth, h: el.clientHeight };
   };
 
-  onMounted(() => {
+  // The editor's stage appears after its topic loads; observe replacements too.
+  watch(containerRef, (el) => {
+    observer?.disconnect();
     measure();
-    if (typeof ResizeObserver !== "undefined" && containerRef.value) {
+    if (typeof ResizeObserver !== "undefined" && el) {
       observer = new ResizeObserver(measure);
-      observer.observe(containerRef.value);
+      observer.observe(el);
     }
-  });
+  }, { flush: "post", immediate: true });
   onBeforeUnmount(() => observer?.disconnect());
 
   function onArtworkLoad(e) {
@@ -60,5 +62,5 @@ export function useCoverPlacement(containerRef) {
     };
   }
 
-  return { onArtworkLoad, pinPosition, pinStyle, picturePercent };
+  return { box, natural, onArtworkLoad, pinPosition, pinStyle, picturePercent };
 }

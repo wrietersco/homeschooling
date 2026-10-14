@@ -22,14 +22,26 @@ function summaryFromPack(pack, { source, draft = false } = {}) {
     tagline: pack.tagline,
     emoji: pack.emoji || "🌟",
     // hand-authored packs use a public/ path; generated ones use their root
-    // scene's artwork (the cover doubles as shelf art for both)
-    cover: pack.cover || pack.scenes?.[pack.rootSceneId]?.image || null,
+    // scene's artwork (the cover doubles as shelf art for both). Globe worlds
+    // have no hub artwork — the shelf card borrows the first painted place.
+    cover: pack.cover || shelfCover(pack),
+    view: pack.view === "globe" ? "globe" : "pictures",
     sceneCount: Object.keys(pack.scenes || {}).length,
     discoveryCount: Object.values(pack.scenes || {}).reduce((n, s) => n + (s.hotspots?.length || 0), 0),
     order: Number.isFinite(pack.order) ? pack.order : null,
     source,
     draft,
   };
+}
+
+// The first scene with real artwork — the globe hub itself never has any.
+function shelfCover(pack) {
+  const root = pack.scenes?.[pack.rootSceneId]?.image;
+  if (root?.src) return root;
+  for (const scene of Object.values(pack.scenes || {})) {
+    if (scene.image?.src) return scene.image;
+  }
+  return null;
 }
 
 // Shelf summary for the topic picker (no heavy scene data).
@@ -87,23 +99,25 @@ export function getWikidoTopic(topicId) {
 // topics are fetched from Firestore (published, or drafts for superadmins —
 // the rules enforce that, and validation re-runs on whatever arrives).
 export async function loadWikidoTopic(topicId) {
-  const bundled = getWikidoTopic(topicId);
-  if (bundled) return bundled;
-  if (packCache.has(topicId)) return packCache.get(topicId);
+  const bundled = packById(topicId);
+  if (!bundled && packCache.has(topicId)) return packCache.get(topicId);
   try {
     const snap = await getDoc(doc(db, "wikidoTopics", topicId));
-    if (!snap.exists()) return null;
+    if (!snap.exists()) { packCache.delete(topicId); return getWikidoTopic(topicId); }
     const pack = normalizePackForLoad(snap.data());
     const errors = validateTopicPack(pack);
     if (errors.length) {
       console.error(`[wikido] cloud topic "${topicId}" failed validation:\n- ${errors.join("\n- ")}`);
-      packCache.set(topicId, null);
-      return null;
+      packCache.delete(topicId);
+      return bundled ? getWikidoTopic(topicId) : null;
     }
     packCache.set(topicId, pack);
     return pack;
   } catch (e) {
+    // Draft overrides are unreadable to students. The shipped pack remains
+    // available until its edited version is published, and during outages.
     console.error(`[wikido] topic "${topicId}" could not be loaded:`, e?.message || e);
-    return null;
+    packCache.delete(topicId);
+    return bundled ? getWikidoTopic(topicId) : null;
   }
 }

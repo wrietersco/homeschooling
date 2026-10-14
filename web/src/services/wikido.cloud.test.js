@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { listWikidoTopics, fetchCloudTopics, loadWikidoTopic, getWikidoTopic } from "./wikido.js";
-import civilizations from "@/lib/wikido/topics/civilizations.js";
+import livingThings from "@/lib/wikido/topics/living-things.js";
 
 // jsdom lacks ResizeObserver — the explorer's cover-placement composable
 // guards on it, but the global must exist for the view to mount.
@@ -46,9 +46,11 @@ vi.mock("@/lib/firebase", () => ({
   isEmulator: true,
 }));
 
-// the explorer reads the caller's role only to decide whether drafts preview
+// the explorer loads cloud topics for any signed-in user (the gate guarantees
+// one before the shelf renders) and reads the caller's role only to decide
+// whether drafts preview
 vi.mock("@/stores/auth", () => ({
-  useAuthStore: () => ({ isSuperAdmin: false }),
+  useAuthStore: () => ({ user: { uid: "student" }, initialized: true, isSuperAdmin: false }),
 }));
 
 const docsMock = vi.hoisted(() => ({ all: [], filtered: [] }));
@@ -68,6 +70,7 @@ vi.mock("firebase/firestore", () => ({
   }),
 }));
 
+import { getDoc } from "firebase/firestore";
 import WikidoView from "@/views/WikidoView.vue";
 
 beforeEach(() => {
@@ -103,8 +106,8 @@ describe("wikido cloud topics", () => {
   });
 
   it("bundled packs still load synchronously", async () => {
-    const pack = await loadWikidoTopic("civilizations");
-    expect(pack.id).toBe("civilizations");
+    const pack = await loadWikidoTopic("living-things");
+    expect(pack.id).toBe("living-things");
     expect(pack.scenes[pack.rootSceneId].hotspots.length).toBeGreaterThan(3);
   });
 
@@ -119,7 +122,7 @@ describe("wikido cloud topics", () => {
     const w = await mountView();
     await new Promise((r) => setTimeout(r, 0));
     const titles = w.findAll(".wd-topic-name").map((n) => n.text());
-    expect(titles).toContain("Civilizations");
+    expect(titles).toContain("Living Things");
     expect(titles).toContain("The Water Cycle");
     // drafts never reach the child-facing shelf
     expect(titles).not.toContain(draftPack.title);
@@ -160,4 +163,26 @@ async function mountView() {
 
 void getWikidoTopic;
 void listWikidoTopics;
-void civilizations;
+void livingThings;
+
+
+describe("bundled topic overrides", () => {
+  it("loads a saved bundled override instead of the shipped pack", async () => {
+    const edited = structuredClone(livingThings);
+    edited.title = "Edited Living Things";
+    edited.status = "published";
+    docsMock.all = [edited];
+    docsMock.filtered = [edited];
+    expect((await loadWikidoTopic("living-things")).title).toBe("Edited Living Things");
+    expect((await fetchCloudTopics())[0].title).toBe("Edited Living Things");
+    // Removing the override restores the bundled version despite prior caching.
+    docsMock.all = [];
+    expect((await loadWikidoTopic("living-things")).title).toBe(livingThings.title);
+  });
+});
+
+
+it("keeps the original bundle available when a draft override is denied to a student", async () => {
+  getDoc.mockRejectedValueOnce(new Error("permission-denied"));
+  expect((await loadWikidoTopic("living-things")).title).toBe(livingThings.title);
+});

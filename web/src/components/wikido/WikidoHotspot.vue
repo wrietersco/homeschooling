@@ -2,13 +2,17 @@
 // One tappable place on a Wikido scene image: an anchor dot glued to the artwork
 // (x/y are percentages of the image) with its always-visible label pill above it,
 // Gemini-Immersive style. Hotspots that open a deeper scene show a door icon so a
-// child can tell "look at this" apart from "go in here".
+// child can tell "look at this" apart from "go in here"; doorways into ANOTHER
+// topic/world show the explorer icon so "go somewhere new" reads differently
+// from "go deeper here".
 import { computed } from "vue";
 
 const props = defineProps({
   spot: { type: Object, required: true },
   seen: { type: Boolean, default: false },
   open: { type: Boolean, default: false },
+  // cross: the doorway leads to a scene in a DIFFERENT topic/world
+  cross: { type: Boolean, default: false },
   // Optional on-screen placement in px (computed through the cover transform).
   // When absent the raw picture percentages are used.
   placement: { type: Object, default: null },
@@ -19,6 +23,8 @@ const placementStyle = computed(() =>
     ? { left: `${props.placement.left}px`, top: `${props.placement.top}px` }
     : { left: `${props.spot.x}%`, top: `${props.spot.y}%` }
 );
+
+const icon = computed(() => (props.cross ? "travel_explore" : props.spot.childSceneId ? "door_open" : "search"));
 
 // Near the screen edges the pill would clip — pin it to the inner side instead.
 const edgeClass = computed(() => {
@@ -32,9 +38,9 @@ const edgeClass = computed(() => {
   <button
     type="button"
     class="wd-hot"
-    :class="[edgeClass, { open, seen }]"
+    :class="[edgeClass, { open, seen, cross }]"
     :style="placementStyle"
-    :aria-label="`${spot.label}${spot.childSceneId ? ' — step inside' : ''}`"
+    :aria-label="`${spot.label}${spot.childSceneId ? (cross ? ' — step into another world' : ' — step inside') : ''}`"
     @click="emit('select')"
     @dblclick.stop="emit('activate')"
   >
@@ -42,7 +48,7 @@ const edgeClass = computed(() => {
       <span class="material-symbols-rounded wd-dot-check">check</span>
     </span>
     <span class="wd-pill">
-      <span class="material-symbols-rounded wd-pill-ico" aria-hidden="true">{{ spot.childSceneId ? "door_open" : "search" }}</span>
+      <span class="material-symbols-rounded wd-pill-ico" aria-hidden="true">{{ icon }}</span>
       <span class="wd-pill-txt">{{ spot.label }}</span>
     </span>
   </button>
@@ -145,6 +151,10 @@ const edgeClass = computed(() => {
   box-shadow: 0 6px 20px rgba(20, 10, 40, .45);
 }
 .wd-pill-ico { font-size: 15px; color: #7C3AED; }
+/* cross-topic doorways wear gold — a door to another world, not just deeper */
+.wd-hot.cross .wd-pill { border-color: rgba(180, 83, 9, .55); background: #FFFBEB; }
+.wd-hot.cross .wd-pill-ico { color: #B45309; }
+.wd-hot.cross .wd-dot { border-color: #B45309; }
 .wd-hot:has(.wd-pill) { /* keep the pill clickable as part of the button */ }
 
 /* edge pinning */

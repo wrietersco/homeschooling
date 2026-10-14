@@ -1,30 +1,40 @@
 <script setup>
 // The detail card that slides in when a child taps a hotspot: what it is, a fun
 // fact, a Listen button (TTS — the "read it to me" path), and — when the hotspot
-// leads somewhere deeper — the big "Step inside" call to action.
+// leads somewhere deeper — the big "Step inside" call to action. A cross-topic
+// doorway names the world it opens instead, or explains the door is dormant
+// when that world isn't published yet.
 import { computed } from "vue";
 import SpeakButton from "@/components/SpeakButton.vue";
 import { resolveWikidoAudioUrl } from "@/lib/wikido/audio";
 
 const props = defineProps({
   spot: { type: Object, required: true },
+  // cross: the doorway opens a scene in a DIFFERENT topic/world
+  cross: { type: Boolean, default: false },
+  // title of that other world (for the call to action)
+  crossTitle: { type: String, default: "" },
+  // false = the other world isn't available (draft/missing) — door is dormant
+  openable: { type: Boolean, default: true },
 });
 const emit = defineEmits(["close", "enter"]);
 
+const isDoor = computed(() => Boolean(props.spot.childSceneId));
 const spoken = computed(() =>
   [props.spot.info.title, ...props.spot.info.body, props.spot.info.fact ? `Fun fact! ${props.spot.info.fact}` : ""]
     .filter(Boolean)
     .join(" ")
 );
 const audioUrl = computed(() => resolveWikidoAudioUrl(props.spot.audio || ""));
+const enterLabel = computed(() => (props.cross ? `Step into ${props.crossTitle || "another world"}` : "Step inside"));
 </script>
 
 <template>
   <article class="wd-info">
     <header class="wd-info-head">
-      <span class="wd-kind" :class="{ deeper: Boolean(spot.childSceneId) }">
-        <span class="material-symbols-rounded" aria-hidden="true">{{ spot.childSceneId ? "door_open" : "search" }}</span>
-        {{ spot.childSceneId ? "You can go inside" : "Take a look" }}
+      <span class="wd-kind" :class="{ deeper: isDoor && !cross, world: cross }">
+        <span class="material-symbols-rounded" aria-hidden="true">{{ cross ? "travel_explore" : isDoor ? "door_open" : "search" }}</span>
+        {{ cross ? "A doorway to another world" : isDoor ? "You can go inside" : "Take a look" }}
       </span>
       <button type="button" class="wd-close" aria-label="Close" @click="emit('close')">
         <span class="material-symbols-rounded">close</span>
@@ -41,12 +51,13 @@ const audioUrl = computed(() => resolveWikidoAudioUrl(props.spot.audio || ""));
 
     <footer class="wd-info-foot">
       <SpeakButton :text="spoken" :audio-url="audioUrl" size="lg" label="Listen" content-kind="story" class="wd-info-listen" />
-      <button v-if="spot.childSceneId" type="button" class="wd-enter" @click="emit('enter')">
-        Step inside
+      <button v-if="isDoor && openable" type="button" class="wd-enter" @click="emit('enter')">
+        {{ enterLabel }}
         <span class="material-symbols-rounded" aria-hidden="true">arrow_forward</span>
       </button>
     </footer>
-    <p v-if="spot.childSceneId" class="wd-hint">Tip: double-tap a doorway to step right in!</p>
+    <p v-if="isDoor && !openable" class="wd-locked">That world isn't open yet — check the Wikido shelf later!</p>
+    <p v-if="isDoor" class="wd-hint">Tip: double-tap a doorway to step right in!</p>
   </article>
 </template>
 
@@ -82,6 +93,7 @@ const audioUrl = computed(() => resolveWikidoAudioUrl(props.spot.audio || ""));
 }
 .wd-kind .material-symbols-rounded { font-size: 14px; }
 .wd-kind.deeper { color: #9A3412; background: #FED7AA; }
+.wd-kind.world { color: #92400E; background: #FDE68A; }
 .wd-close {
   border: none;
   background: none;
@@ -133,4 +145,15 @@ const audioUrl = computed(() => resolveWikidoAudioUrl(props.spot.audio || ""));
 .wd-enter .material-symbols-rounded { font-size: 18px; }
 
 .wd-hint { margin: 0; font-size: 0.75rem; color: #9CA3AF; font-style: italic; }
+
+.wd-locked {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #92400E;
+  background: #FEF3C7;
+  border: 1.5px dashed #F59E0B;
+  border-radius: 12px;
+  padding: 0.5rem 0.7rem;
+}
 </style>

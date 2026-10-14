@@ -15,11 +15,19 @@ import {
   buildDepthPrompt,
   buildSpotPlacementPrompt,
   normalizeSpotPlacements,
+  normalizePainterSpots,
+  mergeSpotPlacements,
+  applySpotPlacements,
   normalizeDepthPlan,
+  buildRelinkPrompt,
+  normalizeRelinkPlan,
   parentSceneOf,
   coherencePrompt,
+  composeSceneArtPrompt,
+  buildSpotArtDirection,
+  WIKIDO_REALISM_DIRECTIVE,
 } from "../lib/wikidoPack.js";
-import { audioClipPath, validateAudioPayload, withoutUndefined } from "../agents/wikido.js";
+import { audioClipPath, validateAudioPayload, withoutUndefined, wikidoClipText, pickWikidoAudioClips, callImageModelWide } from "../agents/wikido.js";
 import { normalizeForSave } from "../lib/wikidoPack.js";
 
 const validPack = {
@@ -168,6 +176,62 @@ test("validateAudioPayload accepts only reasonably-sized MP3s", () => {
   assert.ok(validateAudioPayload("aGVsbG8=", "audio/wav").includes("MP3"));
   const huge = "A".repeat(6 * 1024 * 1024);
   assert.ok(validateAudioPayload(huge, "audio/mpeg").includes("too large"));
+});
+
+// ── premium voiceovers (paid, server-side) ────────────────────────────────────
+test("audioClipPath writes MP3 for bridge clips and WAV for premium clips", () => {
+  assert.equal(audioClipPath("t", "s", undefined, "wav").filePath, "wikido/t/audio/s.wav");
+  assert.equal(audioClipPath("t", "s", "h", "wav").filePath, "wikido/t/audio/s.h.wav");
+  assert.equal(audioClipPath("t", "s", "h").filePath, "wikido/t/audio/s.h.mp3"); // default unchanged
+  assert.equal(audioClipPath("t", "s", "h", "wav").packField, "audio/s.h.wav");
+});
+
+test("wikidoClipText speaks exactly what the studio shows", () => {
+  // narration = "<title>. <narration>"; cards = title + body[] + "Fun fact! …"
+  assert.equal(wikidoClipText(validPack.scenes.overview), "The Water Cycle. Follow one drop.");
+  assert.equal(
+    wikidoClipText(validPack.scenes.overview, "sun"),
+    "The Sun The sun lifts water. Fun fact! Sunlight powers the whole cycle."
+  );
+  // a card without a fact just skips the fun-fact sentence
+  assert.equal(wikidoClipText(validPack.scenes["clouds-closeup"], "droplets"), "Droplets Each cloud is made of droplets.");
+  assert.equal(wikidoClipText(validPack.scenes.overview, "ghost"), ""); // unknown spot
+});
+
+test("pickWikidoAudioClips resolves ids against the saved pack and skips billed silence", () => {
+  const recorded = {
+    scenes: {
+      a: {
+        id: "a", title: "Scene A", narration: "Hello.", audio: "https://x/a.wav",
+        hotspots: [
+          { id: "h", label: "H", info: { title: "H", body: ["b"], fact: "f" } },
+          { id: "done", label: "Done", audio: "https://x/done.wav", info: { title: "Done", body: ["b"] } },
+        ],
+      },
+    },
+  };
+  // unknown scenes/spots are dropped; already-recorded clips are skipped unless forced
+  const picks = pickWikidoAudioClips(recorded, ["a", "a.h", "a.done", "ghost", "a.nope"]);
+  assert.deepEqual(picks.map((p) => p.id), ["a.h"]);
+  assert.equal(picks[0].sceneId, "a");
+  assert.equal(picks[0].hotspotId, "h");
+  assert.equal(picks[0].text, "H b Fun fact! f");
+  assert.equal(pickWikidoAudioClips(recorded, ["a"], { force: true })[0].id, "a");
+  assert.equal(pickWikidoAudioClips(recorded, ["a.done"], { force: true })[0].id, "a.done");
+  // garbage input degrades to an empty plan, never a crash
+  assert.deepEqual(pickWikidoAudioClips(null, ["a"]), []);
+  assert.deepEqual(pickWikidoAudioClips(recorded, "not-a-list"), []);
+  // the request cap keeps one call small — the studio chunks on its own
+  const wide = {
+    scenes: {
+      a: {
+        id: "a", title: "A", narration: "n",
+        hotspots: Array.from({ length: 20 }, (_, i) => ({ id: `h${i}`, label: `H${i}`, info: { title: `H${i}`, body: ["b"] } })),
+      },
+    },
+  };
+  const many = Array.from({ length: 20 }, (_, i) => `a.h${i}`);
+  assert.equal(pickWikidoAudioClips(wide, many).length, 12);
 });
 
 test("normalizeForSave repairs exactly what broke prod saves", () => {
@@ -359,6 +423,18 @@ test("buildDepthPrompt presents the whole topic tree for assessment", () => {
   assert.ok(prompt.includes("up to 3 NEW deeper scenes"));
 });
 
+test("buildDepthPrompt carries the curator's optional direction, trimmed and capped", () => {
+  const pack = { title: "The Night Sky", scenes: { root: { id: "root", title: "Look Up!", hotspots: [] } } };
+  const withHint = buildDepthPrompt({ pack, maxScenes: 3, hint: "  more about how animals sense the world  " });
+  assert.ok(withHint.includes("THE CURATOR'S DIRECTION"));
+  assert.ok(withHint.includes('"more about how animals sense the world"')); // trimmed
+  const without = buildDepthPrompt({ pack, maxScenes: 3 });
+  assert.ok(!without.includes("CURATOR'S DIRECTION"));   // optional — absent when empty
+  const capped = buildDepthPrompt({ pack, maxScenes: 3, hint: "x".repeat(400) });
+  assert.ok(capped.includes(`"${"x".repeat(300)}"`));    // capped at 300 chars
+  assert.ok(!capped.includes("x".repeat(301)));
+});
+
 test("normalizeDepthPlan validates parents, dedupes and caps the budget", () => {
   const pack = {
     scenes: {
@@ -380,6 +456,60 @@ test("normalizeDepthPlan validates parents, dedupes and caps the budget", () => 
   assert.equal(branches[0].parentSceneId, "root");
   assert.equal(branches[0].outline[0].children[0].label, "Streetlights");
   assert.equal(branches[1].parentSceneId, "thin");
+});
+
+test("buildRelinkPrompt marks reachability and demands a home for unreachable scenes", () => {
+  const pack = {
+    title: "The Human Body",
+    rootSceneId: "body",
+    scenes: {
+      body: { id: "body", title: "The Human Body", narration: "walk through the body", hotspots: [{ id: "d", label: "Heart", childSceneId: "heart" }] },
+      heart: { id: "heart", title: "The Heart", narration: "pumps blood", hotspots: [] },
+      brain: { id: "brain", title: "The Brain", narration: "thinking", hotspots: [] },
+    },
+  };
+  const prompt = buildRelinkPrompt({ pack });
+  assert.ok(prompt.includes('entered at "The Human Body"'));
+  assert.ok(prompt.includes('opens from "The Human Body"'));   // heart hangs under the entrance
+  assert.ok(prompt.includes("UNREACHABLE — no doorway opens it")); // brain
+  assert.ok(prompt.includes("sceneId: brain"));
+  assert.ok(prompt.includes("MUST get a move"));
+  assert.ok(prompt.includes('{ "moves": ['));
+});
+
+test("normalizeRelinkPlan keeps only legal moves and caps per-picture load", () => {
+  const pack = {
+    rootSceneId: "root",
+    scenes: {
+      root: { id: "root", title: "Root", hotspots: [] },
+      full: { id: "full", title: "Full", hotspots: Array.from({ length: 7 }, (_, i) => ({ id: `s${i}`, label: `s${i}` })) },
+      a: { id: "a", title: "A", hotspots: [{ id: "d", label: "Deep", childSceneId: "deep" }] },
+      deep: { id: "deep", title: "Deep", hotspots: [] },
+      b: { id: "b", title: "B", hotspots: [] },
+    },
+  };
+  const { moves, skipped } = normalizeRelinkPlan({
+    moves: [
+      { sceneId: "b", parentSceneId: "root", doorwayLabel: "B door", reason: "orphan" }, // kept
+      { sceneId: "ghost", parentSceneId: "root" },   // unknown scene
+      { sceneId: "b", parentSceneId: "a" },          // scene already proposed once
+      { sceneId: "root", parentSceneId: "a" },       // the entrance never moves
+      { sceneId: "a", parentSceneId: "deep" },       // into its own subtree
+      { sceneId: "deep", parentSceneId: "a" },       // already there
+      { sceneId: "deep" },                           // missing parent
+    ],
+  }, pack);
+  assert.deepEqual(moves, [{ sceneId: "b", parentSceneId: "root", doorwayLabel: "B door", reason: "orphan" }]);
+  assert.equal(skipped, 6);
+
+  // a full picture takes exactly one more doorway, then refuses the rest
+  const capped = normalizeRelinkPlan({
+    moves: [
+      { sceneId: "b", parentSceneId: "full", doorwayLabel: "B" },
+      { sceneId: "deep", parentSceneId: "full", doorwayLabel: "Deep" },
+    ],
+  }, pack);
+  assert.deepEqual(capped.moves.map((m) => m.sceneId), ["b"]);
 });
 
 test("withoutUndefined strips undefined values from write payloads", () => {
@@ -410,6 +540,36 @@ test("coherencePrompt anchors the child picture to the parent world", () => {
   const p = coherencePrompt("The Moon's Surface");
   assert.ok(p.includes("EXACT same illustration style"));
   assert.ok(p.includes("The Moon's Surface"));
+  assert.ok(p.includes("true to life"));
+});
+
+test("composeSceneArtPrompt sends style, composition and coherence, realism directive last", () => {
+  const p = composeSceneArtPrompt({
+    artStyle: "Warm storybook style.",
+    artPrompt: "A valley at golden hour. COMPOSITION: sun left, hills centre.",
+    coherence: coherencePrompt("The Valley"),
+  });
+  assert.ok(p.startsWith("Warm storybook style."));
+  assert.ok(p.includes("A valley at golden hour."));
+  assert.ok(p.endsWith(WIKIDO_REALISM_DIRECTIVE));
+  assert.ok(WIKIDO_REALISM_DIRECTIVE.includes("Do NOT abstractify"));
+  assert.ok(WIKIDO_REALISM_DIRECTIVE.includes("encyclopedia"));
+
+  // Empty parts drop out; the directive is always present, even with no pack style.
+  assert.equal(composeSceneArtPrompt({ artPrompt: "A glacier cave." }), `A glacier cave. ${WIKIDO_REALISM_DIRECTIVE}`);
+  assert.equal(composeSceneArtPrompt({}), WIKIDO_REALISM_DIRECTIVE);
+});
+
+test("pack authoring prompts demand true-to-life encyclopedia art", () => {
+  const topic = buildTopicPrompt({ title: "Photosynthesis" });
+  assert.ok(topic.includes("encyclopedia plates"));
+  assert.ok(topic.includes("never request abstract, stylized, cartoonish or fantasy rendering"));
+  // The old painterly exemplar is gone from the style guidance.
+  assert.ok(!topic.includes("painterly"));
+
+  const parent = validPack.scenes.overview;
+  const child = buildChildScenePrompt({ parentScene: parent, siblingTitles: [], label: "Clouds", focus: "rain" });
+  assert.ok(child.includes("true to life, never abstract or stylized"));
 });
 
 test("buildSpotPlacementPrompt lists spots and asks for bounded percentages", () => {
@@ -448,4 +608,146 @@ test("normalizeSpotPlacements matches by id or label, clamps, and dedupes", () =
   assert.deepEqual([moon.x, moon.y], [22, 30]);
   assert.deepEqual([scope.x, scope.y], [95, 5]);
   assert.deepEqual(unmatched, ["ghost", "moon"]);
+});
+
+test("applySpotPlacements moves only the placed spots and never mutates the input", () => {
+  const hotspots = [
+    { id: "moon", label: "The Moon", x: 50, y: 50 },
+    { id: "scope", label: "Telescope", x: 80, y: 70, childSceneId: "deep" },
+  ];
+  const out = applySpotPlacements(hotspots, [{ id: "scope", x: 31, y: 62 }]);
+  assert.deepEqual([out[0].x, out[0].y], [50, 50]);          // unplaced → unchanged
+  assert.deepEqual([out[1].x, out[1].y], [31, 62]);
+  assert.equal(out[1].childSceneId, "deep");                 // everything else kept
+  assert.deepEqual([hotspots[1].x, hotspots[1].y], [80, 70]); // input untouched
+  assert.deepEqual(applySpotPlacements(hotspots, []), hotspots);
+});
+
+// ── spot-aware artwork generation ─────────────────────────────────────────────
+test("buildSpotArtDirection paints every spot and demands its coordinates back", () => {
+  // a scene without spots adds nothing to the art prompt
+  assert.equal(buildSpotArtDirection([]), "");
+  assert.equal(buildSpotArtDirection(undefined), "");
+
+  const direction = buildSpotArtDirection([
+    { id: "moon", label: "The Moon", blurb: "Our closest neighbour", x: 21.4, y: 33 },
+    { id: "scope", label: "Telescope", info: { title: "The Telescope" }, x: 80, y: 70 },
+  ]);
+  assert.ok(direction.includes("SPOTS ON THIS PICTURE"));
+  assert.ok(direction.includes('"The Moon"'));
+  assert.ok(direction.includes("id: moon"));
+  assert.ok(direction.includes("Our closest neighbour"));
+  assert.ok(direction.includes('"Telescope"'));            // info.title used when no blurb
+  assert.ok(direction.includes("clearly visible"));
+  assert.ok(direction.includes("21%, 33%"));               // current pin as a soft hint
+  // the JSON contract the painter must answer with — JSON first, picture second
+  assert.ok(direction.includes("TWO things in order"));
+  assert.ok(direction.includes('"placements"'));
+  assert.ok(direction.includes('"x": <percent across, 0-100, one decimal>'));
+  assert.ok(direction.includes("one entry per spot id"));
+});
+
+test("composeSceneArtPrompt embeds the spot direction but keeps the realism directive last", () => {
+  const spots = [{ id: "sun", label: "The Sun", blurb: "The engine", x: 14, y: 20 }];
+  const p = composeSceneArtPrompt({
+    artStyle: "Warm storybook style.",
+    artPrompt: "A valley at golden hour.",
+    coherence: coherencePrompt("The Valley"),
+    spots,
+  });
+  assert.ok(p.startsWith("Warm storybook style."));
+  const at = (s) => p.indexOf(s);
+  assert.ok(at("A valley at golden hour.") < at("SPOTS ON THIS PICTURE"));
+  assert.ok(at("SPOTS ON THIS PICTURE") < at("EXACT same illustration style")); // coherence after spots
+  assert.ok(p.endsWith(WIKIDO_REALISM_DIRECTIVE));          // realism always last
+  // no spots → exactly the old prompt
+  assert.equal(
+    composeSceneArtPrompt({ artStyle: "S", artPrompt: "A cave.", spots: [] }),
+    composeSceneArtPrompt({ artStyle: "S", artPrompt: "A cave." })
+  );
+});
+
+test("normalizePainterSpots reads the painter's JSON from the text beside the picture", () => {
+  const hotspots = [
+    { id: "moon", label: "The Moon" },
+    { id: "scope", label: "Telescope" },
+  ];
+  const { placements, unmatched } = normalizePainterSpots(
+    '```json\n{"placements": [{"id": "moon", "x": 21.44, "y": 33}, {"id": "scope", "x": 120, "y": -5}]}\n```',
+    hotspots
+  );
+  assert.deepEqual(placements, [
+    { id: "moon", x: 21.4, y: 33 },     // rounded to one decimal — precise enough to snap
+    { id: "scope", x: 95, y: 5 },       // clamped inside the picture
+  ]);
+  assert.deepEqual(unmatched, []);
+
+  // a "spots" key is tolerated, chatter and fences are stripped
+  const loose = normalizePainterSpots('Sure! {"spots": [{"id": "moon", "x": 10, "y": 20}]}', hotspots);
+  assert.deepEqual(loose.placements, [{ id: "moon", x: 10, y: 20 }]);
+
+  // matched by label too, when the painter forgets the id
+  const byLabel = normalizePainterSpots('{"placements": [{"id": "Telescope", "x": 42, "y": 60}]}', hotspots);
+  assert.deepEqual(byLabel.placements, [{ id: "scope", x: 42, y: 60 }]);
+
+  // no JSON at all → no placements, never a crash (the vision pass fills in)
+  assert.deepEqual(normalizePainterSpots("", hotspots).placements, []);
+  assert.deepEqual(normalizePainterSpots("I painted a lovely valley.", hotspots).placements, []);
+  assert.deepEqual(normalizePainterSpots(null, hotspots).placements, []);
+});
+
+test("mergeSpotPlacements keeps the painter's coordinates and fills only the gaps", () => {
+  const painter = [{ id: "moon", x: 21.4, y: 33 }];
+  const vision = [
+    { id: "moon", x: 60, y: 60 },     // painter already placed it — vision loses
+    { id: "scope", x: 80, y: 70 },    // painter missed it — vision fills
+  ];
+  assert.deepEqual(mergeSpotPlacements(painter, vision), [
+    { id: "moon", x: 21.4, y: 33 },
+    { id: "scope", x: 80, y: 70 },
+  ]);
+  assert.deepEqual(mergeSpotPlacements([], vision), vision);
+  assert.deepEqual(mergeSpotPlacements(painter, []), painter);
+  assert.deepEqual(mergeSpotPlacements(undefined, undefined), []);
+});
+
+// ── the image model call: picture + spot coordinates in one answer ────────────
+const PNG_PART = { inlineData: { mimeType: "image/png", data: Buffer.from("fake-png").toString("base64") } };
+const jsonRes = (parts) => ({ ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts } }] }) });
+
+test("callImageModelWide asks for text+image and returns both", async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, body: JSON.parse(init.body) });
+    return jsonRes([{ text: '{"placements": [{"id": "moon", "x": 21.4, "y": 33}]}' }, PNG_PART]);
+  };
+  const out = await callImageModelWide({ prompt: "Paint a valley. SPOTS ON THIS PICTURE: …", apiKey: "k", fetchImpl });
+  assert.match(calls[0].url, /generateContent$/);
+  assert.deepEqual(calls[0].body.generationConfig.responseModalities, ["TEXT", "IMAGE"]);
+  assert.deepEqual(calls[0].body.generationConfig.imageConfig, { aspectRatio: "16:9" });
+  assert.equal(calls[0].body.contents[0].parts[0].text.includes("SPOTS ON THIS PICTURE"), true);
+  assert.equal(out.text, '{"placements": [{"id": "moon", "x": 21.4, "y": 33}]}');
+  assert.equal(out.mime, "image/png");
+  assert.equal(out.data.toString(), "fake-png");
+});
+
+test("callImageModelWide falls back to picture-only when the model refuses mixed output", async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push(JSON.parse(init.body));
+    if (calls.length === 1) return { ok: false, status: 400, text: async () => "modalities not supported" };
+    return jsonRes([PNG_PART]);
+  };
+  const out = await callImageModelWide({ prompt: "p", apiKey: "k", fetchImpl });
+  assert.deepEqual(calls[0].generationConfig.responseModalities, ["TEXT", "IMAGE"]);
+  assert.deepEqual(calls[1].generationConfig.responseModalities, ["IMAGE"]);
+  assert.equal(out.text, ""); // no painter JSON — the vision pass places every spot
+  assert.equal(out.data.toString(), "fake-png");
+});
+
+test("callImageModelWide still throws when no picture comes back", async () => {
+  await assert.rejects(
+    callImageModelWide({ prompt: "p", apiKey: "k", fetchImpl: async () => jsonRes([{ text: "blocked" }]) }),
+    /returned no picture/
+  );
 });

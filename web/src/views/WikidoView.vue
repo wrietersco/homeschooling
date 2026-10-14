@@ -3,15 +3,27 @@
 // from two places: developer-authored packs bundled with the app, and topics
 // generated + published by the superadmin through the Wikido Studio (Firestore).
 // The child's whole experience is looking, tapping, listening, and stepping deeper.
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+//
+// Navigation is a JOURNEY: a list of segments, one per world entered. Internal
+// doorways extend the current segment; a cross-topic doorway (a hotspot that
+// names another topic via childTopicId) loads that world and starts a new
+// segment, landing on the target scene with its own ancestors as trail.
+// Breadcrumbs span the whole journey, so a crumb from the previous world steps
+// back across worlds.
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { listWikidoTopics, getWikidoTopic, loadWikidoTopic, fetchCloudTopics } from "@/services/wikido";
 import { sortStudioTopics } from "@/services/wikidoAdmin";
+import { ancestorChain } from "@/lib/wikido/tree";
 import { useWikidoProgress } from "@/lib/wikido/progress";
 import { useSpeech } from "@/composables/useSpeech";
 import { useAuthStore } from "@/stores/auth";
 import WikidoScene from "@/components/wikido/WikidoScene.vue";
+import WikidoGlobe from "@/components/wikido/WikidoGlobe.vue";
 import WikidoTopicCard from "@/components/wikido/WikidoTopicCard.vue";
+import { isGlobeHub } from "../../../functions/lib/wikidoGlobe.js";
+import WikidoGate from "@/components/wikido/WikidoGate.vue";
+import WikidoMusic from "@/components/wikido/WikidoMusic.vue";
 
 const router = useRouter();
 const auth = useAuthStore();
@@ -21,28 +33,59 @@ const { stop } = useSpeech();
 const bundled = listWikidoTopics();
 const cloud = ref([]);        // studio topics (published; drafts for superadmins)
 const cloudLoading = ref(true);
-const opening = ref(false);   // fetching a studio topic's full pack
+const opening = ref(false);   // fetching a topic's full pack (shelf or doorway)
 
 const shelf = computed(() => {
   const bundledIds = new Set(bundled.map((t) => t.id));
-  return [...bundled, ...cloud.value.filter((t) => !bundledIds.has(t.id))];
+  const overrides = new Map(cloud.value.map((t) => [t.id, t]));
+  return [...bundled.map((t) => overrides.get(t.id) || t), ...cloud.value.filter((t) => !bundledIds.has(t.id))];
 });
 
-const topic = ref(null); // full validated pack once entered
-const stack = ref([]);   // scene id path, root first — last entry is on screen
+const journey = ref([]);            // [{ topicId, scenes: [sceneId, …] }] — last scene of the last segment is on screen
+const packsById = ref(new Map());   // topicId → validated pack, cached across the journey
+const doorFailures = ref(new Set()); // worlds a cross-topic doorway tried but failed to open
 
-onMounted(async () => {
-  // superadmins additionally preview studio drafts on the shelf; drafts are
-  // also filtered here in case a query ever returns one by accident.
-  // Studio topics follow the bundled flagship pack, in the curator's order.
-  const fetched = await fetchCloudTopics({ includeDrafts: auth.isSuperAdmin });
-  cloud.value = sortStudioTopics(fetched.filter((t) => auth.isSuperAdmin || !t.draft));
-  cloudLoading.value = false;
+const segment = computed(() => journey.value[journey.value.length - 1] || null);
+const topic = computed(() => (segment.value ? packsById.value.get(segment.value.topicId) : null));
+const scene = computed(() => (topic.value && segment.value ? topic.value.scenes[segment.value.scenes.at(-1)] : null));
+// GLOBE worlds open on a playable 3D Earth: the root scene is the hub whose
+// doorway spots are pinned to the planet by lat/lng (see WikidoGlobe).
+const onGlobe = computed(() => Boolean(topic.value && scene.value && isGlobeHub(topic.value, scene.value.id)));
+const trail = computed(() => {
+  const crumbs = [];
+  for (const seg of journey.value) {
+    const pack = packsById.value.get(seg.topicId);
+    for (const sceneId of seg.scenes) {
+      crumbs.push({ topicId: seg.topicId, sceneId, title: pack?.scenes[sceneId]?.title || sceneId });
+    }
+  }
+  return crumbs.slice(0, -1); // the last entry is the scene on screen
 });
 
-const scene = computed(() => (topic.value ? topic.value.scenes[stack.value[stack.value.length - 1]] : null));
-const trail = computed(() =>
-  stack.value.slice(0, -1).map((id) => ({ sceneId: id, title: topic.value.scenes[id].title }))
+// Worlds a cross-topic doorway may open — everything on the shelf. A world
+// missing here (draft, unpublished, or failed to load) leaves its doorways dormant.
+const topicDirectory = computed(() => {
+  const dir = {};
+  for (const t of shelf.value) dir[t.id] = { title: t.title, draft: Boolean(t.draft) };
+  for (const id of doorFailures.value) delete dir[id];
+  return dir;
+});
+
+// Cloud topics load as soon as there is a signed-in user — which may be right
+// away (route is open to shared links; the gate signs visitors in place) or
+// after the gate authenticates them, so watch rather than fetch once.
+watch(
+  () => auth.user,
+  async (user) => {
+    if (!user) return;
+    // superadmins additionally preview studio drafts on the shelf; drafts are
+    // also filtered here in case a query ever returns one by accident.
+    // Studio topics follow the bundled flagship pack, in the curator's order.
+    const fetched = await fetchCloudTopics({ includeDrafts: auth.isSuperAdmin });
+    cloud.value = sortStudioTopics(fetched.filter((t) => auth.isSuperAdmin || !t.draft));
+    cloudLoading.value = false;
+  },
+  { immediate: true }
 );
 
 function totalFor(summary) {
@@ -51,34 +94,83 @@ function totalFor(summary) {
   return pack ? Object.values(pack.scenes).reduce((n, sc) => n + sc.hotspots.length, 0) : 0;
 }
 
+async function resolvePack(topicId) {
+  const cached = packsById.value.get(topicId);
+  if (cached) return cached;
+  const pack = await loadWikidoTopic(topicId);
+  if (pack) {
+    const next = new Map(packsById.value);
+    next.set(topicId, pack);
+    packsById.value = next;
+  }
+  return pack;
+}
+
 async function openTopic(summary) {
   if (opening.value) return;
   opening.value = true;
   try {
-    const pack = summary.source === "cloud" ? await loadWikidoTopic(summary.id) : getWikidoTopic(summary.id);
+    const pack = await resolvePack(summary.id);
     if (!pack) return; // validation errors already shouted in the console
-    topic.value = pack;
-    stack.value = [pack.rootSceneId];
+    journey.value = [{ topicId: pack.id, scenes: [pack.rootSceneId] }];
   } finally {
     opening.value = false;
   }
 }
 
 function enter(spot) {
-  if (spot?.childSceneId && topic.value.scenes[spot.childSceneId]) {
-    stack.value.push(spot.childSceneId);
+  if (!spot?.childSceneId || !topic.value) return;
+  // a cross-topic doorway leaves this world entirely
+  if (spot.childTopicId && spot.childTopicId !== topic.value.id) {
+    enterWorld(spot.childTopicId, spot.childSceneId);
+    return;
+  }
+  if (topic.value.scenes[spot.childSceneId]) {
+    journey.value = [
+      ...journey.value.slice(0, -1),
+      { ...segment.value, scenes: [...segment.value.scenes, spot.childSceneId] },
+    ];
   }
 }
 
-function navigate(sceneId) {
-  const idx = stack.value.indexOf(sceneId);
-  if (idx >= 0) stack.value = stack.value.slice(0, idx + 1);
+// Step through a cross-topic doorway: load the other world (bundled packs
+// resolve on the spot; studio topics come from Firestore) and land on the
+// target scene with its own ancestors as the trail back to that world's root.
+async function enterWorld(worldId, sceneId) {
+  if (opening.value) return;
+  opening.value = true;
+  try {
+    const pack = await resolvePack(worldId);
+    if (!pack?.scenes[sceneId]) {
+      // the world vanished or failed to load — stay put; dropping it from the
+      // directory turns the doorway into an explained dormant door
+      const next = new Set(doorFailures.value);
+      next.add(worldId);
+      doorFailures.value = next;
+      return;
+    }
+    journey.value = [...journey.value, { topicId: worldId, scenes: [...ancestorChain(pack.scenes, sceneId), sceneId] }];
+  } finally {
+    opening.value = false;
+  }
+}
+
+function navigate(target) {
+  let cut = null;
+  journey.value.forEach((seg, si) => {
+    seg.scenes.forEach((sceneId, ii) => {
+      if (seg.topicId === target.topicId && sceneId === target.sceneId) cut = { si, ii };
+    });
+  });
+  if (!cut) return;
+  journey.value = journey.value
+    .slice(0, cut.si + 1)
+    .map((seg, i) => (i === cut.si ? { ...seg, scenes: seg.scenes.slice(0, cut.ii + 1) } : seg));
 }
 
 function exit() {
   stop();
-  topic.value = null;
-  stack.value = [];
+  journey.value = [];
 }
 
 onBeforeUnmount(() => stop());
@@ -86,8 +178,16 @@ onBeforeUnmount(() => stop());
 
 <template>
   <div class="wikido">
+    <!-- ── session resolving: hold the backdrop so a signed-in visitor never
+             sees the sign-in gate flash before Firebase reports the session ── -->
+    <div v-if="!auth.initialized" class="wd-wait" role="status" aria-label="Opening Wikido">
+      <span class="material-symbols-rounded wd-wait-logo">travel_explore</span>
+    </div>
+    <!-- ── gate: a shared link lands here — sign in / sign up in place,
+             and the very next paint is the shelf (no redirect) ────────────── -->
+    <WikidoGate v-else-if="!auth.user" />
     <!-- ── shelf: pick a topic ─────────────────────────────────────────── -->
-    <section v-if="!topic" class="wd-shelf">
+    <section v-else-if="!topic" class="wd-shelf">
       <header class="wd-shelf-head">
         <button type="button" class="wd-back" aria-label="Back to Dar-al-Hikmah home" title="Home" @click="router.push('/')">
           <span class="material-symbols-rounded">arrow_back</span>
@@ -114,23 +214,31 @@ onBeforeUnmount(() => stop());
       </div>
     </section>
 
-    <!-- ── explorer: one immersive scene ───────────────────────────────── -->
-    <WikidoScene
-      v-else
+    <!-- ── explorer: one immersive scene — a picture, or the 3D globe ── -->
+    <WikidoGlobe
+      v-if="onGlobe"
       :topic="topic"
       :scene="scene"
       :trail="trail"
+      :topic-directory="topicDirectory"
       @enter="enter"
       @navigate="navigate"
       @exit="exit"
-    />
-
-    <!-- Wikido is desktop-only by design: on small screens explain why. -->
-    <div class="wd-desktop-note" role="note">
-      <span class="material-symbols-rounded wd-desktop-ico" aria-hidden="true">desktop_windows</span>
-      <h2>Wikido loves big screens!</h2>
-      <p>This picture world is built for a desktop computer. Please open Wikido on a computer to start exploring.</p>
-    </div>
+    >
+      <template #tools><WikidoMusic /></template>
+    </WikidoGlobe>
+    <WikidoScene
+      v-else-if="scene"
+      :topic="topic"
+      :scene="scene"
+      :trail="trail"
+      :topic-directory="topicDirectory"
+      @enter="enter"
+      @navigate="navigate"
+      @exit="exit"
+    >
+      <template #tools><WikidoMusic /></template>
+    </WikidoScene>
   </div>
 </template>
 
@@ -142,6 +250,27 @@ onBeforeUnmount(() => stop());
   z-index: 60;
   overflow: hidden;
   background: radial-gradient(120% 90% at 20% 0%, #3B1D5E 0%, #241533 55%, #140B20 100%);
+}
+
+/* ── session splash (while Firebase resolves the shared visitor's session) ── */
+.wd-wait {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+.wd-wait-logo {
+  font-size: 52px;
+  color: #FDE68A;
+  background: rgba(253, 230, 138, 0.14);
+  border: 1.5px solid rgba(253, 230, 138, 0.4);
+  border-radius: 20px;
+  padding: 0.7rem;
+  animation: wd-wait-pulse 1.2s ease-in-out infinite;
+}
+@keyframes wd-wait-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.97); }
+  50% { opacity: 1; transform: scale(1.03); }
 }
 
 /* ── shelf ───────────────────────────────────────────────────────────── */
@@ -191,23 +320,14 @@ onBeforeUnmount(() => stop());
 }
 .wd-empty { color: rgba(255, 247, 234, .8); font-size: 1.05rem; }
 
-/* ── desktop-only notice ─────────────────────────────────────────────── */
-.wd-desktop-note { display: none; }
+/* ── mobile: Wikido works on phones ────────────────────────────────────────
+   The explorer letterboxes the whole picture (see WikidoScene) so every spot
+   is visible and tappable; the shelf stacks to a single column. */
 @media (max-width: 939px) {
-  .wd-shelf, .wd-scene { display: none; }
-  .wd-desktop-note {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 0.6rem;
-    height: 100%;
-    text-align: center;
-    padding: 2rem;
-    color: #FFF7EA;
-  }
-  .wd-desktop-ico { font-size: 56px; color: #FDE68A; }
-  .wd-desktop-note h2 { margin: 0; font-size: 1.5rem; }
-  .wd-desktop-note p { margin: 0; max-width: 34ch; color: rgba(255, 247, 234, .8); line-height: 1.5; }
+  .wd-shelf { padding: 1.25rem 1rem 2rem; }
+  .wd-shelf-head { gap: 1rem; margin-bottom: 1.25rem; }
+  .wd-shelf-title { font-size: 1.7rem; }
+  .wd-shelf-sub { font-size: 0.92rem; }
+  .wd-shelf-grid { grid-template-columns: 1fr; gap: 1rem; }
 }
 </style>

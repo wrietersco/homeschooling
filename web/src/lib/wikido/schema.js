@@ -5,6 +5,14 @@
 
 // Hotspot x/y are PERCENTAGES of the scene image (0–100), so artwork can be
 // re-exported at any resolution without re-measuring hotspots.
+import {
+  validateSceneHierarchy, isCrossTopicDoorway,
+  validateCrossTopicDoorways, validatePackCrossTopicDoorways,
+} from "../../../../functions/lib/wikidoHierarchy.js";
+import { isGlobeHub, validateSpotGeo, validateGlobeHubSpot } from "../../../../functions/lib/wikidoGlobe.js";
+
+export { validateCrossTopicDoorways, validatePackCrossTopicDoorways };
+
 function isPercent(n) {
   return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 100;
 }
@@ -77,6 +85,9 @@ export function validateTopicPack(pack) {
   // hand-authored packs carry a shelf cover; studio packs may omit it and use
   // the root scene's artwork instead
   if (pack.cover !== undefined) checkImage(pack.cover, `${pack.id}.cover`, errors);
+  if (pack.view !== undefined && pack.view !== "globe") {
+    errors.push(`view must be "globe" when present`);
+  }
   if (!isSlug(pack.rootSceneId)) errors.push("rootSceneId must be a scene id");
 
   const scenes = pack.scenes;
@@ -90,16 +101,17 @@ export function validateTopicPack(pack) {
 
   for (const [sceneId, scene] of Object.entries(scenes)) {
     const path = `scenes.${sceneId}`;
+    const hub = isGlobeHub(pack, sceneId); // the globe hub renders code, not artwork
     if (!isSlug(sceneId)) errors.push(`${path}: scene keys must be kebab-case slugs`);
     if (typeof scene.title !== "string" || !scene.title.trim()) errors.push(`${path}: title is required`);
-    checkImage(scene.image, path);
+    if (!hub) checkImage(scene.image, path, errors);
     if (typeof scene.narration !== "string" || !scene.narration.trim()) {
       errors.push(`${path}: narration (read-aloud text) is required`);
     }
     if (scene.audio !== undefined && (typeof scene.audio !== "string" || !scene.audio)) {
       errors.push(`${path}: audio, when present, must be an asset path`);
     }
-    if (!Array.isArray(scene.hotspots) || scene.hotspots.length === 0) {
+    if (!Array.isArray(scene.hotspots) || (scene.hotspots.length === 0 && !hub)) {
       errors.push(`${path}: hotspots must be a non-empty array`);
       continue;
     }
@@ -112,21 +124,39 @@ export function validateTopicPack(pack) {
       if (hotspotIds.has(spot.id)) errors.push(`${spotPath}: duplicate hotspot id in scene`);
       hotspotIds.add(spot.id);
       if (typeof spot.label !== "string" || !spot.label.trim()) errors.push(`${spotPath}: label is required`);
-      if (!isPercent(spot?.x) || !isPercent(spot?.y)) {
+      if (!hub && (!isPercent(spot?.x) || !isPercent(spot?.y))) {
         errors.push(`${spotPath}: x/y must be percentages between 0 and 100`);
+      }
+      if (hub) {
+        // a globe spot is pinned to the planet by lat/lng; x/y are unused there
+        errors.push(...validateGlobeHubSpot(spot, spotPath));
+      } else {
+        errors.push(...validateSpotGeo(spot, spotPath));
       }
       if (typeof spot.blurb !== "string" || !spot.blurb.trim()) errors.push(`${spotPath}: blurb (hover one-liner) is required`);
       checkInfo(spot.info, spotPath, errors);
       if (spot.audio !== undefined && (typeof spot.audio !== "string" || !spot.audio)) {
         errors.push(`${spotPath}: audio, when present, must be an asset path`);
       }
+      if (spot.childTopicId !== undefined) {
+        if (!isSlug(spot.childTopicId)) {
+          errors.push(`${spotPath}: childTopicId must be a kebab-case slug`);
+        } else if (spot.childTopicId === pack.id) {
+          errors.push(`${spotPath}: childTopicId must name a DIFFERENT topic — doorways inside this topic just use childSceneId`);
+        } else if (spot.childSceneId === undefined) {
+          errors.push(`${spotPath}: childTopicId needs a childSceneId to open inside that topic`);
+        }
+      }
       if (spot.childSceneId !== undefined) {
         if (!isSlug(spot.childSceneId)) errors.push(`${spotPath}: childSceneId must be a scene slug`);
-        else if (!scenes[spot.childSceneId]) {
+        else if (!isCrossTopicDoorway(spot, pack.id) && !scenes[spot.childSceneId]) {
+          // a cross-topic doorway's childSceneId lives in the OTHER pack, so it
+          // is resolved by validatePackCrossTopicDoorways over the full registry
           errors.push(`${spotPath}: childSceneId "${spot.childSceneId}" has no matching scene`);
         }
       }
     }
   }
+  errors.push(...validateSceneHierarchy(scenes, pack.rootSceneId, pack.id));
   return errors;
 }

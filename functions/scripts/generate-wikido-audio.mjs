@@ -9,7 +9,7 @@
 //   cd functions
 //   node scripts/generate-wikido-audio.mjs                  # all missing clips
 //   node scripts/generate-wikido-audio.mjs --force          # re-synthesize everything
-//   node scripts/generate-wikido-audio.mjs --scene tachara  # one scene
+//   node scripts/generate-wikido-audio.mjs --scene human-body  # one scene
 //   node scripts/generate-wikido-audio.mjs --voice af_bella # different narrator
 //
 // For every scene the script:
@@ -75,7 +75,7 @@ function encodeMp3(float32, sampleRate) {
 // ── Pack patching ─────────────────────────────────────────────────────────────
 // Inserts `audio: "<path>",` into the pack: scene-level before its `hotspots:`
 // line, hotspot-level before its `info: {` line. Anchors are structural so a
-// scene id that also appears as a hotspot id elsewhere (e.g. "bull-capitals")
+// scene id that also appears as a hotspot id elsewhere (e.g. a scene id reused as a hotspot id)
 // can never hijack the insertion point:
 //   scene keys are the only 4-space-indented quoted keys, and hotspot id lines
 //   carry exactly 10 spaces of indentation.

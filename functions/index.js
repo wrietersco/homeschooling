@@ -112,22 +112,40 @@ export { getModelCatalog, previewModel, testAllModels } from "./platform/modelTo
 
 // Wikido Studio (superadmin) — generate immersive picture-encyclopedia topics
 // on any subject, grow them layer by layer, curate, and publish. Topics live in
-// the wikidoTopics collection; artwork in Storage under wikido/.
+// the wikidoTopics collection; artwork in Storage under wikido/. Globe worlds
+// (view: "globe") open on a 3D Earth whose spots are doorways to place scenes.
 export {
   generateWikidoTopic,
+  createWikidoGlobeTopic,
+  generateWikidoGlobeScene,
   addWikidoChildScene,
   suggestWikidoScenes,
   planWikidoOutline,
   generateWikidoSceneImage,
   generateWikidoImages,
+  adjustWikidoSpots,
+  adjustWikidoAllSpots,
   saveWikidoTopic,
   setWikidoTopicStatus,
   deleteWikidoTopic,
   attachWikidoAudio,
+  generateWikidoAudios,
+  generateWikidoKokoroAudios,
   generateWikidoSpotDetails,
   planWikidoDepth,
+  planWikidoRelinks,
   reorderWikidoTopics,
 } from "./agents/wikido.js";
+
+// Wikido Kokoro audio job — fire-and-forget queue for the free premium voice.
+// The studio enqueues and can close the tab; the scheduled worker drains the
+// queue clip by clip (same shape as the Qaida audio job).
+export {
+  requestWikidoKokoroJob,
+  stopWikidoKokoroJob,
+  getWikidoKokoroJob,
+  wikidoKokoroWorker,
+} from "./agents/wikidoAudioJob.js";
 
 // Scheduled maintenance — reap stale queue claims, delete expired player tokens,
 // and reconcile agent-index counts. (audit #6, #15)

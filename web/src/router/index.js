@@ -67,12 +67,16 @@ const routes = [
     meta: { requiresAuth: true },
   },
   // Wikido — immersive picture encyclopedia for children. `immersive` hides the
-  // app nav: the scene owns the whole screen (App.vue).
+  // app nav: the scene owns the whole screen (App.vue). The route itself is
+  // PUBLIC so a shared /wikido link always lands here: signed-out visitors get
+  // WikidoView's quick sign-in gate in place (no login-page round-trip), and
+  // signed-in users play immediately — no family, onboarding, or subscription
+  // required (skipping the guard is what exempts them from those redirects).
   {
     path: "/wikido",
     name: "wikido",
     component: () => import("@/views/WikidoView.vue"),
-    meta: { requiresAuth: true, immersive: true },
+    meta: { public: true, immersive: true },
   },
   {
     path: "/curriculum",

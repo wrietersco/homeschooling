@@ -29,9 +29,13 @@ describe("router", () => {
     expect(platform.meta.role).toBe("superadmin");
   });
 
-  it("runs Wikido fullscreen (immersive) behind auth", () => {
+  it("runs Wikido fullscreen (immersive) and open, so shared links always land — the view gates identity in place", () => {
     const wikido = routes.find((r) => r.name === "wikido");
-    expect(wikido.meta.requiresAuth).toBe(true);
+    // public = the navigation guard (login redirect, family/onboarding gate,
+    // subscription gate) never runs for /wikido; WikidoView asks signed-out
+    // visitors to sign in via its own quick gate instead.
+    expect(wikido.meta.public).toBe(true);
     expect(wikido.meta.immersive).toBe(true);
+    expect(wikido.meta.requiresAuth).toBeUndefined();
   });
 });
