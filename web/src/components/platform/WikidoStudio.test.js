@@ -46,6 +46,9 @@ vi.mock("@/services/wikidoAdmin", () => ({
   planVoiceoverClips: vi.fn(() => []),
   attachWikidoAudio: vi.fn(),
   generateWikidoAudios: vi.fn(),
+  generateWikidoKokoroAudios: vi.fn(),
+  scopeVoiceoverClips: (items, { sceneId, hotspotId = "" } = {}) =>
+    (items || []).filter((c) => (hotspotId ? c.id === `${sceneId}.${hotspotId}` : c.id === sceneId || c.id.startsWith(`${sceneId}.`))),
   requestWikidoKokoroJob: vi.fn(async () => ({ status: "done", total: 0, recorded: 0 })),
   stopWikidoKokoroJob: vi.fn(async () => ({ status: "cancelled" })),
   getWikidoKokoroJob: vi.fn(async () => ({ job: null })),
@@ -65,7 +68,7 @@ vi.mock("@/services/admin", () => ({
 
 import WikidoStudio from "./WikidoStudio.vue";
 import WikidoGlobeEditor from "./WikidoGlobeEditor.vue";
-import { suggestWikidoScenes, addWikidoChildScene, planWikidoOutline, saveWikidoTopic, deleteWikidoTopic, fetchAllWikidoTopicsAdmin, adjustWikidoSpots, adjustWikidoAllSpots, planWikidoDepth, planWikidoRelinks, planVoiceoverClips, generateWikidoAudios, requestWikidoKokoroJob, stopWikidoKokoroJob, getWikidoKokoroJob, checkVoiceoverBridge, synthesizeOnBridge, attachWikidoAudio, startVoiceoverBridge, bridgeLauncherStatus } from "@/services/wikidoAdmin";
+import { suggestWikidoScenes, addWikidoChildScene, planWikidoOutline, saveWikidoTopic, deleteWikidoTopic, fetchAllWikidoTopicsAdmin, adjustWikidoSpots, adjustWikidoAllSpots, planWikidoDepth, planWikidoRelinks, planVoiceoverClips, generateWikidoAudios, generateWikidoKokoroAudios, requestWikidoKokoroJob, stopWikidoKokoroJob, getWikidoKokoroJob, checkVoiceoverBridge, synthesizeOnBridge, attachWikidoAudio, startVoiceoverBridge, bridgeLauncherStatus } from "@/services/wikidoAdmin";
 
 async function mountStudio() {
   const w = mount(WikidoStudio);
@@ -588,7 +591,7 @@ describe("WikidoStudio — voice engine picker (premium vs paid premium)", () =>
 
   it("offers both engines categorically and names the configured paid model", async () => {
     const w = await mountStudio();
-    const options = w.findAll(".vo-option");
+    const options = w.findAll(".voiceover .vo-option"); // the topic-wide picker (the scene editor has its own scoped pair)
     expect(options).toHaveLength(2);
     expect(options[0].text()).toMatch(/Premium — Kokoro/);
     expect(options[0].text()).toMatch(/limitless/);
@@ -683,9 +686,126 @@ describe("WikidoStudio — voice engine picker (premium vs paid premium)", () =>
     await genBtn(w).trigger("click");
     await flushPromises();
     expect(synthesizeOnBridge).toHaveBeenCalledWith("http://localhost:8787", [{ id: "universe", text: "The Universe. n" }]);
-    expect(attachWikidoAudio).toHaveBeenCalledWith({ topicId: "space", sceneId: "universe", hotspotId: undefined, audioBase64: "QQ==", mime: "audio/mpeg" });
+    expect(attachWikidoAudio).toHaveBeenCalledWith({ topicId: "space", sceneId: "universe", hotspotId: undefined, audioBase64: "QQ==", mime: "audio/mpeg", engine: "kokoro" });
     expect(generateWikidoAudios).not.toHaveBeenCalled(); // the paid path stays untouched
     expect(w.find(".note.ok").text()).toMatch(/Voiceovers attached: 1\/1/);
+    w.unmount();
+  });
+});
+
+describe("WikidoStudio — scoped voiceovers (one scene, one spot, mixed voices)", () => {
+  const fullPlan = [
+    { id: "universe", text: "The Universe. n" },
+    { id: "universe.galaxy", text: "What is a Galaxy? x" },
+    { id: "universe.size", text: "How big? x" },
+    { id: "galaxy-scene", text: "What is a Galaxy?. n" },
+    { id: "galaxy-scene.milky", text: "Milky Way x" },
+  ];
+  const sceneBtn = (w) => w.find(".scene-voice .btn");
+  const spotBtns = (w) => w.findAll(".spot .tree-act.audio");
+
+  it("Record this scene sends exactly that scene's narration + spots, forced, with the picked engine", async () => {
+    planVoiceoverClips.mockReturnValueOnce(fullPlan);
+    generateWikidoAudios.mockResolvedValueOnce({
+      results: [
+        { id: "universe", url: "https://audio/u.wav" },
+        { id: "universe.galaxy", url: "https://audio/ug.wav" },
+        { id: "universe.size", url: "https://audio/us.wav" },
+      ],
+      recorded: 3, failed: 0, stoppedEarly: false,
+    });
+    const w = await mountStudio();
+    expect(sceneBtn(w).text()).toMatch(/Record this scene \(3\)/); // narration + 2 spots
+    await w.find('input[name="scene-voice-engine"][value="paid"]').setValue();
+    await sceneBtn(w).trigger("click");
+    await flushPromises();
+    expect(generateWikidoAudios).toHaveBeenCalledWith({ topicId: "space", clipIds: ["universe", "universe.galaxy", "universe.size"], force: true });
+    expect(w.find(".note.ok").text()).toMatch(/Recorded 3\/3 for “The Universe” with the paid premium voice/);
+    // every recording remembers the voice that made it
+    expect(w.findAll(".spot .engine-badge.paid")).toHaveLength(2);
+    expect(w.find(".sv-narr .engine-badge").text()).toMatch(/paid/);
+    w.unmount();
+  });
+
+  it("🔊 on one spot records just that spot — free Kokoro through the bridge", async () => {
+    checkVoiceoverBridge.mockResolvedValueOnce({ online: true, engine: "kokoro", voice: "af_heart", url: "http://localhost:8787" });
+    planVoiceoverClips.mockReturnValueOnce(fullPlan);
+    synthesizeOnBridge.mockResolvedValueOnce({ results: [{ id: "universe.size", mp3: "QQ==" }], failed: [] });
+    attachWikidoAudio.mockResolvedValue({ url: "https://audio/size.mp3" });
+    const w = await mountStudio();
+    await spotBtns(w)[1].trigger("click");
+    await flushPromises();
+    expect(synthesizeOnBridge).toHaveBeenCalledWith("http://localhost:8787", [{ id: "universe.size", text: "How big? x" }]);
+    expect(attachWikidoAudio).toHaveBeenCalledWith({ topicId: "space", sceneId: "universe", hotspotId: "size", audioBase64: "QQ==", mime: "audio/mpeg", engine: "kokoro" });
+    expect(generateWikidoAudios).not.toHaveBeenCalled();
+    expect(w.find(".note.ok").text()).toMatch(/Recorded 1\/1 for “How big\?” with Kokoro/);
+    w.unmount();
+  });
+
+  it("with no bridge, a scoped Kokoro run records on the platform's servers", async () => {
+    planVoiceoverClips.mockReturnValueOnce(fullPlan);
+    generateWikidoKokoroAudios.mockResolvedValueOnce({ results: [{ id: "universe.size", url: "https://audio/size.mp3" }], recorded: 1, failed: 0 });
+    const w = await mountStudio();
+    await spotBtns(w)[1].trigger("click");
+    await flushPromises();
+    expect(generateWikidoKokoroAudios).toHaveBeenCalledWith({ topicId: "space", clipIds: ["universe.size"], force: true });
+    expect(generateWikidoAudios).not.toHaveBeenCalled();
+    expect(synthesizeOnBridge).not.toHaveBeenCalled();
+    expect(w.find(".note.ok").text()).toMatch(/Recorded 1\/1/);
+    w.unmount();
+  });
+
+  it("voices may be MIXED: one spot in the paid voice, another in free Kokoro", async () => {
+    planVoiceoverClips.mockReturnValueOnce(fullPlan);
+    generateWikidoAudios.mockResolvedValueOnce({ results: [{ id: "universe.size", url: "https://audio/size.wav" }], recorded: 1, failed: 0, stoppedEarly: false });
+    planVoiceoverClips.mockReturnValueOnce(fullPlan);
+    generateWikidoKokoroAudios.mockResolvedValueOnce({ results: [{ id: "universe.galaxy", url: "https://audio/galaxy.mp3" }], recorded: 1, failed: 0 });
+    const w = await mountStudio();
+    // spot 2 in the paid voice…
+    await w.find('input[name="scene-voice-engine"][value="paid"]').setValue();
+    await spotBtns(w)[1].trigger("click");
+    await flushPromises();
+    // …spot 1 in free Kokoro
+    await w.find('input[name="scene-voice-engine"][value="kokoro"]').setValue();
+    await spotBtns(w)[0].trigger("click");
+    await flushPromises();
+    expect(generateWikidoAudios).toHaveBeenCalledWith({ topicId: "space", clipIds: ["universe.size"], force: true });
+    expect(generateWikidoKokoroAudios).toHaveBeenCalledWith({ topicId: "space", clipIds: ["universe.galaxy"], force: true });
+    const badges = w.findAll(".spot .engine-badge");
+    expect(badges).toHaveLength(2);
+    expect(badges[0].classes()).toContain("kokoro");
+    expect(badges[1].classes()).toContain("paid");
+    w.unmount();
+  });
+});
+
+describe("WikidoStudio — shared scenes (one scene, many doorways)", () => {
+  it("one scene can open from several spots: the crumb names every door and the editor says it is shared", async () => {
+    const w = await mountStudio();
+    // spot 2 becomes a SECOND doorway into "What is a Galaxy?"
+    await w.findAll(".pin")[1].trigger("pointerdown");
+    await w.findAll(".pin")[1].trigger("pointerup");
+    const sceneRadio = w.findAll(".spot.selected .kind label").find((l) => /opens another scene here/.test(l.text()));
+    await sceneRadio.find("input").setValue();
+    await flushPromises();
+    expect(w.find(".spot.selected .door-note").text())
+      .toMatch(/Shared scene — also opened from The Universe → What is a Galaxy\?/);
+    // open the shared scene: the crumb names BOTH doors, and the editor explains sharing
+    await w.findAll(".scene-main")[1].trigger("click");
+    expect(w.find(".crumb").text()).toMatch(/Opened from: The Universe → What is a Galaxy\? · The Universe → How big\?/);
+    expect(w.find(".parent-note").text()).toMatch(/Shared scene — opened from 2 doorways/);
+    w.unmount();
+  });
+
+  it("a spot never links back up the tree — the cycle door isn't offered", async () => {
+    const w = await mountStudio();
+    await w.findAll(".scene-main")[1].trigger("click"); // galaxy-scene — its only other scene is its own root
+    await w.find(".spot .spot-toggle").trigger("click");
+    const sceneRadio = w.findAll(".spot.selected .kind label").find((l) => /opens another scene here/.test(l.text()));
+    await sceneRadio.find("input").setValue();
+    await flushPromises();
+    // no doorway was created (the only candidate was the scene's own root) — no illegal state
+    expect(w.find(".spot.selected select").exists()).toBe(false);
     w.unmount();
   });
 });

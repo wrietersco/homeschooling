@@ -54,21 +54,25 @@ export function validateCrossTopicDoorways(packs) {
 // Doorways are the canonical hierarchy for both the studio and explorer.
 // packId (when given) lets declared cross-topic doorways opt out of the local
 // tree — their childSceneId belongs to another pack's namespace.
+//
+// ONE scene may be opened from MANY doorways — several spots in this topic, and
+// spots in other topics — so curators link (say) the Badshahi Mosque scene once
+// and reuse it from history, architecture and trip worlds instead of
+// regenerating copies. Still illegal: pointing back at the root, cycles, and
+// scenes no doorway chain reaches.
 export function validateSceneHierarchy(scenes, rootSceneId, packId = null) {
   if (!scenes || typeof scenes !== "object") return [];
   const errors = [];
   const local = (spot) => spot?.childSceneId && !isCrossTopicDoorway(spot, packId);
-  const parents = new Map();
+  const rootBacklinks = new Set();
   for (const [id, scene] of Object.entries(scenes)) {
     for (const spot of Array.isArray(scene?.hotspots) ? scene.hotspots : []) {
       if (!local(spot)) continue;
-      const child = spot.childSceneId;
-      if (!scenes[child]) continue;
-      if (child === rootSceneId) errors.push(`Scene "${id}" links back to the root scene`);
-      if (parents.has(child)) errors.push(`Scene "${child}" has multiple doorways/parents: "${parents.get(child)}" and "${id}"`);
-      parents.set(child, id);
+      if (!scenes[spot.childSceneId]) continue;
+      if (spot.childSceneId === rootSceneId) rootBacklinks.add(id);
     }
   }
+  for (const id of rootBacklinks) errors.push(`Scene "${id}" links back to the root scene`);
   const active = new Set();
   const visited = new Set();
   function walk(id) {

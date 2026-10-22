@@ -35,7 +35,9 @@ export function buildSceneTree(scenes, rootId) {
   return out;
 }
 
-// The scene whose doorway opens this one (null for the root / orphans).
+// The FIRST scene whose doorway opens this one (null for the root / orphans).
+// Scenes may be SHARED — opened from several spots, in several scenes — the
+// first found serves as the primary parent for display and sibling order.
 export function findParentSceneId(scenes, sceneId) {
   for (const [sid, s] of Object.entries(scenes || {})) {
     if ((s.hotspots || []).some((h) => h.childSceneId === sceneId && !h.childTopicId)) return sid;
@@ -124,12 +126,12 @@ export function canMoveScene(scenes, sceneId, targetParentId, rootId = null) {
   return moveAllowed(scenes, sceneId, targetParentId, rootId, sameParent);
 }
 
-// Move a scene (with its whole subtree) under targetParentId. The doorway that
-// opened it travels along (label/blurb/info kept) and is re-inserted into the
-// target parent's spots at insertIndex (end when null); removing the old
-// doorway first shifts the slot, which is adjusted here. A scene has exactly
-// one parent, so any OTHER spot that still opens it becomes a plain fact spot
-// (a second doorway would fail save validation).
+// Move a scene (with its whole subtree) under targetParentId. Its PRIMARY
+// doorway (the one findParentSceneId names) travels along (label/blurb/info
+// kept) and is re-inserted into the target parent's spots at insertIndex (end
+// when null); removing it from the old parent first shifts the slot, which is
+// adjusted here. Scenes may be SHARED: every OTHER spot that opens this scene —
+// in other scenes, or as a second doorway where it just hung — keeps its link.
 // Returns a NEW scenes map, or null when the move isn't allowed.
 export function moveSceneTo(scenes, sceneId, targetParentId, insertIndex = null, rootId = null) {
   const oldParentId = findParentSceneId(scenes, sceneId);
@@ -158,11 +160,6 @@ export function moveSceneTo(scenes, sceneId, targetParentId, insertIndex = null,
   let at = insertIndex === null ? target.hotspots.length : Math.max(0, Math.min(insertIndex, target.hotspots.length));
   if (oldParentId === targetParentId && removedIdx >= 0 && removedIdx < at) at -= 1; // the removal shifted the slot left
   target.hotspots.splice(at, 0, doorway);
-  for (const s of Object.values(next)) {
-    for (const h of s.hotspots || []) {
-      if (h !== doorway && h.childSceneId === sceneId && !h.childTopicId) delete h.childSceneId;
-    }
-  }
   return next;
 }
 

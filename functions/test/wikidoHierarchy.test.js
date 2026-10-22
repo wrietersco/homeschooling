@@ -73,11 +73,20 @@ test("checks explicit generator hierarchy against doorways, coverage and order",
   assert.deepEqual(normalizeGeneratedPack(p).pack.hierarchy, p.hierarchy);
 });
 
-test("rejects multiple parents, root backlinks, cycles and disconnected scenes", () => {
-  const p = pack();
+test("scenes may be SHARED (many doorways) — but root backlinks, cycles and disconnected scenes still fail", () => {
+  const p = completePack();
   assert.deepEqual(validateSceneHierarchy(p.scenes, p.rootSceneId), []);
-  p.scenes.humans.hotspots.push({ id: "wrong", childSceneId: "kinds" });
-  assert.ok(validateSceneHierarchy(p.scenes, "root").some((e) => e.includes("multiple")));
+  // "kinds" opened from two doorways in two scenes — a shared scene is legal
+  p.scenes.humans.hotspots.push({ ...p.scenes.humans.hotspots[0], id: "kinds-too", childSceneId: "kinds" });
+  assert.deepEqual(validateSceneHierarchy(p.scenes, "root"), []);
+  for (const validator of [validateTopicPack, validateWebPack]) {
+    assert.deepEqual(validator(structuredClone(p)), []);
+  }
+  // …a diamond (two scenes converge on one child) introduces no cycle
+  const diamond = structuredClone(p);
+  diamond.scenes.plants.hotspots.push({ ...diamond.scenes.plants.hotspots[0], id: "to-humans", childSceneId: "humans" });
+  assert.deepEqual(validateSceneHierarchy(diamond.scenes, "root"), []);
+  // pointing back at the root is still a hard error
   p.scenes.kinds.hotspots.push({ id: "loop", childSceneId: "root" });
   const errors = validateSceneHierarchy(p.scenes, "root");
   assert.ok(errors.some((e) => e.includes("cycle")));
@@ -85,7 +94,6 @@ test("rejects multiple parents, root backlinks, cycles and disconnected scenes",
   p.scenes.lost = scene("Lost");
   for (const validator of [validateTopicPack, validateWebPack]) {
     assert.ok(validator(p).some((e) => e.includes('"lost" is unreachable')));
-    assert.ok(validator(p).some((e) => e.includes("multiple")));
   }
 });
 

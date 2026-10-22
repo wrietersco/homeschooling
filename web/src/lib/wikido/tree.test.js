@@ -59,7 +59,7 @@ describe("siblings", () => {
   });
 });
 
-import { subtreeSceneIds, canMoveScene, moveSceneTo, moveSceneByDrop, resolveDrop, buildSceneTree as buildTree, ancestorChain } from "./tree.js";
+import { subtreeSceneIds, canMoveScene, moveSceneTo, moveSceneByDrop, resolveDrop, buildSceneTree as buildTree, ancestorChain, siblingSceneIds } from "./tree.js";
 
 describe("cross-topic doorways in the tree", () => {
   // a spot with childTopicId opens a scene in ANOTHER pack — its childSceneId
@@ -215,7 +215,7 @@ describe("re-parenting rules (one parent per scene)", () => {
     expect(next.lost.hotspots.map((h) => h.childSceneId)).toEqual(["a"]);
   });
 
-  it("moving a scene with two doorways keeps one parent: the other spot becomes a fact card", () => {
+  it("moving a scene keeps OTHER doorways to it — scenes may be shared", () => {
     const scenes = {
       root: { id: "root", title: "Root", hotspots: [
         { id: "d-x", childSceneId: "x" },
@@ -227,9 +227,37 @@ describe("re-parenting rules (one parent per scene)", () => {
     };
     const next = moveSceneTo(scenes, "kid", "x", null, "root");
     expect(next.x.hotspots.map((h) => h.childSceneId)).toEqual(["kid"]);   // the travelling doorway arrived
-    expect(next.root.hotspots.some((h) => h.childSceneId === "kid")).toBe(false);
-    expect(next.twin.hotspots[0].label).toBe("Kid again");                 // duplicate kept as a spot…
-    expect(next.twin.hotspots[0].childSceneId).toBeUndefined();            // …but no longer a doorway
+    expect(next.root.hotspots.some((h) => h.childSceneId === "kid")).toBe(false); // the primary doorway left root
+    expect(next.twin.hotspots[0].label).toBe("Kid again");
+    expect(next.twin.hotspots[0].childSceneId).toBe("kid");                // the shared link stays — kid opens from both
+  });
+});
+
+describe("shared scenes (one scene, many doorways)", () => {
+  const shared = {
+    root: { id: "root", title: "Root", hotspots: [
+      { id: "d-h", label: "History", childSceneId: "mosque" },
+      { id: "d-a", label: "Architecture", childSceneId: "arch" },
+    ] },
+    mosque: { id: "mosque", title: "Badshahi Mosque", hotspots: [] },
+    arch: { id: "arch", title: "Architecture", hotspots: [{ id: "d-m2", label: "The Mosque", childSceneId: "mosque" }] },
+  };
+
+  it("the map shows a shared scene once, under its first-reached parent", () => {
+    const tree = buildTree(shared, "root");
+    expect(tree.filter((t) => t.id === "mosque")).toHaveLength(1);
+    expect(tree.find((t) => t.id === "mosque").parentId).toBe("root");
+  });
+
+  it("moving the primary doorway leaves the other scene's link standing", () => {
+    const next = moveSceneTo(shared, "mosque", "arch", null, "root");
+    expect(next.root.hotspots.some((h) => h.childSceneId === "mosque")).toBe(false);
+    // arch keeps its own doorway AND receives the travelling one
+    expect(next.arch.hotspots.filter((h) => h.childSceneId === "mosque")).toHaveLength(2);
+  });
+
+  it("sibling order reads the primary parent's doorway order", () => {
+    expect(siblingSceneIds(shared, "mosque")).toEqual(["mosque", "arch"]);
   });
 });
 

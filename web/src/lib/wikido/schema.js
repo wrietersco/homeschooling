@@ -17,6 +17,12 @@ function isPercent(n) {
   return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 100;
 }
 
+// which voice recorded a clip — the studio marks it so voices can be mixed
+// per spot; anything else is a typo the curator wants to hear about
+function isVoiceEngine(v) {
+  return v === "kokoro" || v === "paid";
+}
+
 function isSlug(s) {
   return typeof s === "string" && /^[a-z0-9][a-z0-9-]*$/.test(s);
 }
@@ -111,6 +117,9 @@ export function validateTopicPack(pack) {
     if (scene.audio !== undefined && (typeof scene.audio !== "string" || !scene.audio)) {
       errors.push(`${path}: audio, when present, must be an asset path`);
     }
+    if (scene.audioEngine !== undefined && !isVoiceEngine(scene.audioEngine)) {
+      errors.push(`${path}: audioEngine, when present, must be "kokoro" or "paid"`);
+    }
     if (!Array.isArray(scene.hotspots) || (scene.hotspots.length === 0 && !hub)) {
       errors.push(`${path}: hotspots must be a non-empty array`);
       continue;
@@ -137,6 +146,9 @@ export function validateTopicPack(pack) {
       checkInfo(spot.info, spotPath, errors);
       if (spot.audio !== undefined && (typeof spot.audio !== "string" || !spot.audio)) {
         errors.push(`${spotPath}: audio, when present, must be an asset path`);
+      }
+      if (spot.audioEngine !== undefined && !isVoiceEngine(spot.audioEngine)) {
+        errors.push(`${spotPath}: audioEngine, when present, must be "kokoro" or "paid"`);
       }
       if (spot.childTopicId !== undefined) {
         if (!isSlug(spot.childTopicId)) {

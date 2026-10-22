@@ -14,7 +14,7 @@ import {
   createWikidoGlobeTopic, generateWikidoGlobeScene,
   generateWikidoSpotDetails, planWikidoDepth, planWikidoRelinks,
   saveWikidoTopic, setWikidoTopicStatus, deleteWikidoTopic, fetchAllWikidoTopicsAdmin,
-  checkVoiceoverBridge, synthesizeOnBridge, planVoiceoverClips, attachWikidoAudio, generateWikidoAudios, BRIDGE_URL,
+  checkVoiceoverBridge, synthesizeOnBridge, planVoiceoverClips, attachWikidoAudio, generateWikidoAudios, generateWikidoKokoroAudios, scopeVoiceoverClips, BRIDGE_URL,
   requestWikidoKokoroJob, stopWikidoKokoroJob, getWikidoKokoroJob,
   startVoiceoverBridge, bridgeLauncherStatus,
   reorderWikidoTopics, sortStudioTopics,
@@ -170,6 +170,58 @@ async function startBridge() {
   }
 }
 
+// Wire one finished clip into the edited form — the real recording URL plus
+// WHICH voice made it ("kokoro" | "paid") — so dirty-state, skip-logic and the
+// per-spot voice badges stay accurate.
+function clipParts(clipId) {
+  const dot = clipId.indexOf(".");
+  return { sceneId: dot < 0 ? clipId : clipId.slice(0, dot), hotspotId: dot < 0 ? "" : clipId.slice(dot + 1) };
+}
+function applyClipUrl(clipId, url, engine) {
+  const { sceneId, hotspotId } = clipParts(clipId);
+  const scene = form.value?.scenes?.[sceneId];
+  if (!scene) return;
+  if (hotspotId) {
+    const spot = scene.hotspots?.find((h) => h.id === hotspotId);
+    if (spot) { spot.audio = url; if (engine) spot.audioEngine = engine; }
+  } else {
+    scene.audio = url;
+    if (engine) scene.audioEngine = engine;
+  }
+}
+
+// One chunk through the local bridge: synthesize, then attach each MP3 through
+// the superadmin callable (which records the voice as Kokoro). Returns per-clip
+// outcomes so every caller reports and wires progress the same way.
+async function recordChunkOnBridge(chunk) {
+  const { results, failed } = await synthesizeOnBridge(bridge.value.url, chunk);
+  const out = [];
+  for (const clip of results) {
+    const { sceneId, hotspotId } = clipParts(clip.id);
+    try {
+      const attached = await attachWikidoAudio({
+        topicId: selectedId.value,
+        sceneId,
+        hotspotId: hotspotId || undefined,
+        audioBase64: clip.mp3,
+        mime: "audio/mpeg",
+        engine: "kokoro",
+      });
+      out.push({ id: clip.id, url: attached.url });
+    } catch (e) {
+      out.push({ id: clip.id, error: String(e?.message || e).replace(/^[a-z-]+: /i, "").slice(0, 90) });
+    }
+  }
+  for (const f of failed || []) out.push({ id: f.id, error: String(f.error || "failed").slice(0, 90) });
+  return out;
+}
+
+// One chunk through a server callable (paid premium or server-side Kokoro):
+// the callable uploads and wires each clip itself; the studio mirrors outcomes.
+function collectServerClipResults(res) {
+  return (res.results || []).map((r) => (r.url ? { id: r.id, url: r.url } : { id: r.id, error: String(r.error || "failed").slice(0, 90) }));
+}
+
 // Record every missing clip on the local Kokoro bridge, then attach each MP3 to
 // the topic through the superadmin callable (Storage + pack audio fields).
 // Runs from the manual button AND automatically whenever the bridge is online
@@ -180,6 +232,7 @@ async function generateVoiceovers({ auto = false } = {}) {
   voFailed.value = [];
   if (!auto) error.value = "";
   let recorded = 0;
+  const failedIds = [];
   try {
     // the callable checks the SAVED topic — freshly added hotspots must ship
     // first; if the save fails (validation), recording must not run at all
@@ -194,46 +247,27 @@ async function generateVoiceovers({ auto = false } = {}) {
       return { recorded: 0, failed: [] };
     }
     if (auto) message.value = `Recording voiceovers (Kokoro)… 0/${items.length}`;
-    const failedIds = [];
     const chunkSize = 5;
     for (let i = 0; i < items.length; i += chunkSize) {
-      const chunk = items.slice(i, i + chunkSize);
-      const { results, failed } = await synthesizeOnBridge(bridge.value.url, chunk);
-      for (const clip of results) {
-        const dot = clip.id.indexOf(".");
-        const sceneId = dot < 0 ? clip.id : clip.id.slice(0, dot);
-        const hotspotId = dot < 0 ? "" : clip.id.slice(dot + 1);
-        try {
-          const attached = await attachWikidoAudio({ topicId: selectedId.value, sceneId, hotspotId: hotspotId || undefined, audioBase64: clip.mp3, mime: "audio/mpeg" });
+      const out = await recordChunkOnBridge(items.slice(i, i + chunkSize));
+      for (const r of out) {
+        if (r.url) {
+          applyClipUrl(r.id, r.url, "kokoro");
           recorded += 1;
-          // reflect the REAL recording url in the form so dirty-state and
-          // skip-logic stay accurate
-          const scene = form.value.scenes[sceneId];
-          if (scene) {
-            if (hotspotId) {
-              const spot = scene.hotspots?.find((h) => h.id === hotspotId);
-              if (spot) spot.audio = attached.url;
-            } else {
-              scene.audio = attached.url;
-            }
-          }
-        } catch (e) {
-          failedIds.push(`${clip.id}: ${String(e?.message || e).replace(/^[a-z-]+: /i, "").slice(0, 90)}`);
+          voProgress.value.done += 1;
+          if (auto) message.value = `Recording voiceovers (Kokoro)… ${voProgress.value.done}/${items.length}`;
+        } else {
+          failedIds.push(`${r.id}: ${r.error}`);
           voFailed.value = [...failedIds];
-          continue;
         }
-        voProgress.value.done += 1;
-        if (auto) message.value = `Recording voiceovers (Kokoro)… ${voProgress.value.done}/${items.length}`;
       }
-      failedIds.push(...failed.map((f) => f.id));
-      voFailed.value = [...failedIds];
     }
     if (!auto) message.value = `Voiceovers attached: ${voProgress.value.done}/${items.length}${failedIds.length ? ` · failed: ${failedIds.join(", ")}` : ""}.`;
     snapshot();
     return { recorded, failed: failedIds };
   } catch (e) {
     if (!auto) error.value = e?.message?.replace("internal: ", "") || "Voiceover generation failed.";
-    return { recorded, failed: failedIds || [] };
+    return { recorded, failed: failedIds };
   } finally {
     voBusy.value = false;
   }
@@ -247,7 +281,7 @@ function scheduleAutoRecord() {
   if (!autoVoice.value || !bridge.value.online) return;
   clearTimeout(autoVoiceTimer);
   autoVoiceTimer = setTimeout(async () => {
-    if (autoVoice.value && bridge.value.online && form.value && !voBusy.value && !dirty.value) {
+    if (autoVoice.value && bridge.value.online && form.value && !voBusy.value && !scopedBusy.value && !dirty.value) {
       const missing = planVoiceoverClips(form.value).length;
       if (missing > 0) await generateVoiceovers({ auto: true });
     }
@@ -283,23 +317,14 @@ async function generatePremiumAudios() {
     for (let i = 0; i < items.length; i += chunkSize) {
       const chunk = items.slice(i, i + chunkSize);
       const res = await generateWikidoAudios({ topicId: selectedId.value, clipIds: chunk.map((c) => c.id), force: voForce.value });
-      for (const r of res.results || []) {
-        if (!r.url) { failed.push(`${r.id}: ${String(r.error || "failed").slice(0, 80)}`); continue; }
-        const dot = r.id.indexOf(".");
-        const sceneId = dot < 0 ? r.id : r.id.slice(0, dot);
-        const hotspotId = dot < 0 ? "" : r.id.slice(dot + 1);
-        // reflect the real recording url so dirty-state and skip-logic stay accurate
-        const scene = form.value.scenes[sceneId];
-        if (scene) {
-          if (hotspotId) {
-            const spot = scene.hotspots?.find((h) => h.id === hotspotId);
-            if (spot) spot.audio = r.url;
-          } else {
-            scene.audio = r.url;
-          }
+      for (const r of collectServerClipResults(res)) {
+        if (r.url) {
+          applyClipUrl(r.id, r.url, "paid");
+          premProgress.value.done += 1;
+          message.value = `Generating premium audios… ${premProgress.value.done}/${items.length}`;
+        } else {
+          failed.push(`${r.id}: ${r.error}`);
         }
-        premProgress.value.done += 1;
-        message.value = `Generating premium audios… ${premProgress.value.done}/${items.length}`;
       }
       // the server stops mid-chunk only when the shared speech pool ran out —
       // continuing would just bill the same failure again
@@ -311,6 +336,81 @@ async function generatePremiumAudios() {
     error.value = e?.message?.replace(/^(internal|failed-precondition|invalid-argument): /, "") || "Audio generation failed.";
   } finally {
     premBusy.value = false;
+  }
+}
+
+// ── scoped voiceovers: one scene, or one spot ────────────────────────────────
+// The curator voices exactly what they just fixed, with either engine — and can
+// MIX voices across spots: one place in free Kokoro, another in the paid voice.
+// A scoped run is explicit, so it re-records its targets even when they already
+// have audio (the topic-wide button only fills what is missing). Kokoro runs
+// through the local bridge when it is up, otherwise on the platform's servers.
+const scopedBusy = ref(false);
+const scopedProgress = ref({ done: 0, total: 0 });
+const scopedTarget = ref("");       // the spot id while a single spot records
+const scopedEngine = ref("kokoro"); // the voice the NEXT scoped run uses
+
+async function generateScopedAudios({ hotspotId = "" } = {}) {
+  const scene = selectedScene.value;
+  if (scopedBusy.value || voGenerating.value || !form.value || !scene) return;
+  scopedBusy.value = true;
+  scopedTarget.value = hotspotId;
+  error.value = "";
+  try {
+    // every engine reads the SAVED topic — ship edits first
+    if (dirty.value && !(await save())) return;
+    const sceneId = selectedSceneId.value;
+    const clips = scopeVoiceoverClips(planVoiceoverClips(form.value, { force: true }), { sceneId, hotspotId });
+    scopedProgress.value = { done: 0, total: clips.length };
+    if (!clips.length) {
+      error.value = "Nothing to record for that scope — save your edits first so the scene and its spots exist.";
+      return;
+    }
+    const label = hotspotId
+      ? form.value.scenes[sceneId].hotspots?.find((h) => h.id === hotspotId)?.label || hotspotId
+      : form.value.scenes[sceneId].title;
+    const engineName = scopedEngine.value === "paid" ? "the paid premium voice" : "Kokoro";
+    const plural = clips.length === 1 ? "clip" : "clips";
+    message.value = `Recording ${clips.length} ${plural} for “${label}” with ${engineName}… 0/${clips.length}`;
+    let recorded = 0;
+    const failed = [];
+    let stoppedEarly = false;
+    const chunkSize = 5;
+    for (let i = 0; i < clips.length; i += chunkSize) {
+      const chunk = clips.slice(i, i + chunkSize);
+      let res;
+      if (scopedEngine.value === "paid") {
+        res = await generateWikidoAudios({ topicId: selectedId.value, clipIds: chunk.map((c) => c.id), force: true });
+      } else if (bridge.value.online) {
+        res = { results: await recordChunkOnBridge(chunk) };
+      } else {
+        res = await generateWikidoKokoroAudios({ topicId: selectedId.value, clipIds: chunk.map((c) => c.id), force: true });
+      }
+      for (const r of collectServerClipResults(res)) {
+        if (r.url) {
+          applyClipUrl(r.id, r.url, scopedEngine.value);
+          recorded += 1;
+          scopedProgress.value.done += 1;
+          message.value = `Recording ${clips.length} ${plural} for “${label}” with ${engineName}… ${scopedProgress.value.done}/${clips.length}`;
+        } else {
+          failed.push(`${r.id}: ${r.error}`);
+        }
+      }
+      // the paid path stops mid-run only when the shared speech pool ran out —
+      // continuing would just bill the same failure again
+      if (res.stoppedEarly) { stoppedEarly = true; break; }
+    }
+    message.value =
+      `Recorded ${recorded}/${clips.length} for “${label}” with ${engineName}` +
+      (failed.length ? ` · failed: ${failed.join(", ")}` : "") +
+      (stoppedEarly ? " — the shared speech pool ran dry; run again for the rest" : "") +
+      ".";
+    snapshot();
+  } catch (e) {
+    error.value = e?.message?.replace(/^(internal|failed-precondition|invalid-argument): /, "") || "Recording failed.";
+  } finally {
+    scopedBusy.value = false;
+    scopedTarget.value = "";
   }
 }
 
@@ -398,7 +498,7 @@ async function stopKokoroJob() {
 // "Generate audios" click goes. Kokoro is limitless everywhere: through the
 // local bridge when it's up, on the platform's servers when it isn't — the
 // tab stays light either way.
-const voGenerating = computed(() => voBusy.value || premBusy.value || kokoroBusy.value);
+const voGenerating = computed(() => voBusy.value || premBusy.value || kokoroBusy.value || scopedBusy.value);
 const voProgressNow = computed(() => (premBusy.value ? premProgress.value : voProgress.value));
 async function generateAudios() {
   if (voGenerating.value) return;
@@ -682,6 +782,47 @@ const allowedParentIds = computed(() => {
   }
   return ids;
 });
+
+// Scenes that can reach the selected scene through local doorways (itself
+// included). A spot in this scene must never open any of them — that would
+// close a cycle — so they are disabled in the doorway pickers.
+const sceneAncestors = computed(() => {
+  const out = new Set();
+  const id = selectedSceneId.value;
+  if (!form.value || !id) return out;
+  const inbound = new Map(); // child scene id → scenes with a doorway to it
+  for (const [sid, s] of Object.entries(form.value.scenes)) {
+    for (const h of s.hotspots || []) {
+      if (h.childSceneId && !h.childTopicId) {
+        if (!inbound.has(h.childSceneId)) inbound.set(h.childSceneId, new Set());
+        inbound.get(h.childSceneId).add(sid);
+      }
+    }
+  }
+  const stack = [id];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (out.has(cur)) continue;
+    out.add(cur);
+    for (const p of inbound.get(cur) || []) stack.push(p);
+  }
+  return out;
+});
+
+// Where ELSE this scene is opened from — the shared-scene story in one line:
+// "History → Old Mosque · Religion → Mughal era".
+function otherDoorsTo(spot) {
+  if (!spot?.childSceneId || spot.childTopicId || !form.value) return [];
+  const out = [];
+  for (const [sid, s] of Object.entries(form.value.scenes)) {
+    for (const h of s.hotspots || []) {
+      if (h !== spot && h.childSceneId === spot.childSceneId && !h.childTopicId) {
+        out.push(`${form.value.scenes[sid]?.title || sid} → ${h.label}`);
+      }
+    }
+  }
+  return out;
+}
 function parentOptionLabel(row) {
   const title = form.value.scenes[row.id]?.title || row.id;
   const indent = "\u00A0\u00A0\u00A0".repeat(Math.min(row.depth, 5));
@@ -1288,9 +1429,12 @@ function setSpotKind(spot, kind) {
     delete spot.childTopicId;
     spot.childSceneId = "";
   }
-  if (!spot.childSceneId || !form.value.scenes[spot.childSceneId]) {
-    const first = orderedScenes.value.find((s) => s.id !== selectedSceneId.value);
-    if (first) spot.childSceneId = first.id;
+  // pick a target that exists AND is not this scene or one of its ancestors
+  // (linking back up the tree would close a cycle) — scenes may already be
+  // shared; pointing at one again just adds another door to it
+  if (!spot.childSceneId || !form.value.scenes[spot.childSceneId] || sceneAncestors.value.has(spot.childSceneId)) {
+    const first = orderedScenes.value.find((s) => !sceneAncestors.value.has(s.id));
+    spot.childSceneId = first ? first.id : "";
   }
 }
 
@@ -1734,8 +1878,9 @@ function confirmDeleteScene(withDeeper) {
             <template v-else>⚠ No spot opens this scene yet, so children can’t reach it.</template>
           </p>
 
-          <!-- the scene hangs from exactly one parent: pick it here or drag in the map -->
-          <label v-if="selectedScene.id !== form.rootSceneId" class="field parent-field">Parent scene (the picture whose spot opens this one)
+          <!-- the scene hangs from a PRIMARY parent; more doorways may share it.
+               Moving re-hangs this scene's own doorway — links from other spots stay. -->
+          <label v-if="selectedScene.id !== form.rootSceneId" class="field parent-field">Primary parent (the picture whose spot opens this one)
             <select :value="currentParentId ?? ''" @change="changeParent($event.target.value)">
               <option v-if="!currentParentId" value="">— none yet: this scene is unreachable —</option>
               <option v-for="row in orderedScenes" :key="row.id" :value="row.id" :disabled="!allowedParentIds.has(row.id)">
@@ -1743,6 +1888,7 @@ function confirmDeleteScene(withDeeper) {
               </option>
             </select>
           </label>
+          <p v-if="incomingDoorways.length > 1" class="muted parent-note">Shared scene — opened from {{ incomingDoorways.length }} doorways. Its artwork, spots and recordings exist once; every door leads here.</p>
           <p v-if="selectedScene.id !== form.rootSceneId && deeperSceneCount" class="muted parent-note">
             Choosing a parent moves this scene and its {{ deeperSceneCount }} deeper {{ deeperSceneCount === 1 ? "scene" : "scenes" }} along with it.
           </p>
@@ -1835,6 +1981,33 @@ function confirmDeleteScene(withDeeper) {
           <label class="field">Narration (read aloud when the scene opens)
             <textarea v-model="selectedScene.narration" rows="3"></textarea>
           </label>
+
+          <!-- scoped voiceovers: record THIS scene (or any single spot on it)
+               with either engine — voices may be mixed from spot to spot -->
+          <div class="scene-voice">
+            <span class="sv-title">Voice</span>
+            <label class="vo-option" :class="{ picked: scopedEngine === 'kokoro' }" title="Free premium — through the local bridge when it is up, otherwise on the platform's servers">
+              <input type="radio" name="scene-voice-engine" value="kokoro" v-model="scopedEngine" :disabled="voGenerating" />
+              <span class="vo-name">🎙 Kokoro</span>
+            </label>
+            <label class="vo-option" :class="{ picked: scopedEngine === 'paid' }" title="Paid premium — the configured speech model; platform limits apply">
+              <input type="radio" name="scene-voice-engine" value="paid" v-model="scopedEngine" :disabled="voGenerating" />
+              <span class="vo-name">💎 Paid premium</span>
+            </label>
+            <span v-if="selectedScene.audio && selectedScene.audioEngine" class="sv-narr">
+              narration
+              <span class="engine-badge" :class="selectedScene.audioEngine === 'paid' ? 'paid' : 'kokoro'" :title="selectedScene.audioEngine === 'paid' ? 'Narration recorded with the paid premium voice' : 'Narration recorded with the free Kokoro voice'">{{ selectedScene.audioEngine === "paid" ? "💎 paid" : "🎙 kokoro" }}</span>
+            </span>
+            <button
+              class="btn"
+              :disabled="voGenerating || saving"
+              title="Re-records this scene's narration and every spot on it with the voice picked here — a scoped run is explicit, so it records even clips that already have audio"
+              @click="generateScopedAudios()"
+            >
+              {{ scopedBusy && !scopedTarget ? `Recording… ${scopedProgress.done}/${scopedProgress.total}` : `🔊 Record this scene (${1 + selectedScene.hotspots.length})` }}
+            </button>
+          </div>
+          <p class="muted voice-hint">Voices may be mixed per spot: pick a voice, then press 🔊 on a scene or spot — each recording keeps the voice that made it.</p>
           <label class="field">Artwork prompt (what the picture shows — landmarks left/centre/right)
             <textarea v-model="selectedScene.artPrompt" rows="3"></textarea>
           </label>
@@ -1853,6 +2026,7 @@ function confirmDeleteScene(withDeeper) {
                 <span class="spot-label">
                   {{ spot.label }}
                   <span v-if="spotNeedsDetails(spot).needs" class="needs-badge" title="Placeholder details — press ✦ and the agent writes them">✦ needs details</span>
+                  <span v-if="spot.audioEngine" class="engine-badge" :class="spot.audioEngine" :title="spot.audioEngine === 'paid' ? 'Recorded with the paid premium voice' : 'Recorded with the free Kokoro voice'">{{ spot.audioEngine === "paid" ? "💎 paid" : "🎙 kokoro" }}</span>
                 </span>
                 <span class="outcome" :class="outcomeOf(spot).kind">
                   <span aria-hidden="true">{{ outcomeOf(spot).kind === "fact" ? "💡" : outcomeOf(spot).kind === "scene" ? "🚪" : outcomeOf(spot).kind === "world" ? "🌍" : "⚠" }}</span>
@@ -1867,6 +2041,14 @@ function confirmDeleteScene(withDeeper) {
                 :title="spotAgentBusy === spot.id ? 'The agent is writing…' : '✦ Let the agent write these details'"
                 @click.stop="writeSpotWithAgent(spot)"
               >{{ spotAgentBusy === spot.id ? "✦…" : "✦" }}</button>
+              <button
+                type="button"
+                class="tree-act audio"
+                :disabled="voGenerating || saving"
+                :aria-label="`Record ${spot.label} with the ${scopedEngine === 'paid' ? 'paid premium' : 'Kokoro'} voice`"
+                :title="scopedBusy && scopedTarget === spot.id ? 'Recording…' : `Record “${spot.label}” with the ${scopedEngine === 'paid' ? 'paid premium' : 'Kokoro'} voice — re-records even if it already has audio`"
+                @click.stop="generateScopedAudios({ hotspotId: spot.id })"
+              >{{ scopedBusy && scopedTarget === spot.id ? "⏺…" : "🔊" }}</button>
               <span class="spot-order">
                 <button type="button" class="tree-act" :disabled="spotIndex === 0" :aria-label="`Move ${spot.label} earlier`" @click="moveHotspot(selectedScene, spotIndex, 'up')">↑</button>
                 <button type="button" class="tree-act" :disabled="spotIndex === selectedScene.hotspots.length - 1" :aria-label="`Move ${spot.label} later`" @click="moveHotspot(selectedScene, spotIndex, 'down')">↓</button>
@@ -1904,9 +2086,12 @@ function confirmDeleteScene(withDeeper) {
               </div>
               <label v-if="spot.childSceneId && !spot.childTopicId" class="field">Opens this scene
                 <select v-model="spot.childSceneId">
-                  <option v-for="s in orderedScenes" :key="s.id" :value="s.id" :disabled="s.id === selectedSceneId">{{ form.scenes[s.id].title }}</option>
+                  <option v-for="s in orderedScenes" :key="s.id" :value="s.id" :disabled="sceneAncestors.has(s.id)">{{ form.scenes[s.id].title }}</option>
                 </select>
               </label>
+              <p v-if="spot.childSceneId && !spot.childTopicId && otherDoorsTo(spot).length" class="muted door-note">
+                🔗 Shared scene — also opened from {{ otherDoorsTo(spot).join(" · ") }}. It exists once; every door leads to the same picture, spots and recordings.
+              </p>
               <template v-if="spot.childSceneId && spot.childTopicId">
                 <label class="field">In this world
                   <select :value="spot.childTopicId" @change="setDoorWorld(spot, $event.target.value)">
@@ -2132,6 +2317,20 @@ function confirmDeleteScene(withDeeper) {
   font-size: 0.82rem; color: var(--text2);
 }
 .vo-job-copy { flex: 1; min-width: 200px; }
+/* scoped voice controls: record THIS scene or one spot, with either engine —
+   voices may be mixed from spot to spot */
+.scene-voice { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.scene-voice .btn { margin-left: auto; }
+.sv-title { font-size: 0.8rem; font-weight: 700; color: var(--text2); }
+.sv-narr { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.75rem; color: var(--muted); }
+.voice-hint { margin: -0.35rem 0 0; font-size: 0.75rem; }
+.engine-badge {
+  font-size: 0.62rem; font-weight: 800; letter-spacing: 0.02em;
+  border-radius: 999px; padding: 0.08rem 0.45rem; white-space: nowrap;
+}
+.engine-badge.kokoro { background: #E0F2FE; color: #075985; }
+.engine-badge.paid { background: #FEF3C7; color: #92400E; }
+.tree-act.audio { font-size: 0.85rem; }
 .ws-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 .ws-toolbar h2 { margin: 0; font-size: 1.3rem; }
 .ws-toolbar p { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.85rem; }

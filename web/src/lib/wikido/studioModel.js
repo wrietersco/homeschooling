@@ -60,18 +60,33 @@ export function sceneStatus(scenes, scene, worlds = null, globeRootId = null) {
   return { key: "ready", label: "Ready" };
 }
 
-// Every scene reachable ONLY through sceneId (the scene itself + its subtree of
-// scenes that no spot elsewhere also opens). Deleting a scene removes exactly
-// these when the user chooses "delete with deeper scenes".
+// Every scene reachable ONLY through sceneId: the scene itself plus the scenes
+// whose EVERY inbound doorway hangs inside that set. Scenes SHARED with the
+// rest of the topic — also opened from a spot outside this branch — are NOT
+// included, so deleting a branch leaves them standing for their other doors.
 export function descendantSceneIds(scenes, sceneId) {
-  const out = new Set();
+  const candidates = new Set();
   const walk = (id) => {
-    if (out.has(id) || !scenes?.[id]) return;
-    out.add(id);
+    if (candidates.has(id) || !scenes?.[id]) return;
+    candidates.add(id);
     for (const h of scenes[id].hotspots || []) if (opensLocalScene(h)) walk(h.childSceneId);
   };
   walk(sceneId);
-  return [...out];
+  if (!candidates.has(sceneId)) return [];
+  // Drop anything that also hangs elsewhere — repeated, because removing a
+  // scene can externalize the scenes that hung only through it.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of [...candidates]) {
+      if (id === sceneId) continue;
+      const external = Object.entries(scenes || {}).some(([sid, s]) =>
+        !candidates.has(sid) && (s.hotspots || []).some((h) => opensLocalScene(h) && h.childSceneId === id)
+      );
+      if (external) { candidates.delete(id); changed = true; }
+    }
+  }
+  return [...candidates];
 }
 
 // Plain-language consequences of deleting a scene, for the confirm dialog.

@@ -238,6 +238,17 @@ Two layers:
      the paid path stops early with a clear message when the shared speech
      pool runs dry. The picker defaults to whichever engine is usable (bridge
      up → Kokoro, down → paid) until the curator chooses one themselves.
+   - **Studio, scoped recording (superadmin).** The scene editor has its own
+     voice picker plus a **🔊 Record this scene** button (narration + every
+     spot on it), and every spot row has a **🔊** button — each records exactly
+     the targeted clips, always re-recording even when audio exists (a scoped
+     run is explicit). The engine is whichever voice is picked at that moment,
+     and **voices may be mixed per spot**: record one place in free Kokoro and
+     another in the paid voice. With the bridge offline, a scoped Kokoro run
+     uses the synchronous `generateWikidoKokoroAudios` callable (small scopes
+     finish while you watch; the fire-and-forget queue stays topic-wide). Each
+     recording stores **which voice made it** (`audioEngine: "kokoro" |
+     "paid"` on the clip), shown as a badge in the spot list.
    The bridge speaks **exactly the text the UI reads** (narration = `"<title>.
    <narration>"`; cards = `title + body[] + "Fun fact! <fact>"`). If you change
    wording in a pack, re-record — the unit tests enforce that every referenced
@@ -281,6 +292,16 @@ data still calls these `scenes`, `hotspots`, `childSceneId` and `childTopicId`
 - **Pins on the picture** — spots are numbered pins over the real artwork; drag
   to place, click to edit. Each spot row states its outcome ("Opens “X”" /
   "Shows a fact card").
+- **Shared scenes** — one scene may open from MANY doorways: several spots in
+  one picture, spots deep in other branches, and world-doors from other topics.
+  Link, don't copy: a scene like "Badshahi Mosque" is written, painted,
+  spotted and voiced ONCE while history, architecture, religion and trip
+  worlds all door into it. The scene's editor names every doorway that opens
+  it ("Opened from: …"), says "Shared scene — opened from N doorways", and the
+  map lists it once under its primary parent. Moving a scene re-hangs only its
+  own (primary) doorway — links from other spots stay. Deleting a branch never
+  removes a scene some other spot still opens. Cycles stay impossible: a
+  spot's doorway picker disables the scene's own ancestors.
 - **Map** — status dot per scene (ready / needs artwork / needs attention), a
   "things to fix before publishing" list (orphans, empty scenes, missing art).
 - **Scoped delete** — the dialog lists the spots that open the scene and any
@@ -465,7 +486,9 @@ and recordings remain intact. Editing access stays superadmin-only.
 Scene deletion saves replace the complete scene map, so Firestore recursive
 merging cannot restore removed scenes. Removing a local doorway confirms and
 removes its branch. Deleting only a scene promotes its children to its parent;
-deleting the entire branch removes its descendants.
+deleting the entire branch removes its descendants — except descendants that
+are SHARED (also opened from a spot outside the branch), which stay standing
+for their other doors.
 
 Save/publish repairs disconnected leftovers from older edits and missing
 local targets, and restores a missing external-world ID only when the target

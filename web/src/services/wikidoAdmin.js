@@ -44,6 +44,11 @@ export const attachWikidoAudio = (data) => call("attachWikidoAudio", { timeout: 
 // sends clip ids in small chunks; the saved pack is what gets spoken.
 export const generateWikidoAudios = (data) => call("generateWikidoAudios", { timeout: 300_000 })(data || {});
 
+// Free-premium voiceovers, synchronous — the same server Kokoro as the queue
+// below, but the studio waits per chunk. Used for SCOPED runs (one scene, one
+// spot): small enough to hold the connection, and results land immediately.
+export const generateWikidoKokoroAudios = (data) => call("generateWikidoKokoroAudios", { timeout: 300_000 })(data || {});
+
 // Free-premium voiceovers — the same Kokoro-82M voice the local bridge uses,
 // running on the platform's servers (model bundled in the function; no API key,
 // nothing billed per clip). The studio ENQUEUES a job and can close the tab: a
@@ -136,6 +141,15 @@ export function planVoiceoverClips(pack, { force = false } = {}) {
     }
   }
   return items;
+}
+
+// Narrow a full clip plan to ONE scene (its narration + every spot on it) or
+// ONE spot. An unknown scope plans to an empty list — the caller reports that.
+export function scopeVoiceoverClips(items, { sceneId, hotspotId = "" } = {}) {
+  if (!sceneId) return [];
+  return (items || []).filter((c) =>
+    hotspotId ? c.id === `${sceneId}.${hotspotId}` : c.id === sceneId || c.id.startsWith(`${sceneId}.`)
+  );
 }
 
 // Raw docs (drafts + published) for the studio workspace. The rules expose

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { planVoiceoverClips, checkVoiceoverBridge, synthesizeOnBridge, startVoiceoverBridge, bridgeLauncherStatus } from "./wikidoAdmin.js";
+import { planVoiceoverClips, scopeVoiceoverClips, checkVoiceoverBridge, synthesizeOnBridge, startVoiceoverBridge, bridgeLauncherStatus } from "./wikidoAdmin.js";
 import { sortStudioTopics } from "./wikidoAdmin.js";
 
 const pack = {
@@ -52,6 +52,30 @@ describe("planVoiceoverClips", () => {
 
   it("handles empty packs", () => {
     expect(planVoiceoverClips(null)).toEqual([]);
+  });
+});
+
+describe("scopeVoiceoverClips", () => {
+  const items = [
+    { id: "a", text: "A" },
+    { id: "a.sun", text: "Sun" },
+    { id: "a.moon", text: "Moon" },
+    { id: "b", text: "B" },
+  ];
+
+  it("narrows to one scene: its narration plus every spot on it", () => {
+    expect(scopeVoiceoverClips(items, { sceneId: "a" }).map((i) => i.id)).toEqual(["a", "a.sun", "a.moon"]);
+  });
+
+  it("narrows to exactly one spot", () => {
+    expect(scopeVoiceoverClips(items, { sceneId: "a", hotspotId: "moon" }).map((i) => i.id)).toEqual(["a.moon"]);
+    expect(scopeVoiceoverClips(items, { sceneId: "b", hotspotId: "moon" })).toEqual([]);
+  });
+
+  it("an unknown or missing scope plans nothing", () => {
+    expect(scopeVoiceoverClips(items, { sceneId: "ghost" })).toEqual([]);
+    expect(scopeVoiceoverClips(items, {})).toEqual([]);
+    expect(scopeVoiceoverClips(null, { sceneId: "a" })).toEqual([]);
   });
 });
 

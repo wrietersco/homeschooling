@@ -83,18 +83,16 @@ async function finalizeJob(ref, clips, status) {
 }
 
 // Wire one finished clip using a FRESH scene read — the curator may be editing
-// the topic mid-run, and a stale hotspots array would drop their edits.
+// the topic mid-run, and a stale hotspots array would drop their edits. The
+// write itself goes through wireClipAudio so every engine wires identically.
 async function wireClipFresh(db, topicId, clip, url) {
   const snap = await topicRef(db, topicId).get();
   const scene = snap.data()?.scenes?.[clip.sceneId];
   if (!scene) throw new Error(`Scene "${clip.sceneId}" no longer exists.`);
-  if (clip.hotspotId) {
-    if (!(scene.hotspots || []).some((h) => h.id === clip.hotspotId)) throw new Error(`Spot "${clip.hotspotId}" no longer exists.`);
-    const hotspots = scene.hotspots.map((h) => (h.id === clip.hotspotId ? { ...h, audio: url } : h));
-    await topicRef(db, topicId).update(withoutUndefined({ [`scenes.${clip.sceneId}.hotspots`]: hotspots, updatedAt: Date.now() }));
-  } else {
-    await topicRef(db, topicId).update(withoutUndefined({ [`scenes.${clip.sceneId}.audio`]: url, updatedAt: Date.now() }));
+  if (clip.hotspotId && !(scene.hotspots || []).some((h) => h.id === clip.hotspotId)) {
+    throw new Error(`Spot "${clip.hotspotId}" no longer exists.`);
   }
+  await wireClipAudio(topicRef(db, topicId), { scenes: { [clip.sceneId]: scene } }, clip, url, "kokoro");
 }
 
 // One drain pass. With `jobRef` it processes exactly that job (the primer);

@@ -27,7 +27,7 @@ import {
   buildSpotArtDirection,
   WIKIDO_REALISM_DIRECTIVE,
 } from "../lib/wikidoPack.js";
-import { audioClipPath, validateAudioPayload, withoutUndefined, wikidoClipText, pickWikidoAudioClips, callImageModelWide } from "../agents/wikido.js";
+import { audioClipPath, validateAudioPayload, withoutUndefined, wikidoClipText, pickWikidoAudioClips, wireClipAudio, callImageModelWide } from "../agents/wikido.js";
 import { normalizeForSave } from "../lib/wikidoPack.js";
 
 const validPack = {
@@ -232,6 +232,30 @@ test("pickWikidoAudioClips resolves ids against the saved pack and skips billed 
   };
   const many = Array.from({ length: 20 }, (_, i) => `a.h${i}`);
   assert.equal(pickWikidoAudioClips(wide, many).length, 12);
+});
+
+test("wireClipAudio writes the recording and WHICH voice made it", async () => {
+  const updates = [];
+  const docRef = { update: async (patch) => updates.push(patch) };
+  const pack = {
+    scenes: {
+      a: { id: "a", title: "A", narration: "n", hotspots: [{ id: "h", label: "H", info: { title: "H", body: ["b"] } }] },
+    },
+  };
+  // a spot clip recorded by the paid voice carries the paid marker
+  await wireClipAudio(docRef, pack, { id: "a.h", sceneId: "a", hotspotId: "h" }, "https://x/h.wav", "paid");
+  assert.equal(pack.scenes.a.hotspots[0].audio, "https://x/h.wav");
+  assert.equal(pack.scenes.a.hotspots[0].audioEngine, "paid");
+  assert.ok(updates[0]["scenes.a.hotspots"]);
+  // a narration clip recorded by Kokoro carries the kokoro marker
+  await wireClipAudio(docRef, pack, { id: "a", sceneId: "a", hotspotId: "" }, "https://x/a.mp3", "kokoro");
+  assert.equal(pack.scenes.a.audio, "https://x/a.mp3");
+  assert.equal(pack.scenes.a.audioEngine, "kokoro");
+  assert.equal(updates[1]["scenes.a.audioEngine"], "kokoro");
+  // no engine named → audio wires exactly as before, no marker field
+  await wireClipAudio(docRef, pack, { id: "a", sceneId: "a", hotspotId: "" }, "https://x/a2.mp3");
+  assert.equal(pack.scenes.a.audio, "https://x/a2.mp3");
+  assert.equal(updates[2]["scenes.a.audioEngine"], undefined);
 });
 
 test("normalizeForSave repairs exactly what broke prod saves", () => {

@@ -965,6 +965,9 @@ export const attachWikidoAudio = onCall(
 
     const payloadError = validateAudioPayload(request.data?.audioBase64, request.data?.mime);
     if (payloadError) throw new HttpsError("invalid-argument", payloadError);
+    // which voice made this recording ("kokoro" | "paid") — stored beside the
+    // clip so the studio can show, and the curator can mix, voices per spot
+    const engine = request.data?.engine === "paid" ? "paid" : "kokoro";
 
     const docRef = topicsCol().doc(topicId);
     const snap = await docRef.get();
@@ -991,10 +994,10 @@ export const attachWikidoAudio = onCall(
     const url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(filePath)}?alt=media&token=${token}`;
 
     if (hotspotId) {
-      const hotspots = scene.hotspots.map((h) => (h.id === hotspotId ? { ...h, audio: url } : h));
+      const hotspots = scene.hotspots.map((h) => (h.id === hotspotId ? { ...h, audio: url, audioEngine: engine } : h));
       await docRef.update(withoutUndefined({ [`scenes.${sceneId}.hotspots`]: hotspots, updatedAt: Date.now() }));
     } else {
-      await docRef.update(withoutUndefined({ [`scenes.${sceneId}.audio`]: url, updatedAt: Date.now() }));
+      await docRef.update(withoutUndefined({ [`scenes.${sceneId}.audio`]: url, [`scenes.${sceneId}.audioEngine`]: engine, updatedAt: Date.now() }));
     }
     return { url, path: filePath };
   }
@@ -1057,15 +1060,23 @@ export async function uploadClip(bucket, topicId, clip, buffer, ext, mime) {
   return `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(filePath)}?alt=media&token=${token}`;
 }
 
-export async function wireClipAudio(docRef, pack, clip, url) {
+// `engine` names the voice that recorded this clip ("kokoro" | "paid"), so the
+// studio can show — and the curator can deliberately mix — voices per spot.
+export async function wireClipAudio(docRef, pack, clip, url, engine = "") {
+  const marker = engine ? { audioEngine: engine } : {};
   const scene = pack.scenes[clip.sceneId];
   if (clip.hotspotId) {
-    const hotspots = scene.hotspots.map((h) => (h.id === clip.hotspotId ? { ...h, audio: url } : h));
+    const hotspots = scene.hotspots.map((h) => (h.id === clip.hotspotId ? { ...h, audio: url, ...marker } : h));
     scene.hotspots = hotspots;
     await docRef.update(withoutUndefined({ [`scenes.${clip.sceneId}.hotspots`]: hotspots, updatedAt: Date.now() }));
   } else {
     scene.audio = url;
-    await docRef.update(withoutUndefined({ [`scenes.${clip.sceneId}.audio`]: url, updatedAt: Date.now() }));
+    if (engine) scene.audioEngine = engine;
+    await docRef.update(withoutUndefined({
+      [`scenes.${clip.sceneId}.audio`]: url,
+      ...(engine ? { [`scenes.${clip.sceneId}.audioEngine`]: engine } : {}),
+      updatedAt: Date.now(),
+    }));
   }
 }
 
@@ -1113,7 +1124,7 @@ export const generateWikidoAudios = onCall(
         const out = await synthesizeSpeakable(synth, { text: spokenText, voiceName, model, apiKey, instructions });
         const wav = pcmToWav(out.pcm, { sampleRate: out.sampleRate });
         const url = await uploadClip(bucket, topicId, clip, wav, "wav", "audio/wav");
-        await wireClipAudio(docRef, pack, clip, url);
+        await wireClipAudio(docRef, pack, clip, url, "paid");
         results.push({ id: clip.id, url });
       } catch (e) {
         results.push({ id: clip.id, error: String(e?.message || e).slice(0, 200) });
@@ -1173,7 +1184,7 @@ export const generateWikidoKokoroAudios = onCall(
         const { mp3Base64 } = await engine.generate(clip.text);
         const buffer = Buffer.from(mp3Base64, "base64");
         const url = await uploadClip(bucket, topicId, clip, buffer, "mp3", "audio/mpeg");
-        await wireClipAudio(docRef, pack, clip, url);
+        await wireClipAudio(docRef, pack, clip, url, "kokoro");
         results.push({ id: clip.id, url });
       } catch (e) {
         console.warn(`[generateWikidoKokoroAudios] ${topicId}/${clip.id}:`, e?.message || e);

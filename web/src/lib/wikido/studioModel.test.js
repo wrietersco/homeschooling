@@ -78,6 +78,23 @@ describe("delete helpers", () => {
     expect(Object.keys(next)).toEqual(["root"]);
     expect(next.root.hotspots.every((h) => !h.childSceneId)).toBe(true);
   });
+
+  it("a scene SHARED with the rest of the topic survives deleting the branch that also opens it", () => {
+    const s = scenes();
+    s.root.hotspots.push(spot("a2", "leaf")); // leaf is now opened from root AND mid
+    // leaf is no longer "only through mid", so deleting mid keeps it standing
+    expect(descendantSceneIds(s, "mid")).toEqual(["mid"]);
+    expect(deletePlan(s, "mid").deeper).toEqual([]);
+    const next = deleteSceneFrom(s, "mid", { withDeeper: true });
+    expect(Object.keys(next).sort()).toEqual(["leaf", "root"]);
+    expect(next.root.hotspots.some((h) => h.childSceneId === "leaf")).toBe(true);
+  });
+
+  it("deletePlan names EVERY doorway that opens a shared scene", () => {
+    const s = scenes();
+    s.root.hotspots.push(spot("a2", "mid"));
+    expect(deletePlan(s, "mid").openedBy.map((o) => o.spotId).sort()).toEqual(["a", "a2"]);
+  });
 });
 
 describe("topicHealth", () => {
