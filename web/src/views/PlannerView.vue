@@ -13,6 +13,7 @@ import ActivityArt from "@/components/planner/ActivityArt.vue";
 import SkyArt from "@/components/planner/SkyArt.vue";
 import ActivityPreview from "@/components/planner/ActivityPreview.vue";
 import ChildAvatar from "@/components/ChildAvatar.vue";
+import { tintOf, tintStyle } from "@/lib/activityTints";
 
 const auth = useAuthStore();
 const activityStore = useActivityStore();
@@ -154,23 +155,6 @@ onMounted(() => {
 });
 onUnmounted(() => navObs?.disconnect());
 
-// ─── Colours per activity type (the games' tile palette) ─────────────────────
-const TINTS = {
-  quran: { bg: "#DDF8E8", deep: "#1E9E5C" },
-  noorani_qaida: { bg: "#D9F7F2", deep: "#149485" },
-  arabic_reading: { bg: "#DDF8E8", deep: "#1E9E5C" },
-  urdu_reading: { bg: "#FFEBD3", deep: "#C96F1E" },
-  english_reading: { bg: "#DBF3FF", deep: "#1D7FBE" },
-  story_reading: { bg: "#EEE3FF", deep: "#7B3FD1" },
-  conversation: { bg: "#FFE3EC", deep: "#D6457C" },
-  mathematics: { bg: "#FFF8C9", deep: "#A98608" },
-  computer: { bg: "#DBF3FF", deep: "#1D7FBE" },
-  ai_robotics: { bg: "#FFE6DC", deep: "#D1502A" },
-  physical: { bg: "#FFE6DC", deep: "#D1502A" },
-  teaching: { bg: "#EEE3FF", deep: "#7B3FD1" },
-};
-const tintOf = (type) => TINTS[type] || TINTS.teaching;
-const tintStyle = (type) => ({ "--bg": tintOf(type).bg, "--deep": tintOf(type).deep });
 
 const TYPE_LABELS = {
   quran: "Quran", noorani_qaida: "Qaida",

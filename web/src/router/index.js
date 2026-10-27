@@ -101,7 +101,8 @@ const routes = [
     path: "/session",
     name: "session",
     component: () => import("@/views/ActivityPlayerView.vue"),
-    meta: { requiresAuth: true },
+    // `wide`: the player uses the full screen (tile rail + activity + parent panel).
+    meta: { requiresAuth: true, wide: true },
   },
   {
     path: "/activity/:activityId",
