@@ -3,6 +3,8 @@ import { ref } from "vue";
 import { useAuthStore } from "@/stores/auth";
 import { useProfilesStore } from "@/stores/profiles";
 import { newChild, addChild, updateChild, deleteChild } from "@/services/profiles";
+import { photoToDataUrl } from "@/lib/imageResize";
+import ChildAvatar from "@/components/ChildAvatar.vue";
 
 const auth = useAuthStore();
 const profiles = useProfilesStore();
@@ -34,6 +36,24 @@ async function save() {
     busy.value = false;
   }
 }
+// Profile photo: shrunk to a small square on this device, saved with the child.
+const photoInput = ref(null);
+const photoBusy = ref(false);
+async function onPhotoPicked(e) {
+  const file = e.target.files?.[0];
+  e.target.value = "";
+  if (!file) return;
+  photoBusy.value = true;
+  error.value = "";
+  try {
+    form.value.photo = await photoToDataUrl(file);
+  } catch (err) {
+    error.value = err?.message || "Could not use that picture.";
+  } finally {
+    photoBusy.value = false;
+  }
+}
+
 async function remove(c) {
   if (!confirm(`Remove ${c.name}?`)) return;
   await deleteChild(auth.familyId, c.id);
@@ -49,6 +69,25 @@ async function remove(c) {
 
     <form v-if="editing" class="card form" @submit.prevent="save">
       <h2>{{ editing === "new" ? "New child" : "Edit child" }}</h2>
+      <div class="photo-row">
+        <button type="button" class="photo-pick" :disabled="photoBusy" aria-label="Choose a photo" @click="photoInput?.click()">
+          <img v-if="form.photo" :src="form.photo" alt="" />
+          <svg v-else viewBox="0 0 64 64" aria-hidden="true">
+            <circle cx="32" cy="32" r="31" fill="#FFE3EC" />
+            <circle cx="32" cy="26" r="11" fill="#FF8FB1" />
+            <path d="M12 54 Q32 30 52 54 Z" fill="#FF8FB1" />
+          </svg>
+          <span class="photo-cam">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="13" rx="3" fill="#7B3FD1" /><path d="M8 7 L9.5 4 H14.5 L16 7 Z" fill="#7B3FD1" /><circle cx="12" cy="13.5" r="3.6" fill="#fff" /></svg>
+          </span>
+        </button>
+        <div class="photo-text">
+          <strong>{{ photoBusy ? "Getting the photo ready…" : form.photo ? "Looking good!" : "Add a photo" }}</strong>
+          <span class="muted">Tap the circle to choose a picture.</span>
+          <button v-if="form.photo" type="button" class="linkish danger" @click="form.photo = ''">Remove photo</button>
+        </div>
+        <input ref="photoInput" class="photo-input" type="file" accept="image/*" aria-label="Child photo" @change="onPhotoPicked" />
+      </div>
       <div class="grid">
         <label>Name<input v-model="form.name" type="text" /></label>
         <label>Date of birth<input v-model="form.dob" type="date" /></label>
@@ -69,7 +108,7 @@ async function remove(c) {
     <ul class="list">
       <li v-for="c in profiles.children" :key="c.id" class="card">
         <div class="row">
-          <strong>{{ c.name }}</strong>
+          <span class="who"><ChildAvatar :child="c" :size="48" /><strong>{{ c.name }}</strong></span>
           <div v-if="canEdit()" class="rowbtns">
             <button class="linkish" @click="startEdit(c)">Edit</button>
             <button class="linkish danger" @click="remove(c)">Delete</button>
@@ -102,4 +141,19 @@ input, textarea { padding: 0.5rem 0.6rem; border: 1px solid #cbd5e1; border-radi
 .goals { color: #1e293b; font-style: italic; }
 .empty { color: #94a3b8; }
 .error { color: #b91c1c; }
+.who { display: flex; align-items: center; gap: 0.75rem; }
+.photo-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+.photo-pick {
+  position: relative; width: 96px; height: 96px; flex-shrink: 0; padding: 0; border: 4px solid #fff;
+  border-radius: 50%; background: #fff; cursor: pointer; box-shadow: 0 4px 0 rgba(58, 43, 82, 0.18), 0 0 0 2px #f3e8ff;
+}
+.photo-pick img, .photo-pick > svg { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; }
+.photo-cam {
+  position: absolute; right: -4px; bottom: -4px; width: 36px; height: 36px; border-radius: 50%;
+  background: #fff; display: grid; place-items: center; box-shadow: 0 2px 0 rgba(58, 43, 82, 0.2);
+}
+.photo-cam svg { width: 22px; height: 22px; }
+.photo-text { display: flex; flex-direction: column; gap: 0.15rem; align-items: flex-start; }
+.photo-text .muted { margin: 0; font-size: 0.85rem; }
+.photo-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 </style>

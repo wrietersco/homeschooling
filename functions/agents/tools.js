@@ -18,6 +18,16 @@ const WRITABLE = [
 
 const MAX_LIMIT = 50;
 
+// Inline images (a child's profile photo is a ~20 KB base64 data URL) are noise
+// to a model and would flood its context, so agents see a placeholder instead.
+export function forModel(row) {
+  const out = {};
+  for (const [k, v] of Object.entries(row)) {
+    out[k] = typeof v === "string" && v.startsWith("data:image/") ? "[photo]" : v;
+  }
+  return out;
+}
+
 function assertReadable(c) {
   if (!READABLE.includes(c)) throw new Error(`collection "${c}" is not readable`);
 }
@@ -164,7 +174,7 @@ export function createTools({ db, familyId, uid, role, mode = "read", run, conte
       const capped = Math.min(Math.max(1, limit || 20), MAX_LIMIT);
       // Fetch one extra to detect "there is more".
       const snap = await q.limit(capped + 1).get();
-      const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const rows = snap.docs.map((d) => forModel({ id: d.id, ...d.data() }));
       const hasMore = rows.length > capped;
       const page = rows.slice(0, capped);
       const out = { collection, count: page.length, rows: page, hasMore };
@@ -182,7 +192,7 @@ export function createTools({ db, familyId, uid, role, mode = "read", run, conte
     async get_document({ collection, id }) {
       assertReadable(collection);
       const d = await col(collection).doc(id).get();
-      return d.exists ? { id: d.id, ...d.data() } : { id, exists: false };
+      return d.exists ? forModel({ id: d.id, ...d.data() }) : { id, exists: false };
     },
 
     async read_context({ handle, start = 0, count = 20 }) {

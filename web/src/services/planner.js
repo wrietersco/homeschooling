@@ -22,6 +22,20 @@ export function updateBlock(familyId, dateKey, blockId, updates) {
   );
 }
 
+// Move a block to another hour and/or day. Blocks live under their day, so a
+// cross-day move re-creates the doc under the new day and deletes the old one
+// in a single batch (the card never shows up twice, or vanishes).
+export async function moveBlock(familyId, fromDateKey, toDateKey, block, scheduledTime) {
+  if (fromDateKey === toDateKey) {
+    return updateBlock(familyId, fromDateKey, block.id, { scheduledTime });
+  }
+  const { id, ...data } = block;
+  const batch = writeBatch(db);
+  batch.set(doc(blocksRef(familyId, toDateKey)), { ...data, scheduledTime });
+  batch.delete(doc(db, "families", familyId, "calendarDays", fromDateKey, "blocks", id));
+  await batch.commit();
+}
+
 // Delete every block across the given days (one week). Returns the count
 // removed so callers can confirm to the user. Batches are chunked to stay
 // under Firestore's 500-op limit.

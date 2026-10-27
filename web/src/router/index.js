@@ -94,7 +94,8 @@ const routes = [
     path: "/planner",
     name: "planner",
     component: () => import("@/views/PlannerView.vue"),
-    meta: { requiresAuth: true },
+    // `wide`: the planner matrix runs edge to edge (no 1100px content column).
+    meta: { requiresAuth: true, wide: true },
   },
   {
     path: "/session",

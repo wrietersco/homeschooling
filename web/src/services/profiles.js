@@ -54,7 +54,7 @@ export async function deleteGuardian(familyId, gid) {
 
 // ---- Children ----
 export function newChild() {
-  return { name: "", dob: "", strengths: "", weaknesses: "", goals: "", comments: "" };
+  return { name: "", dob: "", strengths: "", weaknesses: "", goals: "", comments: "", photo: "" };
 }
 export async function addChild(familyId, data) {
   return addDoc(collection(db, ...fam(familyId), "children"), {

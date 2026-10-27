@@ -11,7 +11,7 @@ const route = useRoute();
     <AppNav v-if="!route.meta.immersive" />
     <main
       class="app-main"
-      :class="{ 'app-main-wide': route.path === '/platform', 'app-main-immersive': route.meta.immersive }"
+      :class="{ 'app-main-wide': route.path === '/platform' || route.meta.wide, 'app-main-immersive': route.meta.immersive }"
     >
       <RouterView />
     </main>
