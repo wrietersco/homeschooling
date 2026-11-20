@@ -59,9 +59,10 @@ test("a 1 cm scale clearly shows its millimetres", async ({ page }) => {
 
   // mm tick path exists and is fully in focus at fit zoom
   expect(await mmOpacity(page)).toBeGreaterThanOrEqual(0.6);
-  // only the half-centimetre mark carries a label: 0.5
+  // every millimetre line is labelled with its decimal-centimetre value
   const mmNums = await page.locator("#overlay .mmnum").allTextContents();
-  expect(mmNums).toEqual(["0.5"]);
+  expect(mmNums).toEqual(["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9"]);
+  await expect(page.locator("#mmLegend")).toBeVisible();
 });
 
 test("millimetres are always there and reveal as the kid zooms", async ({ page }) => {
@@ -176,7 +177,16 @@ async function cutInto(page, digits) {
   await page.waitForTimeout(1800);
 }
 
-test("math book shows 67 ÷ 2 as a fraction with every long-division step", async ({ page }) => {
+async function stepThrough(page, card) {
+  const total = +(await card.getAttribute("data-stages"));
+  for (let i = 0; i < total; i++) {
+    await card.locator(".next").click();
+    await page.waitForTimeout(120);
+  }
+  return total;
+}
+
+test("math book: 67 ÷ 2 is solved one kid-controlled step at a time, with arrows", async ({ page }) => {
   await startGame(page);
   await setSize(page, ["6", "7"]);
   await cutInto(page, ["2"]);
@@ -184,25 +194,77 @@ test("math book shows 67 ÷ 2 as a fraction with every long-division step", asyn
   const card = page.locator("#cards .card").first();
   await expect(card.locator(".frac .num")).toHaveText("67");
   await expect(card.locator(".frac .den")).toHaveText("2");
+  await page.waitForTimeout(800);
+  // nothing is solved until the kid presses Next
+  await expect(card.locator(".nl.on")).toHaveCount(1);
+  await expect(card.locator(".ans.q0")).toBeVisible();
+  await expect(card.locator("[data-id=q0]")).toHaveCSS("opacity", "0");
+
+  await card.locator(".next").click();                       // look at the first digit
+  await card.locator(".next").click();                       // 2 × 3 = 6, with arrows
+  await expect(card.locator("svg.arrows .arr")).toHaveCount(2);
+  await expect(card.locator(".nl.cur")).toContainText("2 × 3 = 6");
+  await card.locator('[data-a="back"]').click();             // the kid can go back
+  await expect(card.locator("[data-id=q0]")).toHaveCSS("opacity", "0");
+  await card.locator(".next").click();
+
+  while (!(await card.locator(".nl.cur").textContent()).includes("Answer")) await card.locator(".next").click();
   const words = (await card.locator(".words").textContent()).replace(/\s+/g, " ");
-  expect(words).toContain("2 × 3 = 6");
   expect(words).toContain("7 − 6 = 1");
-  expect(words).toContain("Put the decimal point");
+  expect(words).toContain("decimal point");
   expect(words).toContain("Add a 0");
   expect(words).toContain("10 − 10 = 0");
-  await expect(card.locator(".wk .quotient")).toHaveText("335");
-  await page.waitForTimeout(6500);
+  expect(words).toContain("67 ÷ 2 = 33.5");
+  await expect(card.locator(".wk .quotient")).toHaveText(".335");   // digits + the point (placed by CSS)
+  await page.waitForTimeout(600);
   await page.screenshot({ path: "test-results/long-division-67-by-2.png" });
+  await card.locator('[data-a="restart"]').click();
+  await expect(card.locator(".nl.on")).toHaveCount(1);
 });
 
-test("the math book can be hidden and shown again", async ({ page }) => {
+test("the math book can be hidden and shown again with clear buttons", async ({ page }) => {
   await startGame(page);
   await expect(page.locator("#book")).toBeVisible();
+  await expect(page.locator("#bookClose")).toContainText("Hide");
   await page.click("#bookClose");
   await expect(page.locator("body")).toHaveClass(/bookOff/);
   await expect(page.locator("#book")).toHaveCSS("opacity", "0");
-  await expect(page.locator("#bookBtn")).toBeVisible();
+  await expect(page.locator("#bookBtn")).toContainText("Math Book");
   await page.click("#bookBtn");
   await expect(page.locator("body")).not.toHaveClass(/bookOff/);
   await expect(page.locator("#book")).toHaveCSS("opacity", "1");
+});
+
+test("decimal number of parts: 11 cm into 5.5 parts = 5 × 2 cm + a 1 cm part", async ({ page }) => {
+  await startGame(page);
+  await setSize(page, ["1", "1"]);
+  await page.locator(".scale").first().click();
+  await page.waitForTimeout(350);
+  await page.click("#tCut");
+  await typeOnPad(page, ["5", ".", "5"]);
+  await expect(page.locator("#confirmText")).toHaveText("Cut into 5.5 parts?");
+  await page.click("#btnYes");
+  await page.waitForTimeout(1800);
+  const labels = await page.locator("#overlay .lenlabel").allTextContents();
+  expect(labels.filter(t => t === "2 cm").length).toBe(5);
+  expect(labels).toContain("1 cm part");
+  const card = page.locator("#cards .card").first();
+  await expect(card.locator(".frac .den")).toHaveText("5.5");
+  await expect(card.locator(".divisor")).toContainText("55");     // 110 ÷ 55
+  await stepThrough(page, card);
+  await expect(card.locator(".nl.cur")).toContainText("11 ÷ 5.5 = 2");
+});
+
+test("zoom buttons zoom in, out and all the way in", async ({ page }) => {
+  await startGame(page);
+  const k = () => page.evaluate(() => +document.querySelector("#world").getAttribute("transform").match(/scale\(([^)]+)\)/)[1]);
+  const k0 = await k();
+  await page.click("#zIn"); await page.waitForTimeout(450);
+  expect(await k()).toBeGreaterThan(k0 * 1.8);
+  await page.click("#zOut"); await page.waitForTimeout(450);
+  expect(await k()).toBeCloseTo(k0, 1);
+  await page.click("#zMax"); await page.waitForTimeout(450);
+  expect(await k()).toBeGreaterThan(300);
+  await expect(page.locator("#zIn")).toBeDisabled();
+  await expect(page.locator("#mmLegend")).toBeVisible();
 });

@@ -29,11 +29,19 @@
 <div id="hint">Tap ▶ to start!</div>
 
 <!-- Math book: sidebar on desktop, slide-up sheet on mobile -->
-<button id="bookBtn" title="My Math Book">📓<span id="bookCount" hidden>0</span></button>
+<button id="bookBtn" title="Open my Math Book"><span class="bi">📓</span><span class="bt">Math Book</span><span class="bar">◀</span><span id="bookCount" hidden>0</span></button>
 <aside id="book">
-  <div id="bookHead"><span>📓 My Math Book</span><button id="bookClose" title="Close">✕</button></div>
+  <div id="bookHead"><span>📓 My Math Book</span><button id="bookClose" title="Hide the Math Book"><span class="bx">✕</span><span class="bh">Hide <b>▶</b></span></button></div>
   <div id="cards"></div>
 </aside>
+
+<!-- Zoom controls -->
+<div id="zoomBar">
+  <button id="zIn" title="Zoom in">＋</button>
+  <button id="zOut" title="Zoom out">－</button>
+  <button id="zMax" title="Zoom all the way in">🔬<span>Max</span></button>
+</div>
+<div id="mmLegend" hidden>🔬 each tiny line is <b>1 mm</b> = <b>0.1 cm</b></div>
 
 <!-- Toolbar -->
 <nav id="toolbar">

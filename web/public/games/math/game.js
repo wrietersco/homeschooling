@@ -95,6 +95,7 @@ let   CM    = 6;    // pixels per cm — adapts to the root ruler (100 cm → 6,
 const RH = 64;      // ruler height
 const VGAP = 96;    // vertical gap between a scale and its pieces row
 const SNAP_Y = (RH + VGAP) / 2;  // vertical magnet lattice for dragged pieces
+const MINK = .22, MAXK = 400;   // zoom limits: from far above to deep inside one millimetre
 const isMobile = () => matchMedia('(max-width:700px)').matches;
 
 const defs = $('#defs');
@@ -140,7 +141,7 @@ const sel = () => byId.get(selId);
 /* ---------- ruler rendering ---------- */
 function makeScale(len, color, opts = {}) {
   const s = { id: nextId++, len, color, rows: [], parentId: null, x: 0, y: 0, dy: 0, pop: 1,
-              remainder: !!opts.remainder, off: { dx: 0, dy: 0 }, ax: 0, ay: 0, drag: false,
+              remainder: !!opts.remainder, partial: !!opts.partial, off: { dx: 0, dy: 0 }, ax: 0, ay: 0, drag: false,
               numG: null, numEls: [], lenEl: null };
   s.g = el('g', { class: 'scale' + (s.remainder ? ' remainder' : '') }, $('#scalesLayer'));
   s.g.dataset.id = s.id;
@@ -204,6 +205,7 @@ function render(s, fast) {
 // zoom level-of-detail: millimetres start as barely-visible whisper lines and
 // sharpen as the kid zooms in. cm/5cm ticks fade out only when hopelessly dense.
 function updateLOD() {
+  if (typeof syncZoomBtns === 'function' && $('#zIn')) syncZoomBtns();
   const spx = CM * view.k, mm = spx / 10;
   const ramp = (v, a, b) => clamp((v - a) / (b - a), 0, 1);
   const oLow = ramp(spx, 1.2, 2.2);
@@ -235,7 +237,7 @@ function rebuildNums(s) {
   s.numG = el('g', {}, overlay);
   s.numEls = [];
   if (!s.lenEl) s.lenEl = el('text', { class: 'lenlabel', fill: shade(s.color, -.45) }, overlay);
-  s.lenEl.textContent = s.remainder ? `${fmt(s.len)} cm left over` : `${fmt(s.len)} cm`;
+  s.lenEl.textContent = s.remainder ? `${fmt(s.len)} cm left over` : s.partial ? `${fmt(s.len)} cm part` : `${fmt(s.len)} cm`;
 
   const k = view.k;
   const wl = -view.tx / k, wr = (innerWidth - view.tx) / k;  // visible world-x window
@@ -255,15 +257,17 @@ function rebuildNums(s) {
     t.textContent = fmt(s.len);
     s.numEls.push({ e: t, cm: s.len, mm: false });
   }
-  // half-centimetre labels (0.5, 1.5, 2.5 …) appear once the mm grid is wide
-  // enough to read — kids see millimetres as decimal centimetres, not 1..9
-  if (CM * k / 10 >= 10) {
+  // millimetre labels as decimal centimetres: 0.1, 0.2 … 0.9, 1.1 … — so every
+  // little line says what it is. Dense → only the 5 mm marks (0.5, 1.5 …).
+  const mmPx = CM * k / 10;
+  const mmStep = mmPx >= 30 ? 1 : mmPx >= 9 ? 5 : 0;
+  if (mmStep) {
     const a = Math.max(1, Math.floor((wl - s.x) / CM * 10));
-    const b = Math.min(s.len * 10 - 1, Math.ceil((wr - s.x) / CM * 10));
-    for (let i = a; i <= b && s.numEls.length < 160; i++) {
-      if (i % 10 === 0 || i % 5 !== 0) continue;               // only the half-cm marks carry labels
-      const t = el('text', { class: 'ticknum mmnum' }, s.numG);
-      t.textContent = fmt(i / 10);                              // 0.5, 1.5, 2.5 …
+    const b = Math.min(Math.round(s.len * 10) - 1, Math.ceil((wr - s.x) / CM * 10));
+    for (let i = a; i <= b && s.numEls.length < 200; i++) {
+      if (i % 10 === 0 || i % mmStep !== 0) continue;           // whole cm is already numbered
+      const t = el('text', { class: 'ticknum mmnum' + (i % 5 === 0 ? ' half' : '') }, s.numG);
+      t.textContent = fmt(i / 10);
       s.numEls.push({ e: t, cm: i / 10, mm: true });
     }
   }
@@ -453,7 +457,7 @@ svg.addEventListener('pointermove', e => {
   ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now() });
   if (pinch && ptrs.size === 2) {
     const [a, b] = [...ptrs.values()];
-    const k = clamp(pinch.k0 * Math.hypot(a.x-b.x, a.y-b.y) / pinch.d, .22, 400);
+    const k = clamp(pinch.k0 * Math.hypot(a.x-b.x, a.y-b.y) / pinch.d, MINK, MAXK);
     const wx = (pinch.cx - pinch.tx0) / pinch.k0, wy = (pinch.cy - pinch.ty0) / pinch.k0;
     view.k = k; view.tx = pinch.cx - wx * k; view.ty = pinch.cy - wy * k;
     applyView(); moved = true;
@@ -489,12 +493,33 @@ svg.addEventListener('pointerup', endPtr);
 svg.addEventListener('pointercancel', endPtr);
 svg.addEventListener('wheel', e => {
   e.preventDefault();
-  zoomAt(e.clientX, e.clientY, clamp(view.k * Math.exp(-e.deltaY * .0013), .22, 400));
+  zoomAt(e.clientX, e.clientY, clamp(view.k * Math.exp(-e.deltaY * .0013), MINK, MAXK));
 }, { passive: false });
+// ＋ / － / 🔬 buttons: smooth zoom around the middle of the visible canvas
+function canvasCenter() {
+  const off = !isMobile() && !document.body.classList.contains('bookOff');
+  return { x: off ? (innerWidth - 330) / 2 : innerWidth / 2, y: innerHeight * .42 };
+}
+function zoomTo(k2) {
+  k2 = clamp(k2, MINK, MAXK);
+  const c = canvasCenter(), wx = (c.x - view.tx) / view.k, wy = (c.y - view.ty) / view.k;
+  tweenView({ k: k2, tx: c.x - wx * k2, ty: c.y - wy * k2 }, 320);
+  setTimeout(syncZoomBtns, 340);
+}
+function syncZoomBtns() {
+  $('#zIn').disabled = view.k >= MAXK * .999;
+  $('#zOut').disabled = view.k <= MINK * 1.001;
+  const mmPx = CM * view.k / 10;
+  $('#mmLegend').hidden = !(scales.length && mmPx >= 7);
+}
+$('#zIn').addEventListener('click', () => { blip(); zoomTo(view.k * 2); });
+$('#zOut').addEventListener('click', () => { blip(); zoomTo(view.k / 2); });
+$('#zMax').addEventListener('click', () => { blip(); zoomTo(MAXK); toast('Zoomed all the way in! 🔬'); });
 function zoomAt(sx, sy, k2) {
   const k1 = view.k, wx = (sx - view.tx) / k1, wy = (sy - view.ty) / k1;
   view.k = k2; view.tx = sx - wx * k2; view.ty = sy - wy * k2;
   applyView();
+  syncZoomBtns();
 }
 
 /* ---------- selection ---------- */
@@ -619,8 +644,8 @@ $('#tCut').addEventListener('click', () => {
   if (s.len < 0.2 + 1e-9) { toast('This piece is too tiny to cut! 🐜'); sad(); return; }
   const maxN = clamp(Math.floor(round2(s.len) * 10), 2, 12); // every piece stays ≥ 1 mm
   openPad({
-    title: 'Cut into how many pieces?',
-    unit: 'pieces', min: 2, max: maxN,
+    title: 'Cut into how many parts?',
+    unit: 'parts', min: 2, max: maxN, dec: 1,   // 5, 5.1, 5.5 … are all welcome
     ok: n => startPreview(s, n),
   });
 });
@@ -633,9 +658,10 @@ function startPreview(s, n) {
   layer.innerHTML = '';
   const pg = el('g', {}, layer);
   pg.setAttribute('transform', `translate(${s.x} ${s.y})`);
-  for (let i = 1; i < n; i++) el('line', { class:'cutline', x1:i*pw, y1:-6, x2:i*pw, y2:RH+6 }, pg);
-  for (let i = 0; i < n; i++) if (i % 2) el('rect', { class:'segTint', x:i*pw, y:0, width:pw, height:RH, rx:4 }, pg);
-  $('#confirmText').textContent = `Cut into ${n} pieces?`;
+  const cnt = Math.ceil(n - 1e-9);                    // 5.5 parts → five whole pieces + half a piece
+  for (let i = 1; i < cnt; i++) el('line', { class:'cutline', x1:i*pw, y1:-6, x2:i*pw, y2:RH+6 }, pg);
+  for (let i = 0; i < cnt; i++) if (i % 2) el('rect', { class:'segTint', x:i*pw, y:0, width:Math.min(pw, w - i*pw), height:RH, rx:4 }, pg);
+  $('#confirmText').textContent = `Cut into ${fmt(n)} parts?`;
   $('#confirmBar').hidden = false;
   startConfirmLoop();
   blip();
@@ -683,8 +709,14 @@ function confirmCut() {
 
   const newIds = [];
   const row = [];
-  for (let i = 0; i < n; i++) {
+  const whole = Math.floor(n + 1e-9);
+  const partLen = round2((n - whole) * q);            // 5.5 parts: the last piece is only half-size
+  for (let i = 0; i < whole; i++) {
     const k = makeScale(q, COLORS[colorIdx++ % COLORS.length]);
+    k.parentId = s.id; row.push(k); newIds.push(k.id);
+  }
+  if (partLen >= 0.1) {
+    const k = makeScale(partLen, COLORS[colorIdx++ % COLORS.length], { partial: true });
     k.parentId = s.id; row.push(k); newIds.push(k.id);
   }
   if (r >= 0.1) { // a leftover of at least 1 mm gets its own grey piece
@@ -706,7 +738,8 @@ function confirmCut() {
   fitView(true, 780);
   let msg;
   if (s.rows.length === 1)
-    msg = r === 0 ? `${n} pieces of ${fmt(q)} cm each! Cut again for a new row! ✂️`
+    msg = whole !== n ? `${whole} pieces of ${fmt(q)} cm + one part of ${fmt(partLen)} cm! 🎉`
+        : r === 0 ? `${n} pieces of ${fmt(q)} cm each! Cut again for a new row! ✂️`
         : r >= 0.1 ? `${n} pieces of ${fmt(q)} cm + ${fmt(r)} cm left over! 🎉`
         : `${n} pieces of ${fmt(q)} cm each — the ${fmt(r)} cm leftover is too tiny to see! 🎉`;
   else if (at === s.rows.length - 1)
@@ -885,6 +918,7 @@ function removePiece(s) {
 // Mobile: slide-up sheet. Desktop: the side book can be hidden to give the canvas the whole screen.
 function bookOff(off) {
   document.body.classList.toggle('bookOff', off);
+  setTimeout(syncZoomBtns, 600);
   try { localStorage.setItem('mathBookOff', off ? '1' : ''); } catch (_) {}
   if (!isMobile()) fitView(true, 500);
 }
@@ -902,9 +936,8 @@ try { if (!isMobile() && localStorage.getItem('mathBookOff')) document.body.clas
 const chd = (str, cls = '', base = 0, dt = 45) =>
   `<span class="${cls}">${[...String(str)].map((c, i) =>
     `<span class="ch" style="animation-delay:${Math.round(base + i * dt)}ms">${c}</span>`).join('')}</span>`;
-// Long division, digit by digit, exactly as a kid writes it on paper — and each
-// step is also spelled out in words underneath (2 × 3 = 6, 7 − 6 = 1, bring down…).
-function longDivision(L, n, qDecWanted) {
+// Long division, digit by digit, exactly as a kid writes it on paper.
+function longDivision(L, N, qDecWanted) {
   const ls = fmt(L), dpos = ls.indexOf('.');
   const dp = dpos < 0 ? 0 : ls.length - dpos - 1;
   const D = ls.replace('.', '').split('').map(Number);
@@ -915,7 +948,7 @@ function longDivision(L, n, qDecWanted) {
   for (let i = 0; i < total; i++) {
     const d = i < D.length ? D[i] : 0;
     cur = cur * 10 + d;
-    const qd = Math.floor(cur / n), prod = qd * n, rem = cur - prod;
+    const qd = Math.floor(cur / N), prod = qd * N, rem = cur - prod;
     const skip = lead && qd === 0 && i < intLen - 1;   // leading zeros of the whole-number part
     if (qd > 0) lead = false;
     steps.push({ i, d, chunk: cur, qd, prod, rem, skip, pad: i >= D.length });
@@ -924,73 +957,213 @@ function longDivision(L, n, qDecWanted) {
   return { steps, total, intLen, D };
 }
 
+/* The Math Book card: the kid drives the solution. Every press of "Next" reveals ONE
+   small thing — pick the digits, ask "how many fit?", subtract — and animated arrows
+   show where each number travelled. Stage 0 = the problem alone; last stage = the answer. */
 function addCard({ L, n, q }) {
   const card = document.createElement('div');
   card.className = 'card';
+  const decN = !Number.isInteger(n);
+  const scale = decN ? 10 : 1;                         // 67 ÷ 2.5 → 670 ÷ 25 (make the divisor whole)
+  const Ls = round2(L * scale), N = Math.round(n * scale);
   const qs = fmt(q);
   const qDec = qs.includes('.') ? qs.length - qs.indexOf('.') - 1 : 0;
-  const { steps, total, intLen, D } = longDivision(L, n, qDec);
-  const shown = steps.filter(st => !st.skip);
-  const digits = qs.length;
-  const tRoof = 750, STEP = 1500;                      // ms per long-division step
-  const t0Of = st => tRoof + 600 + shown.indexOf(st) * STEP;
-  const finalRemInt = steps[steps.length - 1].rem;
-  const finalRem = round2(finalRemInt / Math.pow(10, total - intLen));   // back in real cm (1 → 0.01)
-  const hasRem = finalRemInt > 0;
-  const tEnd = tRoof + 600 + shown.length * STEP;
-  const remInline = hasRem ? `<span class="rem">${chd('r ' + fmt(finalRem), '', tEnd)}</span>`
-                                 : `<span class="rem zero">${chd('✨', '', tEnd)}</span>`;
+  const { steps, total, intLen, D } = longDivision(Ls, N, qDec);
+  const S = steps.filter(st => !st.skip).map((st, j) => ({ ...st, j, a: 1 + 3 * j, b: 2 + 3 * j, c: 3 + 3 * j }));
+  const m = S.length, FIN = 3 * m + 1;
+  const last = S[m - 1];
+  const remInt = last.rem;
+  const remTrue = round2(remInt / Math.pow(10, total - intLen) / scale);
+  const hasRem = remInt > 0;
   const cw = 'var(--cw)';
-  const rowHtml = (txt, endCol, cls, delay) => {
-    const t = String(txt);
-    return `<div class="rw step ${cls}" style="--d:${delay}ms;padding-left:calc(${cw}*${endCol + 1 - t.length})">${
-      [...t].map((c, k) => `<span class="dc${k === 0 ? ' first' : ''}${k === t.length - 1 ? ' last' : ''}">${c}</span>`).join('')}</div>`;
-  };
+  const cell = (ch, col, id, st, cls = '') =>
+    `<span class="dc sv ${cls}" data-st="${st}" data-id="${id}${col}">${ch}</span>`;
+  const row = (name, start, inner, cls = '') =>
+    `<div class="rw ${cls}" data-row="${name}" style="padding-left:calc(${cw}*${start})">${inner}</div>`;
+
+  // dividend: always visible; zeros we add after the decimal point appear at their step
   const dRow = Array.from({ length: total }, (_, k) => {
-    const padz = k >= D.length, st = steps[k];
-    return `<span class="dc${k === intLen && k > 0 ? ' dpt' : ''}${padz ? ' padz step' : ''}"${
-      padz ? ` style="--d:${t0Of(st)}ms"` : ''}>${padz ? 0 : D[k]}</span>`;
+    const padz = k >= D.length, st = S.find(x => x.i === k);
+    return `<span class="dc${k === intLen && k > 0 ? ' dpt' : ''}${padz ? ' padz sv' : ''}" data-id="d${k}"${
+      padz && st ? ` data-st="${st.a}"` : ''}>${padz ? 0 : D[k]}</span>`;
   }).join('');
-  let qRow = '', work = '', words = '';
+
+  // quotient cells
+  let qCells = '';
   const allZeroInt = steps.every(st => st.i >= intLen || st.qd === 0);
-  shown.forEach((st, j) => {
-    const t0 = t0Of(st);
-    qRow += `<span class="dc q${st.i === intLen && st.i > 0 ? ' dpt' : ''} step" style="left:calc(${cw}*${st.i});--d:${t0 + 700}ms">${st.qd}</span>`;
-    work += rowHtml(st.chunk, st.i, j > 0 ? 'chunk' : 'chunk first0', t0);
-    work += rowHtml(st.prod, st.i, 'prod', t0 + 450);
-    const L2 = String(st.chunk).length;
-    work += `<div class="rline" style="--d:${t0 + 800}ms;margin-left:calc(${cw}*${st.i + 1 - L2});width:calc(${cw}*${L2})"></div>`;
-    const bits = [];
-    if (st.i === intLen && st.i > 0) bits.push('Put the decimal point in the answer.');
-    if (st.pad) bits.push('Add a 0 and bring it down.');
-    else if (j > 0) bits.push(`Bring down ${st.d}.`);
-    bits.push(`<b>${n} × ${st.qd} = ${st.prod}</b> ·`);
-    bits.push(`<b>${st.chunk} − ${st.prod} = ${st.rem}</b>`);
-    words += `<div class="nl step" style="--d:${t0}ms"><i>${j + 1}</i><span>${bits.join(' ')}</span></div>`;
+  if (allZeroInt) qCells += `<span class="dc q sv" data-st="${S[0].a}" data-id="qz" style="left:calc(${cw}*${intLen - 1})">0</span>`;
+  const ptStep = total > intLen && intLen > 0 ? S.find(x => x.i === intLen) : null;
+  if (ptStep) qCells += `<span class="qpt sv" data-st="${ptStep.a}" data-id="qpt" style="left:calc(${cw}*${intLen})">.</span>`;
+  S.forEach(st => { qCells += `<span class="dc q sv" data-st="${st.b}" data-id="q${st.i}" style="left:calc(${cw}*${st.i})">${st.qd}</span>`; });
+
+  // the working rows
+  let work = '';
+  const lines = [];
+  S.forEach((st, j) => {
+    const prevRem = j > 0 ? String(S[j - 1].rem) : '';
+    const Lcells = j === 0 ? st.i + 1 : prevRem.length + 1;
+    const ps = String(st.prod);
+    work += row(`P${j}`, st.i + 1 - ps.length,
+      [...ps].map((ch, k) => cell(ch, st.i + 1 - ps.length + k, `p${j}_`, st.b, k === 0 ? 'first' : '')).join(''), 'prod');
+    work += `<div class="rline sv" data-row="line${j}" data-st="${st.b}" style="margin-left:calc(${cw}*${st.i + 1 - Lcells});width:calc(${cw}*${Lcells})"></div>`;
+    // the row below the line: this step's remainder (+ the next digit brought down)
+    const rs = String(st.rem), e = st.i;
+    const nextS = S[j + 1];
+    let inner = [...rs].map((ch, k) =>
+      cell(ch, e + 1 - rs.length + k, `r${j + 1}_`, st.c, 'rm' + (st.rem === 0 && nextS ? ' z' : ''))).join('');
+    let len = rs.length;
+    if (nextS) { inner += cell(nextS.d, nextS.i, `r${j + 1}_`, nextS.a, 'br'); len += 1; }
+    else inner += hasRem
+      ? `<span class="rlab sv" data-st="${st.c}">left over</span>`
+      : `<span class="star sv" data-st="${st.c}">⭐</span>`;
+    work += row(`R${j + 1}`, e + 1 - rs.length, inner, 'remr');
   });
-  if (allZeroInt) qRow = `<span class="dc q step" style="left:calc(${cw}*${intLen - 1});--d:${tRoof + 600}ms">0</span>` + qRow;
-  const remBox = hasRem ? `${fmt(finalRem)}<span class="rlab">left over</span>` : `0<span class="star">⭐</span>`;
-  work += `<div class="rw step remRow" style="--d:${tEnd - 300}ms;padding-left:calc(${cw}*${total - 1})">${remBox}</div>`;
+
+  // narration, one line per stage
+  const nar = [];
+  nar[0] = decN
+    ? `${fmt(n)} has a decimal point, so make it whole: multiply both numbers by 10 → ${fmt(Ls)} ÷ ${N}. Now press <b>Next</b>!`
+    : `Let's share <b>${fmt(L)}</b> into <b>${n}</b> equal parts. Press <b>Next</b> and I'll show every step!`;
+  S.forEach((st, j) => {
+    const pre = [];
+    if (st.i === intLen && intLen > 0 && total > intLen) pre.push('Put a <b>decimal point</b> in the answer.');
+    if (j === 0) {
+      nar[st.a] = (pre.length ? pre.join(' ') + ' ' : '') + `Look at the first digits: <b>${st.chunk}</b>. They are big enough to share.`;
+    } else {
+      pre.push(st.pad ? `No digits left! Add a <b>0</b> and bring it down → <b>${st.chunk}</b>.`
+                      : `<b>Bring down</b> the ${st.d} → <b>${st.chunk}</b>.`);
+      nar[st.a] = pre.join(' ');
+    }
+    nar[st.b] = `How many ${N}s fit in ${st.chunk}? <b>${st.qd}</b>! Write ${st.qd} on top. Then multiply: <b>${N} × ${st.qd} = ${st.prod}</b>.`;
+    nar[st.c] = `<b>Subtract</b>: ${st.chunk} − ${st.prod} = <b>${st.rem}</b>. ` +
+      (j === m - 1 ? (st.rem === 0 ? 'Nothing left — all shared! ⭐' : `${st.rem} is left over.`)
+                   : (st.rem === 0 ? 'Zero left. On to the next digit.' : `${st.rem} stays and the next digit joins it.`));
+  });
+  nar[FIN] = `Answer: <b>${fmt(L)} ÷ ${fmt(n)} = ${qs}</b> cm ${hasRem ? `(and ${fmt(remTrue)} left over)` : '🎉'}`;
+  const words = nar.map((t, k) => `<div class="nl sv" data-st="${k}"><i>${k === 0 ? '▶' : k === FIN ? '✓' : k}</i><span>${t}</span></div>`).join('');
+
   card.innerHTML = `
-    <div class="eq"><span class="frac"><span class="num">${chd(fmt(L),'a')}</span><span class="bar"></span><span class="den">${chd(n,'b',225)}</span></span>
-      ${chd('=','op',tRoof)}${chd(qs,'q',tRoof + 60,60)}<small>${chd('cm','',tRoof + 60 + digits * 60,40)}</small>${remInline}</div>
+    <div class="eq"><span class="frac"><span class="num">${chd(fmt(L),'a')}</span><span class="bar"></span><span class="den">${chd(fmt(n),'b',225)}</span></span>
+      <span class="op">=</span><span class="ans sv" data-st="${FIN}">${hasRem ? `${qs} <small>r ${fmt(remTrue)}</small>` : qs} <small>cm</small> ✨</span><span class="ans q0">?</span></div>
+    <div class="words">${words}</div>
     <div class="bracketWrap"><div class="bracket">
-      <div class="divisor step" style="--d:${tRoof}ms">${n}</div>
+      <div class="divisor">${N}${decN ? '<em>×10</em>' : ''}</div>
       <div class="roofbox">
         <div class="wk" style="width:calc(${cw}*${total})">
-          <div class="quotient">${qRow}</div>
-          <div class="rw dividend step" style="--d:${tRoof + 120}ms">${dRow}</div>
+          <div class="quotient">${qCells}</div>
+          <div class="rw dividend" data-row="dv">${dRow}</div>
           ${work}
+          <svg class="arrows" aria-hidden="true"><defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#F2557B"/></marker></defs></svg>
         </div>
       </div>
     </div>
-    <div class="words">${words}</div></div>`;
+    <div class="ctl">
+      <button data-a="restart" title="Start again">⏮</button>
+      <button data-a="back" title="Go back one step">◀</button>
+      <button class="next" data-a="next">Next ▶</button>
+      <button data-a="play" title="Play automatically">⏩</button>
+    </div>
+    <div class="prog"></div>
+    </div>`;
+
+  // ---- the stage engine
+  const wk = card.querySelector('.wk'), arrows = card.querySelector('.arrows');
+  let stage = 0, timer = null;
+  const $q = sel => wk.querySelector(sel);
+  const cwPx = () => (wk.querySelector('.dc') || { offsetWidth: 21 }).offsetWidth || 21;
+  const rowEl = name => wk.querySelector(`[data-row="${name}"]`);
+  const colX = c => (c + .5) * cwPx();
+  const NS = 'http://www.w3.org/2000/svg';
+  function arrow(d, delay = 0) {
+    const p = document.createElementNS(NS, 'path');
+    p.setAttribute('d', d); p.setAttribute('class', 'arr'); p.setAttribute('marker-end', 'url(#ah)');
+    p.style.animationDelay = delay + 'ms';
+    arrows.appendChild(p);
+    const len = p.getTotalLength ? p.getTotalLength() : 60;
+    p.style.strokeDasharray = len; p.style.strokeDashoffset = len;
+  }
+  function drawArrows() {
+    [...arrows.querySelectorAll('.arr')].forEach(p => p.remove());
+    if (stage < 1 || stage > 3 * m) return;
+    const j = Math.floor((stage - 1) / 3), ph = (stage - 1) % 3, st = S[j], W = cwPx();
+    const dv = rowEl('dv'), qEl = $q('.quotient');
+    const rightLane = total * W + 12;
+    const qMid = qEl.offsetTop + qEl.offsetHeight / 2;
+    if (ph === 0) {
+      if (st.i === intLen && intLen > 0 && total > intLen) {          // decimal point rises to the answer
+        const x = intLen * W + 1;
+        arrow(`M${x} ${dv.offsetTop + 4} L${x} ${qEl.offsetTop + qEl.offsetHeight + 2}`);
+      }
+      if (j > 0) {                                                  // bring the digit straight down
+        const R = rowEl(`R${j}`), x = colX(st.i);
+        arrow(`M${x} ${dv.offsetTop + dv.offsetHeight - 2} L${x} ${R.offsetTop + 3}`, st.i === intLen ? 350 : 0);
+      }
+    } else if (ph === 1) {
+      const srcRow = j === 0 ? dv : rowEl(`R${j}`);
+      const sx = (st.i + 1) * W - 1, sy = srcRow.offsetTop + srcRow.offsetHeight / 2;
+      const qx = (st.i + 1) * W - 1;
+      arrow(`M${sx} ${sy} C${rightLane} ${sy} ${rightLane} ${qMid} ${qx} ${qMid}`);
+      const P = rowEl(`P${j}`), py = P.offsetTop + P.offsetHeight / 2, l2 = rightLane + 12;
+      arrow(`M${qx} ${qMid + 6} C${l2} ${qMid + 6} ${l2} ${py} ${(st.i + 1) * W - 1} ${py}`, 650);
+    } else {
+      const ln = rowEl(`line${j}`), R = rowEl(`R${j + 1}`), x = colX(st.i);
+      arrow(`M${x} ${ln.offsetTop - 14} L${x} ${R.offsetTop + 4}`);
+    }
+    arrows.querySelectorAll('.arr').forEach(p => { p.style.animationName = 'arrDraw'; });
+  }
+  function render() {
+    card.querySelectorAll('[data-st]').forEach(e => {
+      const v = +e.dataset.st;
+      e.classList.toggle('on', v <= stage);
+      e.classList.toggle('new', v === stage && stage > 0);
+    });
+    card.querySelector('.ans.q0').style.display = stage >= FIN ? 'none' : '';
+    // highlight the digits we are looking at in the dividend
+    wk.querySelectorAll('.dividend .dc').forEach((c, k) => c.classList.toggle('hl', stage === S[0].a && k <= S[0].i));
+    card.querySelectorAll('.nl').forEach(e => e.classList.toggle('cur', +e.dataset.st === stage));
+    card.querySelector('.prog').textContent = stage === 0 ? `${m} steps to solve` : stage >= FIN ? 'Done! 🎉' : `Step ${Math.floor((stage - 1) / 3) + 1} of ${m}`;
+    const nb = card.querySelector('.next');
+    nb.textContent = stage >= FIN ? 'Replay ↺' : stage === 0 ? 'Start ▶' : 'Next ▶';
+    card.querySelector('[data-a=back]').disabled = stage === 0;
+    card.querySelector('[data-a=restart]').disabled = stage === 0;
+    drawArrows();
+    if (stage > 0) card.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+  function go(s2, quiet) {
+    stage = clamp(s2, 0, FIN);
+    render();
+    if (!quiet) tone(520 + stage * 18, 760 + stage * 18, .06, 'sine', .07);
+    if (stage >= FIN) { stopPlay(); chime(); }
+  }
+  function stopPlay() { clearInterval(timer); timer = null; card.querySelector('[data-a=play]').classList.remove('on'); }
+  card.addEventListener('click', e => {
+    const b = e.target.closest('button[data-a]');
+    if (!b) return;
+    const a = b.dataset.a;
+    if (a === 'next') { stopPlay(); go(stage >= FIN ? 0 : stage + 1); }
+    else if (a === 'back') { stopPlay(); go(stage - 1); }
+    else if (a === 'restart') { stopPlay(); go(0); }
+    else if (a === 'play') {
+      if (timer) { stopPlay(); return; }
+      if (stage >= FIN) go(0, true);
+      b.classList.add('on');
+      timer = setInterval(() => { if (!card.isConnected) return stopPlay(); go(stage + 1); }, 2600);
+    }
+  });
+  card.dataset.stages = FIN;
+  card._go = go;
+
   const cards = $('#cards');
   cards.prepend(card);
   while (cards.children.length > 24) cards.lastChild.remove();
   const bc = $('#bookCount');
   bc.hidden = false; bc.textContent = cards.children.length;
-  shown.forEach(st => [0, 450, 800].forEach(o => setTimeout(() => tone(620, 860, .05, 'sine', .06), t0Of(st) + o)));
+  // the book may be hidden right now: say so with a little bounce on its button
+  if (document.body.classList.contains('bookOff')) {
+    const bb = $('#bookBtn'); bb.classList.remove('ping'); void bb.offsetWidth; bb.classList.add('ping');
+  }
+  setTimeout(() => render(), 650);   // measure arrows once the card has finished sliding in
+  render();
 }
 // a long-press split isn't division — it's a number-decomposition story
 function addSplitCard({ L, a, b }) {
