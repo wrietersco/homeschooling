@@ -11,7 +11,7 @@ const route = useRoute();
     <AppNav v-if="!route.meta.immersive" />
     <main
       class="app-main"
-      :class="{ 'app-main-wide': route.path === '/platform' || route.meta.wide, 'app-main-immersive': route.meta.immersive }"
+      :class="{ 'app-main-wide': route.path === '/platform' || route.meta.wide, 'app-main-immersive': route.meta.immersive, 'app-main-stage': route.path === '/' }"
     >
       <RouterView />
     </main>
@@ -36,4 +36,6 @@ const route = useRoute();
 <style scoped>
 .app-main-wide { max-width: none; padding: 0; background: #f5f6fa; }
 .app-main-immersive { max-width: none; padding: 0; overflow: hidden; }
+/* Home is a full-bleed playground scene (sky spans edge to edge under the nav). */
+.app-main-stage { max-width: none; padding: 0; }
 </style>
