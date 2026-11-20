@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"/>
+<meta name="theme-color" content="#FFF9EC"/>
+<title>Math Games · Division</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Patrick+Hand&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/games/math/style.css?v=20261120c"/>
+</head>
+<body>
+
+<!-- Infinite pannable / zoomable canvas -->
+<svg id="canvas" touch-action="none">
+  <defs id="defs"></defs>
+  <g id="world">
+    <rect id="grid" x="-60000" y="-60000" width="120000" height="120000" fill="url(#dots)"/>
+    <g id="scalesLayer"></g>
+    <g id="previewLayer"></g>
+  </g>
+</svg>
+
+<header>
+  <a id="backBtn" href="index.html" title="Back to games">🏠</a>
+  <div id="logo">✨ Math Games <span>· Division</span></div>
+</header>
+<div id="hint">Tap ▶ to start!</div>
+
+<!-- Math book: sidebar on desktop, slide-up sheet on mobile -->
+<button id="bookBtn" title="My Math Book">📓<span id="bookCount" hidden>0</span></button>
+<aside id="book">
+  <div id="bookHead"><span>📓 My Math Book</span><button id="bookClose" title="Close">✕</button></div>
+  <div id="cards"></div>
+</aside>
+
+<!-- Toolbar -->
+<nav id="toolbar">
+  <button class="tool" id="tRuler" title="Scale Setter">📏<span>Size</span></button>
+  <button class="tool" id="tCut" title="Partition Maker">✂️<span>Cut</span></button>
+  <button class="tool" id="tFit" title="Zoom to see everything">🔍<span>Fit</span></button>
+  <button class="tool" id="tReset" title="Start over">🔄<span>Reset</span></button>
+  <button class="tool" id="tSound" title="Sound on/off">🔊<span>Sound</span></button>
+</nav>
+
+<!-- Floating confirm bar (✓ / ✕) shown during cut preview -->
+<div id="confirmBar" hidden>
+  <span id="confirmText"></span>
+  <button id="btnYes" class="cb yes" title="Yes, cut it!">✔</button>
+  <button id="btnNo" class="cb no" title="No, go back">✘</button>
+</div>
+
+<!-- Floating actions for a selected piece (drag pieces to move; snapping keeps them tidy) -->
+<div id="pieceBar" hidden>
+  <button id="pHome" class="cb home" title="Back into line">⌂</button>
+  <button id="pTrash" class="cb no" title="Remove piece">🗑</button>
+</div>
+
+<div id="toast" hidden></div>
+<div id="fx"></div>
+
+<!-- Number pad modal -->
+<div id="modal" hidden>
+  <div class="sheet">
+    <button id="mClose" class="x" title="Close">✕</button>
+    <h2 id="mTitle">How long?</h2>
+    <div id="mRange"></div>
+    <div id="mDisplay"><span id="mValue"></span><small id="mUnit"></small></div>
+    <div id="pad"></div>
+  </div>
+</div>
+
+<!-- Intro screen -->
+<div id="intro">
+  <a class="introBack" href="index.html">🏠 All Games</a>
+  <div class="ititle">Math Games</div>
+  <div class="isub">✂️ Division Playland</div>
+  <button id="btnStart">▶ Let's Play!</button>
+  <div class="inote">Cut rulers into equal pieces and watch the math appear!</div>
+</div>
+
+<script src="/games/math/game.js?v=20261120c"></script>
+</body>
+</html>

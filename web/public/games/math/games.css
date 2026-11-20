@@ -1,0 +1,40 @@
+/* ============ Math Games hub ============ */
+html,body{height:auto;overflow:auto;overflow-x:hidden}
+body.hub{min-height:100dvh;display:flex;flex-direction:column;align-items:center;background:linear-gradient(160deg,#FFE9C7 0%,#FFF9EC 45%,#DFF3FF 100%);padding:34px 16px 30px;position:relative}
+
+/* floating decorations */
+.floaty{position:fixed;z-index:0;font-size:34px;opacity:.5;pointer-events:none;animation:float 5s ease-in-out infinite}
+.f1{top:12%;left:8%;animation-delay:0s}
+.f2{top:20%;right:10%;animation-delay:.7s;font-size:42px}
+.f3{bottom:14%;left:12%;animation-delay:1.3s;font-size:28px}
+.f4{bottom:20%;right:8%;animation-delay:.4s;font-size:40px}
+.f5{top:46%;left:3%;animation-delay:1.8s;font-size:26px}
+
+.hubHead{position:static;z-index:1;display:flex;flex-direction:column;align-items:center;gap:2px;text-align:center}
+a.gameCard,a.gameCard:visited{color:inherit;text-decoration:none}
+.hubTitle{font-size:clamp(36px,9vw,58px);font-weight:700;color:#3a2e39;text-shadow:0 5px 0 #ffffff99;animation:float 3s ease-in-out infinite}
+.hubSub{font-family:'Patrick Hand','Comic Sans MS',cursive;color:#E67E22;font-size:clamp(18px,4.5vw,25px);margin-top:2px}
+
+.grid{position:relative;z-index:1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:28px;width:100%;max-width:780px}
+@media (min-width:700px){.grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:18px}}
+
+.gameCard{position:relative;background:#FFFDF6;border-radius:28px;padding:20px 12px 16px;display:flex;flex-direction:column;align-items:center;gap:7px;box-shadow:0 10px 22px #00000014;animation:cardIn .55s cubic-bezier(.2,1.4,.4,1) both;transition:transform .16s}
+.gameCard .icon{width:68px;height:68px;border-radius:24px;display:flex;align-items:center;justify-content:center;font-size:36px;background:#FFE9B8;box-shadow:inset 0 -5px 0 #00000010}
+.gameCard .gname{font-weight:600;font-size:18px;color:#3a2e39}
+.gameCard .gdesc{font-family:'Patrick Hand','Comic Sans MS',cursive;font-size:14.5px;color:#8a7a8d;text-align:center;line-height:1.25;min-height:2.5em}
+.gameCard.soon{opacity:.72}
+.soonTag{position:absolute;top:12px;right:12px;background:#EDE7F3;color:#8a7a8d;font-size:10.5px;font-weight:600;padding:4px 9px;border-radius:999px}
+.gameCard.division{background:linear-gradient(180deg,#FFFDF6,#FFF4D6)}
+.gameCard.division .icon{background:linear-gradient(135deg,#FFE29A,#FFC94D)}
+a.gameCard{cursor:pointer}
+a.gameCard:hover{transform:translateY(-5px) rotate(-1.2deg);box-shadow:0 16px 30px #00000020}
+a.gameCard:active{transform:scale(.94)}
+.play{margin-top:2px;background:#2FA86B;color:#fff;font-weight:600;font-size:14.5px;padding:8px 20px;border-radius:999px;box-shadow:0 4px 0 #1d7a4e;animation:pulse 1.6s infinite}
+
+.hubFoot{position:relative;z-index:1;margin-top:30px;color:#b3a6b6;font-size:14px;font-family:'Patrick Hand','Comic Sans MS',cursive}
+
+.returnPill{position:fixed;top:14px;left:14px;z-index:5;background:#ffffffd9;border-radius:16px;padding:9px 16px;color:#3a2e39;text-decoration:none;font-weight:600;font-size:14.5px;box-shadow:0 4px 12px #00000014;transition:transform .12s}
+.returnPill:active{transform:scale(.92)}
+
+[hidden]{display:none!important}
+.homePill{left:auto;right:14px;font-size:16px;padding:9px 13px}

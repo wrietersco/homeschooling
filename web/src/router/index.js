@@ -66,6 +66,15 @@ const routes = [
     component: () => import("@/views/ExploreView.vue"),
     meta: { requiresAuth: true },
   },
+  // Games — the playful listing page that gathers every game in one place.
+  // Math Games itself is a static page under /games/math/ (plain files in
+  // public/, served before this SPA rewrite can ever see the URL).
+  {
+    path: "/games",
+    name: "games",
+    component: () => import("@/views/GamesView.vue"),
+    meta: { requiresAuth: true },
+  },
   // Wikido — immersive picture encyclopedia for children. `immersive` hides the
   // app nav: the scene owns the whole screen (App.vue). The route itself is
   // PUBLIC so a shared /wikido link always lands here: signed-out visitors get

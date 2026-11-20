@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"/>
+<meta name="theme-color" content="#FFF9EC"/>
+<title>Math Games · Playland</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Patrick+Hand&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/games/math/style.css?v=20261120c"/>
+<link rel="stylesheet" href="/games/math/games.css?v=20261120c"/>
+</head>
+<body class="hub">
+
+<!-- When opened from inside the app (?from=...), offer a way back -->
+<a id="returnPill" class="returnPill" hidden>← Back</a>
+
+<!-- floating playground decorations -->
+<div class="floaty f1">✂️</div>
+<div class="floaty f2">📏</div>
+<div class="floaty f3">⭐</div>
+<div class="floaty f4">🎈</div>
+<div class="floaty f5">🔢</div>
+
+<header class="hubHead">
+  <div class="hubTitle">✨ Math Games</div>
+  <div class="hubSub">Pick a game and start playing!</div>
+</header>
+
+<main class="grid">
+  <a class="gameCard division" href="division.html" style="animation-delay:.05s">
+    <div class="icon">✂️</div>
+    <div class="gname">Division Playland</div>
+    <div class="gdesc">Cut rulers into equal pieces and watch the math appear!</div>
+    <div class="play">▶ Play</div>
+  </a>
+  <div class="gameCard soon" style="animation-delay:.15s">
+    <div class="icon">✖️</div>
+    <div class="gname">Multiplication</div>
+    <div class="gdesc">Snap rulers together to grow numbers!</div>
+    <div class="soonTag">Coming soon</div>
+  </div>
+  <div class="gameCard soon" style="animation-delay:.25s">
+    <div class="icon">➕</div>
+    <div class="gname">Addition</div>
+    <div class="gdesc">Join little rulers to make long ones!</div>
+    <div class="soonTag">Coming soon</div>
+  </div>
+  <div class="gameCard soon" style="animation-delay:.35s">
+    <div class="icon">🍕</div>
+    <div class="gname">Fractions</div>
+    <div class="gdesc">Slice and share pizza pieces fairly!</div>
+    <div class="soonTag">Coming soon</div>
+  </div>
+</main>
+
+<footer class="hubFoot">made for little mathematicians 💛</footer>
+
+<script>
+  // runs at the end of the body so every card below is already parsed
+  {
+    const q = location.search;
+    const from = new URLSearchParams(q).get("from");
+    if (from) { const p = document.getElementById("returnPill"); p.href = from; p.hidden = false; }
+    // carry the context into the games too, so their home buttons return here correctly
+    if (q) { const c = document.querySelector("a.gameCard.division"); if (c) c.href += q; }
+  }
+</script>
+
+</body>
+</html>
