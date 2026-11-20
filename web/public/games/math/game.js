@@ -204,6 +204,9 @@ function render(s, fast) {
 
 // zoom level-of-detail: millimetres start as barely-visible whisper lines and
 // sharpen as the kid zooms in. cm/5cm ticks fade out only when hopelessly dense.
+// deep zoom: tick lines would grow thousands of px tall, so past ~190 px they stay
+// that long on screen (squashed vertically) and their numbers sit right under the tips
+function tickFit() { return Math.min(1, 190 / (tickHeights().maj * view.k)); }
 function updateLOD() {
   if (typeof syncZoomBtns === 'function' && $('#zIn')) syncZoomBtns();
   const spx = CM * view.k, mm = spx / 10;
@@ -212,7 +215,9 @@ function updateLOD() {
   const oMid = ramp(spx, .8, 1.8);
   const oM5  = ramp(mm, 2.6, 7);
   const oM1  = mm < 1.35 ? 0 : .15 + .85 * ramp(mm, 1.35, 6.5);
+  const tf = tickFit();
   scales.forEach(s => {
+    [s.pMaj, s.pMid, s.pLow, s.pM5, s.pM1].forEach(p => p && p.setAttribute('transform', tf < 1 ? `scale(1 ${tf})` : ''));
     vis(s.pLow, oLow); vis(s.pMid, oMid);
     vis(s.pM5, oM5);   vis(s.pM1, oM1);
   });
@@ -250,17 +255,18 @@ function rebuildNums(s) {
     if (v < s.len - 1e-9 && s.len - v < step * .6) continue;
     const t = el('text', { class: 'ticknum' }, s.numG);
     t.textContent = fmt(v);
-    s.numEls.push({ e: t, cm: v, mm: false });
+    s.numEls.push({ e: t, cm: v, mm: false, kind: v % 10 === 0 ? 'maj' : v % 5 === 0 ? 'mid' : 'low' });
   }
   if (Math.abs(s.len / step - Math.round(s.len / step)) > 1e-9) { // label the odd end (33, 2.5…)
     const t = el('text', { class: 'ticknum' }, s.numG);
     t.textContent = fmt(s.len);
-    s.numEls.push({ e: t, cm: s.len, mm: false });
+    s.numEls.push({ e: t, cm: s.len, mm: false, kind: 'maj' });
   }
   // millimetre labels as decimal centimetres: 0.1, 0.2 … 0.9, 1.1 … — so every
   // little line says what it is. Dense → only the 5 mm marks (0.5, 1.5 …).
   const mmPx = CM * k / 10;
   const mmStep = mmPx >= 30 ? 1 : mmPx >= 9 ? 5 : 0;
+  s.tipLabels = mmStep > 0;
   if (mmStep) {
     const a = Math.max(1, Math.floor((wl - s.x) / CM * 10));
     const b = Math.min(Math.round(s.len * 10) - 1, Math.ceil((wr - s.x) / CM * 10));
@@ -268,7 +274,7 @@ function rebuildNums(s) {
       if (i % 10 === 0 || i % mmStep !== 0) continue;           // whole cm is already numbered
       const t = el('text', { class: 'ticknum mmnum' + (i % 5 === 0 ? ' half' : '') }, s.numG);
       t.textContent = fmt(i / 10);
-      s.numEls.push({ e: t, cm: i / 10, mm: true });
+      s.numEls.push({ e: t, cm: i / 10, mm: true, kind: i % 5 === 0 ? 'm5' : 'm1' });
     }
   }
   overlayDirty = true;
@@ -293,14 +299,16 @@ function updateNums() {
     // numbers ride just below the ruler's top edge, but stay pinned on screen
     // when deep zoom has pushed that edge past the viewport
     // labels sit just BELOW the tallest tick tip so digits never touch the lines
-    const yCm = clamp(top + Math.max(26, tickHeights().maj * k + 16), 16, innerHeight - 16);
-    const yMm = yCm;
+    const yCm = clamp(top + Math.max(26, tickHeights().maj * k * tickFit() + 16), 16, innerHeight - 16);
+    const T = tickHeights();
+    const tf = tickFit();
+    const tipY = kind => clamp(top + T[kind] * k * tf + 17, 16, innerHeight - 16);   // just under that line's own tip
     s.numEls.forEach(ne => {
       const x = (s.x + ne.cm * CM) * k + tx;
       if (x < -60 || x > innerWidth + 60) { ne.e.style.display = 'none'; return; }
       ne.e.style.display = '';
       ne.e.setAttribute('x', x);
-      ne.e.setAttribute('y', ne.mm ? yMm : yCm);
+      ne.e.setAttribute('y', s.tipLabels ? tipY(ne.kind) : yCm);
     });
   });
 }
@@ -498,7 +506,10 @@ svg.addEventListener('wheel', e => {
 // ＋ / － / 🔬 buttons: smooth zoom around the middle of the visible canvas
 function canvasCenter() {
   const off = !isMobile() && !document.body.classList.contains('bookOff');
-  return { x: off ? (innerWidth - 330) / 2 : innerWidth / 2, y: innerHeight * .42 };
+  const s0 = sel() || scales[0];
+  let y = innerHeight * .42;
+  if (s0) { const sy = s0.y * view.k + view.ty; if (sy > 100 && sy < innerHeight - 220) y = sy; }   // keep the ruler's top edge (where the ticks hang) in place
+  return { x: off ? (innerWidth - 330) / 2 : innerWidth / 2, y };
 }
 function zoomTo(k2) {
   k2 = clamp(k2, MINK, MAXK);
