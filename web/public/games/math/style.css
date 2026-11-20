@@ -149,14 +149,13 @@ header{position:fixed;top:14px;left:20px;z-index:20;pointer-events:none;display:
 /* ---------- phones: mobile-first play ---------- */
 #bookBtn{display:none;position:fixed;top:12px;right:12px;z-index:22;width:48px;height:48px;border:0;border-radius:16px;background:#fff;font-size:24px;box-shadow:0 4px 12px #00000022;cursor:pointer}
 #bookCount{position:absolute;top:-6px;right:-6px;min-width:20px;height:20px;border-radius:10px;background:#E86A6A;color:#fff;font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center;padding:0 5px}
-#bookClose{display:none;border:0;background:#F2E9F2;width:30px;height:30px;border-radius:50%;font-size:14px;color:#8a7a8d;cursor:pointer}
+#bookClose{display:block;border:0;background:#F2E9F2;width:30px;height:30px;border-radius:50%;font-size:14px;color:#8a7a8d;cursor:pointer}
 @media (max-width:700px){
   header{left:14px;top:12px;gap:8px}
   #backBtn{width:36px;height:36px;font-size:17px;border-radius:12px}
   #logo{font-size:17px}
   #hint{top:56px;font-size:13.5px;padding:7px 14px;max-width:calc(100vw - 28px);white-space:normal;text-align:center;line-height:1.25}
   #bookBtn{display:block}
-  #bookClose{display:block}
   #book{top:auto;left:0;right:0;bottom:0;width:auto;z-index:28;max-height:62vh;max-height:62dvh;border-radius:20px 20px 0 0;transform:translateY(105%);transition:transform .38s cubic-bezier(.2,1,.3,1);box-shadow:0 -10px 30px #00000038}
   #book.open{transform:translateY(0)}
   #bookHead{display:flex;justify-content:space-between;align-items:center;border-radius:0;padding:12px 16px;font-size:17px}
@@ -182,3 +181,38 @@ header{position:fixed;top:14px;left:20px;z-index:20;pointer-events:none;display:
   #overlay .ticknum.mmnum{font-size:12px}
   #overlay .lenlabel{font-size:16px}
 }
+
+/* ---------- book hide/show (desktop) ---------- */
+#book{transition:transform .35s cubic-bezier(.2,1,.3,1),opacity .25s}
+body.bookOff #book{transform:translateX(115%);opacity:0;pointer-events:none}
+body.bookOff #bookBtn{display:block}
+#bookHead{display:flex;justify-content:space-between;align-items:center}
+
+/* ---------- fraction header + step-by-step long division ---------- */
+.frac{display:inline-flex;flex-direction:column;align-items:center;line-height:1;font-size:.86em}
+.frac .bar{align-self:stretch;border-top:3px solid #3a2e39;margin:3px 0;border-radius:2px}
+.card{--cw:21px}
+.wk{position:relative}
+.rw{display:flex;font-family:'Patrick Hand','Comic Sans MS',cursive;font-size:27px;line-height:1.15;position:relative}
+.dc{display:inline-block;width:var(--cw);text-align:center;position:relative}
+.rw.dividend{padding-left:0;color:#E86A6A;font-size:30px}
+.dc.padz{color:#E67E22;opacity:.85}
+.dc.dpt::before{content:'.';position:absolute;left:-.12em;bottom:0;font-weight:700}
+.wk .quotient{position:absolute;top:-40px;left:0;right:auto;height:36px;font-size:32px;color:#2FA86B;width:100%}
+.wk .quotient .dc.q{position:absolute;top:0}
+.rw.chunk{color:#E67E22}
+.rw.chunk .dc.last{background:#FFE9C7;border-radius:6px}
+.rw.first0{color:#E86A6A}
+.rw.prod{color:#8E6FD8}
+.rw.prod .dc.first::after{content:'−';position:absolute;left:-.55em;color:#8a7a8d}
+.rw.remRow{color:#E67E22;white-space:nowrap}
+.rw.remRow .rlab{display:block}
+.wk .rline{height:0;border-top:2.5px solid #3a2e39;margin-top:1px;margin-bottom:2px}
+.words{margin-top:16px;font-family:'Patrick Hand','Comic Sans MS',cursive;font-size:16.5px;color:#4a3b45;text-align:left;display:flex;flex-direction:column;gap:6px;align-self:stretch}
+.words .nl{display:flex;gap:8px;align-items:flex-start;line-height:1.25}
+.words .nl i{flex:none;font-style:normal;width:21px;height:21px;border-radius:50%;background:#EEE3F7;color:#7A5BC4;font-size:13px;display:flex;align-items:center;justify-content:center;margin-top:1px}
+.words b{font-weight:400;color:#2FA86B;white-space:nowrap}
+.bracketWrap{flex-direction:column;align-items:center}
+@media (max-width:700px){.card{--cw:19px}.rw{font-size:23px}.rw.dividend{font-size:26px}.wk .quotient{font-size:28px;top:-34px}.words{font-size:15px}}
+.bracket .divisor{align-self:flex-start;margin-top:8px}
+.words span{display:block}

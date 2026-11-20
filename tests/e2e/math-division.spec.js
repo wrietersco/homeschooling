@@ -59,10 +59,9 @@ test("a 1 cm scale clearly shows its millimetres", async ({ page }) => {
 
   // mm tick path exists and is fully in focus at fit zoom
   expect(await mmOpacity(page)).toBeGreaterThanOrEqual(0.6);
-  // the ten millimetre positions carry numbers 1..9 (whole cm stays 0/1)
+  // only the half-centimetre mark carries a label: 0.5
   const mmNums = await page.locator("#overlay .mmnum").allTextContents();
-  expect(mmNums.length).toBeGreaterThanOrEqual(8);
-  expect(mmNums.join(",")).toContain("5");
+  expect(mmNums).toEqual(["0.5"]);
 });
 
 test("millimetres are always there and reveal as the kid zooms", async ({ page }) => {
@@ -166,4 +165,44 @@ test("decimal size entry via the point key", async ({ page }) => {
   await typeOnPad(page, ["7", ".", "5"]);
   await page.waitForTimeout(1700);
   await expect(page.locator("#overlay .lenlabel").first()).toHaveText("7.5 cm");
+});
+
+async function cutInto(page, digits) {
+  await page.locator(".scale").first().click();
+  await page.waitForTimeout(350);
+  await page.click("#tCut");
+  await typeOnPad(page, digits);
+  await page.click("#btnYes");
+  await page.waitForTimeout(1800);
+}
+
+test("math book shows 67 ÷ 2 as a fraction with every long-division step", async ({ page }) => {
+  await startGame(page);
+  await setSize(page, ["6", "7"]);
+  await cutInto(page, ["2"]);
+
+  const card = page.locator("#cards .card").first();
+  await expect(card.locator(".frac .num")).toHaveText("67");
+  await expect(card.locator(".frac .den")).toHaveText("2");
+  const words = (await card.locator(".words").textContent()).replace(/\s+/g, " ");
+  expect(words).toContain("2 × 3 = 6");
+  expect(words).toContain("7 − 6 = 1");
+  expect(words).toContain("Put the decimal point");
+  expect(words).toContain("Add a 0");
+  expect(words).toContain("10 − 10 = 0");
+  await expect(card.locator(".wk .quotient")).toHaveText("335");
+  await page.waitForTimeout(6500);
+  await page.screenshot({ path: "test-results/long-division-67-by-2.png" });
+});
+
+test("the math book can be hidden and shown again", async ({ page }) => {
+  await startGame(page);
+  await expect(page.locator("#book")).toBeVisible();
+  await page.click("#bookClose");
+  await expect(page.locator("body")).toHaveClass(/bookOff/);
+  await expect(page.locator("#book")).toHaveCSS("opacity", "0");
+  await expect(page.locator("#bookBtn")).toBeVisible();
+  await page.click("#bookBtn");
+  await expect(page.locator("body")).not.toHaveClass(/bookOff/);
+  await expect(page.locator("#book")).toHaveCSS("opacity", "1");
 });

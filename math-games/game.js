@@ -402,12 +402,13 @@ function fitView(animate = true, dur = 750) {
   minX -= 60; maxX += 90; minY -= 34; maxY += 6;
   const bw = Math.max(maxX - minX, 200), bh = Math.max(maxY - minY, 120);
   const m = isMobile();
-  const availW = m ? innerWidth - 28 : Math.max(innerWidth - 370, 320);
+  const bookHid = document.body.classList.contains('bookOff');
+  const availW = m || bookHid ? innerWidth - 28 : Math.max(innerWidth - 370, 320);
   const availH = m ? innerHeight - 250 : innerHeight - 280;
   const k = clamp(Math.min(availW / bw, availH / bh), .22, 2.2);
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   const target = {
-    tx: (m ? innerWidth / 2 : availW / 2 + 24) - cx * k,
+    tx: (m || bookHid ? innerWidth / 2 : availW / 2 + 24) - cx * k,
     ty: (m ? 108 + availH / 2 : 90 + (innerHeight - 170) / 2) - cy * k, k };
   if (animate) tweenView(target, dur); else { view = target; applyView(); }
 }
@@ -701,7 +702,7 @@ function confirmCut() {
 
   confettiAt((s.x + s.len * CM / 2) * view.k + view.tx, (s.y + RH / 2) * view.k + view.ty);
   chime();
-  addCard({ L, n, q, r });
+  addCard({ L, n, q });
   fitView(true, 780);
   let msg;
   if (s.rows.length === 1)
@@ -881,47 +882,115 @@ function removePiece(s) {
 }
 
 /* ---------- math book sheet (mobile) ---------- */
-$('#bookBtn').addEventListener('click', () => { $('#book').classList.toggle('open'); blip(); });
-$('#bookClose').addEventListener('click', () => $('#book').classList.remove('open'));
+// Mobile: slide-up sheet. Desktop: the side book can be hidden to give the canvas the whole screen.
+function bookOff(off) {
+  document.body.classList.toggle('bookOff', off);
+  try { localStorage.setItem('mathBookOff', off ? '1' : ''); } catch (_) {}
+  if (!isMobile()) fitView(true, 500);
+}
+$('#bookBtn').addEventListener('click', () => {
+  if (isMobile()) $('#book').classList.toggle('open');
+  else bookOff(!document.body.classList.contains('bookOff'));
+  blip();
+});
+$('#bookClose').addEventListener('click', () => {
+  if (isMobile()) $('#book').classList.remove('open'); else bookOff(true);
+});
+try { if (!isMobile() && localStorage.getItem('mathBookOff')) document.body.classList.add('bookOff'); } catch (_) {}
 
 /* ---------- math book cards: the problem resolves step by step ---------- */
 const chd = (str, cls = '', base = 0, dt = 45) =>
   `<span class="${cls}">${[...String(str)].map((c, i) =>
     `<span class="ch" style="animation-delay:${Math.round(base + i * dt)}ms">${c}</span>`).join('')}</span>`;
-function addCard({ L, n, q, r }) {
+// Long division, digit by digit, exactly as a kid writes it on paper — and each
+// step is also spelled out in words underneath (2 × 3 = 6, 7 − 6 = 1, bring down…).
+function longDivision(L, n, qDecWanted) {
+  const ls = fmt(L), dpos = ls.indexOf('.');
+  const dp = dpos < 0 ? 0 : ls.length - dpos - 1;
+  const D = ls.replace('.', '').split('').map(Number);
+  const intLen = D.length - dp;
+  const total = D.length + Math.max(0, qDecWanted - dp);
+  const steps = [];
+  let cur = 0, lead = true;
+  for (let i = 0; i < total; i++) {
+    const d = i < D.length ? D[i] : 0;
+    cur = cur * 10 + d;
+    const qd = Math.floor(cur / n), prod = qd * n, rem = cur - prod;
+    const skip = lead && qd === 0 && i < intLen - 1;   // leading zeros of the whole-number part
+    if (qd > 0) lead = false;
+    steps.push({ i, d, chunk: cur, qd, prod, rem, skip, pad: i >= D.length });
+    cur = rem;
+  }
+  return { steps, total, intLen, D };
+}
+
+function addCard({ L, n, q }) {
   const card = document.createElement('div');
   card.className = 'card';
-  const prod = round2(q * n);
   const qs = fmt(q);
+  const qDec = qs.includes('.') ? qs.length - qs.indexOf('.') - 1 : 0;
+  const { steps, total, intLen, D } = longDivision(L, n, qDec);
+  const shown = steps.filter(st => !st.skip);
   const digits = qs.length;
-  // the long division resolves like a pencil: problem → roof → quotient → product → remainder
-  const tRoof = 750, tQ = 1500, tProd = tQ + digits * 160 + 150, tLine = tProd + 280, tRem = tLine + 320;
-  const qDigits = [...qs].map((d, i) =>
-    `<span class="ch" style="animation-delay:${tQ + i * 160}ms">${d}</span>`).join('');
-  const remInline = r > 0 ? `<span class="rem">${chd('r ' + fmt(r), '', tRem)}</span>`
-                          : `<span class="rem zero">${chd('✨', '', tRem)}</span>`;
-  const remBox = r > 0 ? `${fmt(r)}<span class="rlab">left over</span>`
-                       : `0 <span class="star">⭐</span><span class="rlab">nothing left!</span>`;
+  const tRoof = 750, STEP = 1500;                      // ms per long-division step
+  const t0Of = st => tRoof + 600 + shown.indexOf(st) * STEP;
+  const finalRemInt = steps[steps.length - 1].rem;
+  const finalRem = round2(finalRemInt / Math.pow(10, total - intLen));   // back in real cm (1 → 0.01)
+  const hasRem = finalRemInt > 0;
+  const tEnd = tRoof + 600 + shown.length * STEP;
+  const remInline = hasRem ? `<span class="rem">${chd('r ' + fmt(finalRem), '', tEnd)}</span>`
+                                 : `<span class="rem zero">${chd('✨', '', tEnd)}</span>`;
+  const cw = 'var(--cw)';
+  const rowHtml = (txt, endCol, cls, delay) => {
+    const t = String(txt);
+    return `<div class="rw step ${cls}" style="--d:${delay}ms;padding-left:calc(${cw}*${endCol + 1 - t.length})">${
+      [...t].map((c, k) => `<span class="dc${k === 0 ? ' first' : ''}${k === t.length - 1 ? ' last' : ''}">${c}</span>`).join('')}</div>`;
+  };
+  const dRow = Array.from({ length: total }, (_, k) => {
+    const padz = k >= D.length, st = steps[k];
+    return `<span class="dc${k === intLen && k > 0 ? ' dpt' : ''}${padz ? ' padz step' : ''}"${
+      padz ? ` style="--d:${t0Of(st)}ms"` : ''}>${padz ? 0 : D[k]}</span>`;
+  }).join('');
+  let qRow = '', work = '', words = '';
+  const allZeroInt = steps.every(st => st.i >= intLen || st.qd === 0);
+  shown.forEach((st, j) => {
+    const t0 = t0Of(st);
+    qRow += `<span class="dc q${st.i === intLen && st.i > 0 ? ' dpt' : ''} step" style="left:calc(${cw}*${st.i});--d:${t0 + 700}ms">${st.qd}</span>`;
+    work += rowHtml(st.chunk, st.i, j > 0 ? 'chunk' : 'chunk first0', t0);
+    work += rowHtml(st.prod, st.i, 'prod', t0 + 450);
+    const L2 = String(st.chunk).length;
+    work += `<div class="rline" style="--d:${t0 + 800}ms;margin-left:calc(${cw}*${st.i + 1 - L2});width:calc(${cw}*${L2})"></div>`;
+    const bits = [];
+    if (st.i === intLen && st.i > 0) bits.push('Put the decimal point in the answer.');
+    if (st.pad) bits.push('Add a 0 and bring it down.');
+    else if (j > 0) bits.push(`Bring down ${st.d}.`);
+    bits.push(`<b>${n} × ${st.qd} = ${st.prod}</b> ·`);
+    bits.push(`<b>${st.chunk} − ${st.prod} = ${st.rem}</b>`);
+    words += `<div class="nl step" style="--d:${t0}ms"><i>${j + 1}</i><span>${bits.join(' ')}</span></div>`;
+  });
+  if (allZeroInt) qRow = `<span class="dc q step" style="left:calc(${cw}*${intLen - 1});--d:${tRoof + 600}ms">0</span>` + qRow;
+  const remBox = hasRem ? `${fmt(finalRem)}<span class="rlab">left over</span>` : `0<span class="star">⭐</span>`;
+  work += `<div class="rw step remRow" style="--d:${tEnd - 300}ms;padding-left:calc(${cw}*${total - 1})">${remBox}</div>`;
   card.innerHTML = `
-    <div class="eq">${chd(fmt(L),'a')}${chd('÷','op',135)}${chd(n,'b',225)}
-      ${chd('=','op',tQ)}${chd(qs,'q',tQ + 60,60)}<small>${chd('cm','',tQ + 60 + digits * 60,40)}</small>${remInline}</div>
+    <div class="eq"><span class="frac"><span class="num">${chd(fmt(L),'a')}</span><span class="bar"></span><span class="den">${chd(n,'b',225)}</span></span>
+      ${chd('=','op',tRoof)}${chd(qs,'q',tRoof + 60,60)}<small>${chd('cm','',tRoof + 60 + digits * 60,40)}</small>${remInline}</div>
     <div class="bracketWrap"><div class="bracket">
       <div class="divisor step" style="--d:${tRoof}ms">${n}</div>
       <div class="roofbox">
-        <div class="quotient">${qDigits}</div>
-        <div class="dividend step" style="--d:${tRoof + 120}ms">${fmt(L)}</div>
-        <div class="product step" style="--d:${tProd}ms">${fmt(prod)}</div>
-        <div class="rline" style="--d:${tLine}ms"></div>
-        <div class="remainder step" style="--d:${tRem}ms">${remBox}</div>
+        <div class="wk" style="width:calc(${cw}*${total})">
+          <div class="quotient">${qRow}</div>
+          <div class="rw dividend step" style="--d:${tRoof + 120}ms">${dRow}</div>
+          ${work}
+        </div>
       </div>
-    </div></div>`;
+    </div>
+    <div class="words">${words}</div></div>`;
   const cards = $('#cards');
   cards.prepend(card);
   while (cards.children.length > 24) cards.lastChild.remove();
   const bc = $('#bookCount');
   bc.hidden = false; bc.textContent = cards.children.length;
-  // soft pencil ticks as each step lands
-  [tRoof, tQ, tProd, tLine, tRem].forEach(t => setTimeout(() => tone(620, 860, .05, 'sine', .06), t));
+  shown.forEach(st => [0, 450, 800].forEach(o => setTimeout(() => tone(620, 860, .05, 'sine', .06), t0Of(st) + o)));
 }
 // a long-press split isn't division — it's a number-decomposition story
 function addSplitCard({ L, a, b }) {
