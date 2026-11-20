@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_PLANS, validatePlans, subscriptionState, consumePlanUsage, savePreparedActivity, resolvePlan, allowancePeriod } from "../lib/subscriptions.js";
+import { DEFAULT_PLANS, validatePlans, subscriptionState, consumePlanUsage, savePreparedActivity, resolvePlan, allowancePeriod, normalizeGrants, applyGrants, grantedDailyCap } from "../lib/subscriptions.js";
 import { validateSubscription } from "../platform/subscriptions.js";
 import { validateAccount } from "../platform/userAdmin.js";
 import { withCostMetering } from "../agents/agentConfig.js";
@@ -117,4 +117,31 @@ test("older custom plans retain their prices and inherit the new activity allowa
   const legacy = { plans: { basic: { price: 6000, limits: { text: 123 } } } };
   const resolved = resolvePlan(legacy, { planId: "basic" });
   assert.equal(resolved.price, 6000); assert.equal(resolved.limits.text, 123); assert.equal(resolved.limits.activities, 80);
+});
+test("superadmin grants add to or lift plan limits without changing the plan", async () => {
+  const plans = structuredClone(DEFAULT_PLANS); plans.basic.daily.tts = 1; plans.basic.limits.tts = 2;
+  const db = database({ config: { plans } });
+  db.store.set("families/f/billing/grants", { grants: { tts: { daily: 2 } } });
+  for (let i = 0; i < 2; i++) await consumePlanUsage(db, "f", "tts", { now });
+  await assert.rejects(consumePlanUsage(db, "f", "tts", { now }), { code: "resource-exhausted" }); // package cap (2) still applies
+  db.store.set("families/f/billing/grants", { grants: { tts: { daily: "unlimited", package: "unlimited" } } });
+  for (let i = 0; i < 5; i++) await consumePlanUsage(db, "f", "tts", { now });
+  const dry = await consumePlanUsage(db, "f", "tts", { now, dryRun: true });
+  assert.ok(Number.isFinite(dry.remaining) && dry.remaining > 1000);
+  assert.equal(plans.basic.daily.tts, 1);
+});
+test("unlimited live grant lets sessions run their full length", async () => {
+  const plans = structuredClone(DEFAULT_PLANS); plans.basic.daily.liveMinutes = 3;
+  const db = database({ config: { plans } });
+  db.store.set("families/f/billing/grants", { grants: { liveMinutes: { daily: "unlimited" } } });
+  assert.equal((await consumePlanUsage(db, "f", "liveMinutes", { units: 20, session: true, now })).units, 10);
+  assert.equal(await grantedDailyCap(db, "f", "liveMinutes", 30), null);
+  db.store.set("families/f/billing/grants", { grants: { liveMinutes: { daily: 25 } } });
+  assert.equal(await grantedDailyCap(db, "f", "liveMinutes", 30, 10), 33);
+});
+test("grant validation keeps whole numbers or unlimited and drops empty entries", () => {
+  assert.deepEqual(normalizeGrants({ tts: { daily: "50", package: "unlimited" }, image: { daily: 0 }, bogus: { daily: 5 } }), { tts: { daily: 50, package: "unlimited" } });
+  assert.throws(() => normalizeGrants({ tts: { daily: -1 } }), /whole number/);
+  assert.throws(() => normalizeGrants({ tts: { daily: 1.5 } }), /whole number/);
+  assert.equal(applyGrants(resolvePlan({}, active), { tts: { package: 100 } }).limits.tts, DEFAULT_PLANS.basic.limits.tts + 100);
 });

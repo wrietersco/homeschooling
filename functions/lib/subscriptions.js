@@ -9,6 +9,9 @@ export const DEFAULT_PLANS = {
 export const subscriptionRef = (db, familyId) => db.collection("families").doc(familyId).collection("billing").doc("subscription");
 export const plansRef = (db) => db.collection("platform").doc("plans");
 export const usageRef = (db, familyId, month) => db.collection("families").doc(familyId).collection("planUsage").doc(month);
+export const grantsRef = (db, familyId) => db.collection("families").doc(familyId).collection("billing").doc("grants");
+export const USAGE_KINDS = ["activities", "text", "image", "tts", "liveMinutes"];
+export const UNLIMITED = "unlimited";
 const stamp = (v) => v?.toMillis?.() ?? (v instanceof Date ? v.getTime() : Number(v));
 
 export function subscriptionState(sub, nowMs = Date.now()) {
@@ -49,10 +52,57 @@ export function validatePlans(raw) {
   return out;
 }
 
+// Superadmin grants: extra allowance on top of a family's plan, per kind, per day
+// and per package period. Each value is a non-negative whole number to ADD, or
+// "unlimited". The plan's price and definition are untouched; grants persist
+// across renewals until the superadmin changes them.
+export function normalizeGrants(raw = {}) {
+  const out = {};
+  for (const kind of USAGE_KINDS) {
+    const g = raw?.[kind];
+    if (!g) continue;
+    const entry = {};
+    for (const scope of ["daily", "package"]) {
+      const v = g[scope];
+      if (v === UNLIMITED) entry[scope] = UNLIMITED;
+      else if (v != null && v !== "") {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n) || n > 1e9) throw new HttpsError("invalid-argument", `The ${kind} ${scope} grant must be a whole number or unlimited.`);
+        if (n > 0) entry[scope] = n;
+      }
+    }
+    if (Object.keys(entry).length) out[kind] = entry;
+  }
+  return out;
+}
+
+const boost = (base, grant) => grant === UNLIMITED ? Infinity : base + (Number(grant) || 0);
+export function applyGrants(plan, grants = {}) {
+  const limits = { ...plan.limits }, daily = { ...plan.daily };
+  for (const [kind, g] of Object.entries(grants || {})) {
+    if (!USAGE_KINDS.includes(kind)) continue;
+    limits[kind] = boost(limits[kind] ?? 0, g.package);
+    daily[kind] = boost(daily[kind] ?? 0, g.daily);
+  }
+  return { ...plan, limits, daily };
+}
+
+// Scale a per-day safety breaker (e.g. Explore sessions/day) with a family's
+// daily grant so a generous grant isn't silently capped by the breaker.
+// Returns null when the grant is unlimited (skip the breaker).
+export async function grantedDailyCap(db, familyId, kind, base, unitsPerCall = 1) {
+  const g = (await grantsRef(db, familyId).get().catch(() => null))?.data()?.grants?.[kind]?.daily;
+  if (g === UNLIMITED) return null;
+  return base + Math.ceil((Number(g) || 0) / Math.max(1, unitsPerCall));
+}
+
+// JSON-safe view of limits (Infinity ⇒ "unlimited") for clients.
+export const publicLimits = (limits) => Object.fromEntries(Object.entries(limits).map(([k, v]) => [k, v === Infinity ? UNLIMITED : v]));
+
 // Reserve before spending. Transactions serialize concurrent calls; storage errors
 // fail closed. Retries count as attempts, and live sessions reserve their full cap.
 export async function consumePlanUsage(db, familyId, kind, { units = 1, uid, now = new Date(), session = false, dryRun = false, activityWrite = null } = {}) {
-  if (!familyId || !["activities", "text", "image", "tts", "liveMinutes"].includes(kind) || !Number.isInteger(units) || units < 1) throw new HttpsError("invalid-argument", "Invalid usage reservation.");
+  if (!familyId || !USAGE_KINDS.includes(kind) || !Number.isInteger(units) || units < 1) throw new HttpsError("invalid-argument", "Invalid usage reservation.");
   const iso = now.toISOString();
   const day = iso.slice(0, 10);
   try {
@@ -65,12 +115,13 @@ export async function consumePlanUsage(db, familyId, kind, { units = 1, uid, now
       const sub = snaps[1].exists ? snaps[1].data() : null;
       const state = subscriptionState(sub, now.getTime());
       if (state !== "active") throw new HttpsError("failed-precondition", `Subscription ${state}. Contact the administrator to activate or renew it.`);
-      const plan = resolvePlan(snaps[0].data(), sub);
       const ledger = usageRef(db, familyId, allowancePeriod(sub));
-      const used = (await tx.get(ledger)).data() || {};
+      const [ledgerSnap, grantSnap] = await Promise.all([tx.get(ledger), tx.get(grantsRef(db, familyId))]);
+      const plan = applyGrants(resolvePlan(snaps[0].data(), sub), grantSnap.data()?.grants);
+      const used = ledgerSnap.data() || {};
       const daily = used.daily || {};
       const today = daily[day] || {};
-      if (dryRun) return { plan, remaining: Math.max(0, plan.limits[kind] - (used[kind] || 0)), dailyRemaining: Math.max(0, plan.daily[kind] - (today[kind] || 0)) };
+      if (dryRun) return { plan, remaining: Math.min(1e6, Math.max(0, plan.limits[kind] - (used[kind] || 0))), dailyRemaining: Math.min(1e6, Math.max(0, plan.daily[kind] - (today[kind] || 0))) };
       const count = session ? Math.min(units, plan.sessionMinutes, Math.floor((stamp(sub.endsAt) - now.getTime()) / 60000), plan.limits[kind] - (used[kind] || 0), plan.daily[kind] - (today[kind] || 0)) : units;
       if (count < 1 || (used[kind] || 0) + count > plan.limits[kind] || (today[kind] || 0) + count > plan.daily[kind]) {
         const label = { activities: "prepared activity", text: "learning preparation", image: "illustration", tts: "read-aloud", liveMinutes: "conversation" }[kind];

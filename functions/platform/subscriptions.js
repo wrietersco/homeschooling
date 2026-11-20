@@ -1,6 +1,6 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
-import { DEFAULT_PLANS, PLAN_IDS, resolvePlan, plansRef, subscriptionRef, usageRef, validatePlans, subscriptionState, allowancePeriod } from "../lib/subscriptions.js";
+import { DEFAULT_PLANS, PLAN_IDS, resolvePlan, plansRef, subscriptionRef, usageRef, validatePlans, subscriptionState, allowancePeriod, grantsRef, normalizeGrants, applyGrants, publicLimits } from "../lib/subscriptions.js";
 import { requirePlatformAdmin } from "./userAdmin.js";
 import { resolveCaller } from "../lib/caller.js";
 import { publicRequest } from "./planRequests.js";
@@ -15,9 +15,9 @@ export const getSubscriptionAdmin = onCall(async (request) => {
   const [config, families] = await Promise.all([plansRef(db).get(), db.collection("families").get()]);
   const month = new Date().toISOString().slice(0, 7);
   const rows = await Promise.all(families.docs.map(async (d) => {
-    const sub = await subscriptionRef(db, d.id).get();
+    const [sub, grants] = await Promise.all([subscriptionRef(db, d.id).get(), grantsRef(db, d.id).get()]);
     const usage = await usageRef(db, d.id, allowancePeriod(sub.data())).get();
-    return { familyId: d.id, name: d.data().name || d.id, subscription: plain(sub.exists ? sub.data() : null), usage: usage.data() || {} };
+    return { familyId: d.id, name: d.data().name || d.id, subscription: plain(sub.exists ? sub.data() : null), usage: usage.data() || {}, grants: grants.data()?.grants || {} };
   }));
   const requests = await db.collection("platformPlanRequests").where("status", "==", "pending").get();
   const requestRows = await Promise.all(requests.docs.map(async (d) => {
@@ -76,5 +76,54 @@ export const getMySubscription = onCall(async (request) => {
   // Internal payment references and notes remain admin-only.
   const { notes, paymentReference, updatedBy, ...publicSub } = current;
   const planRequest = (await db.collection("families").doc(familyId).collection("billing").doc("planRequest").get()).data();
-  return { plans: publicPlans(config.data()), subscription: publicSub, usage: usage.data() || {}, planRequest: publicRequest(planRequest) };
+  const grants = (await grantsRef(db, familyId).get()).data()?.grants || {};
+  const effective = applyGrants(resolvePlan(config.data(), sub.data()), grants);
+  return { plans: publicPlans(config.data()), subscription: publicSub, usage: usage.data() || {}, planRequest: publicRequest(planRequest), effective: { limits: publicLimits(effective.limits), daily: publicLimits(effective.daily) }, grants };
+});
+
+// ── Quota grants (superadmin) ─────────────────────────────────────────────────
+// Extra allowance for one family on top of its plan. Price and plan stay as-is.
+const familyIdFrom = (data) => {
+  const id = String(data?.familyId || "");
+  if (!id || id.includes("/")) throw new HttpsError("invalid-argument", "Choose a family.");
+  return id;
+};
+
+export const getFamilyGrants = onCall(async (request) => {
+  await requirePlatformAdmin(request);
+  const db = getFirestore();
+  const familyId = familyIdFrom(request.data);
+  const [family, config, sub, grantSnap] = await Promise.all([db.collection("families").doc(familyId).get(), plansRef(db).get(), subscriptionRef(db, familyId).get(), grantsRef(db, familyId).get()]);
+  if (!family.exists) throw new HttpsError("not-found", "Family not found.");
+  const plan = resolvePlan(config.data(), sub.data());
+  const usage = (await usageRef(db, familyId, allowancePeriod(sub.data())).get()).data() || {};
+  const today = new Date().toISOString().slice(0, 10);
+  const g = grantSnap.data() || {};
+  const history = (g.history || []).map((h) => ({ ...h, at: h.at?.toMillis?.() ?? h.at }));
+  return {
+    familyId, name: family.data().name || familyId,
+    subscription: plain(sub.exists ? sub.data() : null),
+    plan: { id: plan.id, name: plan.name, durationDays: plan.durationDays, limits: plan.limits, daily: plan.daily },
+    used: { package: Object.fromEntries(["activities", "text", "image", "tts", "liveMinutes"].map((k) => [k, usage[k] || 0])), today: usage.daily?.[today] || {} },
+    grants: g.grants || {}, note: g.note || "", history,
+  };
+});
+
+export const setFamilyGrants = onCall(async (request) => {
+  const uid = await requirePlatformAdmin(request);
+  const db = getFirestore();
+  const familyId = familyIdFrom(request.data);
+  const grants = normalizeGrants(request.data?.grants);
+  const note = String(request.data?.note || "").trim().slice(0, 500);
+  const family = await db.collection("families").doc(familyId).get();
+  if (!family.exists) throw new HttpsError("not-found", "Family not found.");
+  const ref = grantsRef(db, familyId);
+  const now = new Date();
+  await db.runTransaction(async (tx) => {
+    const prev = (await tx.get(ref)).data() || {};
+    const history = [{ at: now, by: uid, byEmail: request.auth.token.email || "", grants, note }, ...(prev.history || [])].slice(0, 20);
+    tx.set(ref, { grants, note, updatedAt: now, updatedBy: uid, history });
+    tx.set(db.collection("platformAudit").doc(), { action: "grants.updated", uid, familyId, grants, previous: prev.grants || {}, note, createdAt: now });
+  });
+  return { ok: true, grants };
 });

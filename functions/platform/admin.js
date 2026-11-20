@@ -22,8 +22,9 @@ export const listFamilies = onCall(async (request) => {
   const snap = await db.collection("families").get();
   const results = await Promise.all(
     snap.docs.map(async (d) => {
-      const members = await d.ref.collection("members").count().get();
+      const [members, grants] = await Promise.all([d.ref.collection("members").count().get(), d.ref.collection("billing").doc("grants").get()]);
       return {
+        grantCount: Object.keys(grants.data()?.grants || {}).length,
         id: d.id,
         name: d.data().name || "(unnamed)",
         status: d.data().status || "active",

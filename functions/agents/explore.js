@@ -25,7 +25,7 @@ import { GoogleGenAI, Modality } from "@google/genai";
 import { resolveCaller } from "../lib/caller.js";
 import { familyPaths } from "../lib/paths.js";
 import { enforceDailyLimit } from "../lib/rateLimit.js";
-import { consumePlanUsage } from "../lib/subscriptions.js";
+import { consumePlanUsage, grantedDailyCap } from "../lib/subscriptions.js";
 import { loadAgentConfig, isLiveModelId } from "./agentConfig.js";
 import {
   LIVE_VOICES,
@@ -618,7 +618,8 @@ export const startExploreSession = onCall({ secrets: ["GEMINI_API_KEY"], timeout
     loadAgentConfig(db, "explore"),
     settingsDoc(db, familyId, childId, mode).get().catch(() => null),
   ]);
-  await enforceDailyLimit(db, familyId, "explore", cfg.dailySessions || 30);
+  const sessionCap = await grantedDailyCap(db, familyId, "liveMinutes", cfg.dailySessions || 30, cfg.sessionMinutes || 10);
+  if (sessionCap != null) await enforceDailyLimit(db, familyId, "explore", sessionCap);
   if (!data) throw new HttpsError("not-found", "That child isn't in your family.");
 
   // Platform config (superadmin) ⊕ this family's own preferences (parents).
@@ -738,7 +739,8 @@ export const previewExploreVoice = onCall({ secrets: ["GEMINI_API_KEY"], timeout
   const voiceName = String(request.data?.voiceName || "");
   if (!LIVE_VOICES.includes(voiceName)) throw new HttpsError("invalid-argument", "Unknown voice.");
   if (!process.env.GEMINI_API_KEY) return { configured: false };
-  await enforceDailyLimit(db, familyId, "exploreVoice", 30);
+  const voiceCap = await grantedDailyCap(db, familyId, "liveMinutes", 30);
+  if (voiceCap != null) await enforceDailyLimit(db, familyId, "exploreVoice", voiceCap);
   await consumePlanUsage(db, familyId, "liveMinutes", { uid });
   const cfg = await loadAgentConfig(db, "explore");
   try {
