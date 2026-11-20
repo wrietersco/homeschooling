@@ -22,6 +22,7 @@ function makeRouter() {
     history: createMemoryHistory(),
     routes: [
       { path: "/", component: { template: "<div>home</div>" } },
+      { path: "/dashboard", component: { template: "<div>dashboard</div>" } },
       { path: "/explore", component: { template: "<div>explore</div>" } },
       { path: "/wikido", component: { template: "<div>wikido</div>" } },
       { path: "/phonics", component: { template: "<div>phonics</div>" } },
@@ -60,7 +61,7 @@ describe("AppNav GAMES menu", () => {
     expect(wrapper.find(".games-menu").exists()).toBe(false);
   });
 
-  it("shows a Games toggle that reveals Explore + Wikido + Phonics submenu links", async () => {
+  it("shows a Games toggle that reveals the game hierarchy submenu links", async () => {
     authState.user = { uid: "u1" };
     authState.hasFamily = true;
     const { wrapper } = await mountNav();
@@ -74,13 +75,22 @@ describe("AppNav GAMES menu", () => {
     await toggle.trigger("click");
     expect(toggle.attributes("aria-expanded")).toBe("true");
     const items = wrapper.findAll(".games-dropdown .nav-link");
-    expect(items).toHaveLength(3);
-    expect(items[0].attributes("href")).toBe("/explore");
-    expect(items[0].text()).toContain("Explore");
-    expect(items[1].attributes("href")).toBe("/wikido");
-    expect(items[1].text()).toContain("Wikido");
-    expect(items[2].attributes("href")).toBe("/phonics");
-    expect(items[2].text()).toContain("Phonics");
+    expect(items).toHaveLength(6);
+    expect(items[0].attributes("href")).toBe("/games");
+    expect(items[0].text()).toContain("All Games");
+    expect(items[1].attributes("href")).toBe("/explore");
+    expect(items[1].text()).toContain("Explore");
+    expect(items[2].attributes("href")).toBe("/wikido");
+    expect(items[2].text()).toContain("Wikido");
+    expect(items[3].attributes("href")).toBe("/phonics");
+    expect(items[3].text()).toContain("Phonics");
+    // Math Games is a static page under /games/math/ (not a Vue route), so it is an
+    // ordinary anchor that carries the app context for the return pill.
+    expect(items[4].attributes("href")).toBe("/games/math/index.html?from=/games");
+    expect(items[4].text()).toContain("Math Games");
+    // Division Playland is nested under Math Games, mirroring the page hierarchy.
+    expect(items[5].attributes("href")).toBe("/games/math/division.html");
+    expect(items[5].text()).toContain("Division Playland");
     // The submenu entries must stay ORDINARY LINKS. role="menuitem" hid them
     // from every link-role query (and promised menu keyboard behaviour we don't
     // implement) — a real browser then couldn't find "Phonics" by link role.
@@ -95,7 +105,7 @@ describe("AppNav GAMES menu", () => {
     const { wrapper, router } = await mountNav();
 
     await wrapper.find(".games-toggle").trigger("click");
-    await wrapper.findAll(".games-dropdown .nav-link")[2].trigger("click");
+    await wrapper.findAll(".games-dropdown .nav-link")[3].trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.path).toBe("/phonics");
     expect(wrapper.find(".games-dropdown").exists()).toBe(false);
@@ -134,5 +144,60 @@ describe("AppNav GAMES menu", () => {
     await router.push("/wikido");
     await flushPromises();
     expect(toggle.classes()).toContain("router-link-active");
+  });
+});
+
+// The mobile hamburger only swaps the layout via CSS; what's testable in
+// jsdom is the toggle contract: aria state, the .menu-open class on .links,
+// and the same close triggers as the Games menu.
+describe("AppNav mobile menu", () => {
+  it("toggles aria-expanded and the .menu-open class on .links", async () => {
+    authState.user = { uid: "u1" };
+    authState.hasFamily = true;
+    const { wrapper } = await mountNav();
+
+    const toggle = wrapper.find(".menu-toggle");
+    expect(toggle.exists()).toBe(true);
+    expect(toggle.attributes("aria-expanded")).toBe("false");
+    expect(toggle.attributes("aria-controls")).toBe("main-nav-links");
+    expect(wrapper.find(".links").classes()).not.toContain("menu-open");
+
+    await toggle.trigger("click");
+    expect(toggle.attributes("aria-expanded")).toBe("true");
+    expect(toggle.attributes("aria-label")).toBe("Close menu");
+    expect(wrapper.find(".links").classes()).toContain("menu-open");
+
+    await toggle.trigger("click");
+    expect(toggle.attributes("aria-expanded")).toBe("false");
+    expect(wrapper.find(".links").classes()).not.toContain("menu-open");
+  });
+
+  it("closes the sheet on Escape and on an outside click", async () => {
+    authState.user = { uid: "u1" };
+    authState.hasFamily = true;
+    const { wrapper } = await mountNav();
+
+    await wrapper.find(".menu-toggle").trigger("click");
+    expect(wrapper.find(".links").classes()).toContain("menu-open");
+
+    await wrapper.find(".menu-toggle").trigger("keydown", { key: "Escape" });
+    expect(wrapper.find(".links").classes()).not.toContain("menu-open");
+
+    await wrapper.find(".menu-toggle").trigger("click");
+    await document.body.click();
+    expect(wrapper.find(".links").classes()).not.toContain("menu-open");
+  });
+
+  it("closes the sheet after navigating via a link", async () => {
+    authState.user = { uid: "u1" };
+    authState.hasFamily = true;
+    const { wrapper, router } = await mountNav();
+
+    await wrapper.find(".menu-toggle").trigger("click");
+    // A top-level link (not the Games submenu, which is closed here).
+    await wrapper.find('.links a[href="/dashboard"]').trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.path).toBe("/dashboard");
+    expect(wrapper.find(".links").classes()).not.toContain("menu-open");
   });
 });
