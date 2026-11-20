@@ -33,4 +33,7 @@ a.gameCard:active{transform:scale(.94)}
 
 .hubFoot{position:relative;z-index:1;margin-top:30px;color:#b3a6b6;font-size:14px;font-family:'Patrick Hand','Comic Sans MS',cursive}
 
+.returnPill{position:fixed;top:14px;left:14px;z-index:5;background:#ffffffd9;border-radius:16px;padding:9px 16px;color:#3a2e39;text-decoration:none;font-weight:600;font-size:14.5px;box-shadow:0 4px 12px #00000014;transition:transform .12s}
+.returnPill:active{transform:scale(.92)}
+
 [hidden]{display:none!important}

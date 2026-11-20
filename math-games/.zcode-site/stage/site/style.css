@@ -3,7 +3,7 @@
 html,body{margin:0;height:100%;overflow:hidden;font-family:'Fredoka',sans-serif;background:#FFF9EC;user-select:none;overscroll-behavior:none;-webkit-touch-callout:none}
 button{touch-action:manipulation}
 
-#canvas{position:fixed;inset:0;width:100%;height:100%;cursor:grab}
+#canvas{position:fixed;inset:0;width:100%;height:100%;cursor:grab;touch-action:none}
 #canvas.panning{cursor:grabbing}
 
 /* ---------- header & hint ---------- */
@@ -51,6 +51,7 @@ header{position:fixed;top:14px;left:20px;z-index:20;pointer-events:none;display:
 .roofbox .remainder{font-size:28px;text-align:center;color:#E67E22}
 .roofbox .remainder .rlab{display:block;font-family:'Fredoka',sans-serif;font-size:11.5px;color:#b3a6b6;margin-top:0px}
 .roofbox .remainder .star{font-size:20px}
+.splitNote{text-align:center;font-family:'Patrick Hand','Comic Sans MS',cursive;font-size:16px;color:#8a7a8d;margin-top:2px}
 .roofbox .rline{opacity:0;transform-origin:left center;animation:drawIn .4s ease-out both;animation-delay:var(--d,0ms)}
 .product{font-family:'Patrick Hand','Comic Sans MS',cursive;font-size:29px;text-align:center;color:#8E6FD8;margin-top:2px}
 .step{opacity:0;animation:stepIn .5s cubic-bezier(.2,1.4,.4,1) both;animation-delay:var(--d,0ms)}
@@ -95,7 +96,8 @@ header{position:fixed;top:14px;left:20px;z-index:20;pointer-events:none;display:
 .key{height:52px;border:0;border-radius:14px;font-family:'Patrick Hand','Comic Sans MS',cursive;font-size:28px;color:#3a2e39;background:#fff;box-shadow:0 4px 0 #e4dae6;cursor:pointer}
 .key:active{transform:translateY(3px);box-shadow:0 1px 0 #e4dae6}
 .key.alt{background:#FFE9B8;box-shadow:0 4px 0 #eccf8a}
-.key.ok{background:#2FA86B;color:#fff;box-shadow:0 4px 0 #1d7a4e}
+.key.dot{background:#E8F0FE;box-shadow:0 4px 0 #b9d4f2}
+.key.ok{grid-column:1 / -1;background:#2FA86B;color:#fff;box-shadow:0 4px 0 #1d7a4e}
 .x{position:absolute;top:12px;right:14px;border:0;background:#F2E9F2;width:34px;height:34px;border-radius:50%;font-size:15px;color:#8a7a8d;cursor:pointer}
 
 /* ---------- toast & confetti ---------- */
@@ -118,14 +120,26 @@ header{position:fixed;top:14px;left:20px;z-index:20;pointer-events:none;display:
 /* ---------- SVG ruler bits ---------- */
 .scale{cursor:pointer}
 .scale.sel{filter:drop-shadow(0 7px 9px #00000030)}
-.scale .tick{stroke:#4a3b45;stroke-linecap:round}
-.scale .ticknum{font-family:'Patrick Hand','Comic Sans MS',cursive;font-size:15px;fill:#4a3b45;text-anchor:middle}
-.scale .lenlabel{font-family:'Fredoka',sans-serif;font-weight:600;font-size:19px;text-anchor:middle}
+/* ticks are stroke paths; non-scaling strokes keep them crisp hairlines at any zoom */
+.scale .tick{stroke:#4a3b45;stroke-linecap:round;vector-effect:non-scaling-stroke}
+.scale .tick.mm{stroke:#5d4d57}
+.scale .body{vector-effect:non-scaling-stroke}
 .scale .ring{fill:none;stroke-width:3;stroke-dasharray:10 8;opacity:0;transition:opacity .2s}
 .scale.sel .ring{opacity:1;animation:march .8s linear infinite}
 .scale.remainder .body{stroke-dasharray:7 5}
 @keyframes march{to{stroke-dashoffset:-18}}
-.cutline{stroke:#E86A6A;stroke-width:3;stroke-dasharray:9 7;animation:march .6s linear infinite}
+/* zoomed in deep, the ruler far overscreens: glow/dash animations get dropped
+   so the browser never has to repaint a quarter-million-pixel layer */
+#canvas.deep .scale.sel{filter:none}
+#canvas.deep .scale.sel .ring{animation:none}
+#canvas.deep .cutline{animation:none}
+.cutline{stroke:#E86A6A;stroke-width:3;stroke-dasharray:9 7;vector-effect:non-scaling-stroke;animation:march .6s linear infinite}
+
+/* ruler numbers & labels live in a screen-space layer: same comfy size at any zoom */
+#overlay{pointer-events:none}
+#overlay .ticknum{font-family:'Patrick Hand','Comic Sans MS',cursive;font-size:15px;fill:#4a3b45;text-anchor:middle}
+#overlay .ticknum.mmnum{font-size:14px;fill:#5d4a57}
+#overlay .lenlabel{font-family:'Fredoka',sans-serif;font-weight:600;font-size:19px;text-anchor:middle}
 .segTint{fill:#fff;animation:pulseSeg 1s ease-in-out infinite alternate}
 @keyframes pulseSeg{from{opacity:.1}to{opacity:.38}}
 
@@ -162,8 +176,9 @@ header{position:fixed;top:14px;left:20px;z-index:20;pointer-events:none;display:
   .cb{width:44px;height:44px;font-size:19px}
   #toast{bottom:104px;font-size:14px;max-width:88vw;text-align:center}
   .sheet{width:min(94vw,360px);padding:20px 18px 22px}
-  .key{height:58px;font-size:30px}
+  .key{height:48px;font-size:28px}
   #mDisplay{font-size:40px;height:58px}
-  .scale .ticknum{font-size:13px}
-  .scale .lenlabel{font-size:16px}
+  #overlay .ticknum{font-size:13px}
+  #overlay .ticknum.mmnum{font-size:12px}
+  #overlay .lenlabel{font-size:16px}
 }
