@@ -255,14 +255,15 @@ function rebuildNums(s) {
     t.textContent = fmt(s.len);
     s.numEls.push({ e: t, cm: s.len, mm: false });
   }
-  // millimetre numbers appear once the mm grid is wide open (tiny rulers, deep zoom)
-  if (CM * k / 10 >= 26) {
+  // half-centimetre labels (0.5, 1.5, 2.5 …) appear once the mm grid is wide
+  // enough to read — kids see millimetres as decimal centimetres, not 1..9
+  if (CM * k / 10 >= 10) {
     const a = Math.max(1, Math.floor((wl - s.x) / CM * 10));
     const b = Math.min(s.len * 10 - 1, Math.ceil((wr - s.x) / CM * 10));
     for (let i = a; i <= b && s.numEls.length < 160; i++) {
-      if (i % 10 === 0) continue;                               // whole cm is already numbered
+      if (i % 10 === 0 || i % 5 !== 0) continue;               // only the half-cm marks carry labels
       const t = el('text', { class: 'ticknum mmnum' }, s.numG);
-      t.textContent = i % 10;                                   // 1..9 inside each centimetre
+      t.textContent = fmt(i / 10);                              // 0.5, 1.5, 2.5 …
       s.numEls.push({ e: t, cm: i / 10, mm: true });
     }
   }
@@ -287,8 +288,9 @@ function updateNums() {
     s.numG.style.display = '';
     // numbers ride just below the ruler's top edge, but stay pinned on screen
     // when deep zoom has pushed that edge past the viewport
-    const yCm = clamp(top + clamp(42 * k, 26, 44), 16, innerHeight - 16);
-    const yMm = clamp(top + clamp(25 * k, 17, 27), 16, innerHeight - 16);
+    // labels sit just BELOW the tallest tick tip so digits never touch the lines
+    const yCm = clamp(top + Math.max(26, tickHeights().maj * k + 16), 16, innerHeight - 16);
+    const yMm = yCm;
     s.numEls.forEach(ne => {
       const x = (s.x + ne.cm * CM) * k + tx;
       if (x < -60 || x > innerWidth + 60) { ne.e.style.display = 'none'; return; }
