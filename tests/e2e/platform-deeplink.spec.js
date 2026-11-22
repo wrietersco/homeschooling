@@ -57,3 +57,27 @@ test("sections have their own URLs; refresh and Back/Forward keep them", async (
   await expect(page.locator("h1")).toHaveText("Families");
   await expect(page).toHaveURL(/\/platform\/families$/);
 });
+
+test("Wikido Studio: world, scene and spot live in the URL, cold open restores them, Open as child links to the child view", async ({ page }) => {
+  const email = await createSuperadmin();
+  await page.goto("/login");
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.locator("form").getByRole("button", { name: "Sign in" }).click();
+  await page.waitForURL(/\/onboarding$/, { timeout: 15_000 });
+  await page.getByLabel("Family name").fill("Platform Link 3");
+  await page.getByRole("button", { name: "Create family" }).click();
+  await page.waitForURL(/\/dashboard$/, { timeout: 30_000 });
+
+  await page.goto("/platform/wikido/living-things/kinds-of-living-things?spot=animals");
+  await expect(page.locator("h1")).toHaveText("Wikido Studio");
+  await expect(page.locator(".grow .pane-title").first()).toContainText("Kinds of Living Things", { timeout: 30_000 });
+  await expect(page.locator(".spot.selected")).toBeVisible();
+  const open = page.locator(".open-child a");
+  await expect(open).toHaveAttribute("href", "/wikido/living-things/kinds-of-living-things?card=animals");
+
+  // and it survives a refresh
+  await page.reload();
+  await expect(page.locator(".grow .pane-title").first()).toContainText("Kinds of Living Things", { timeout: 30_000 });
+  await expect(page).toHaveURL(/\/platform\/wikido\/living-things\/kinds-of-living-things\?spot=animals$/);
+});

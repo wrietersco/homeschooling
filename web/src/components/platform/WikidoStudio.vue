@@ -8,6 +8,8 @@
 // runtime TTS chain (the developer's Kokoro script can attach recordings later,
 // exactly as for hand-authored packs).
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { buildStudioLocation, childLinkFor, parseStudioLocation, sameLocation } from "@/lib/wikido/studioUrl";
 import {
   generateWikidoTopic, addWikidoChildScene, suggestWikidoScenes, planWikidoOutline, generateWikidoSceneImage, generateWikidoImages,
   adjustWikidoSpots, adjustWikidoAllSpots,
@@ -527,7 +529,8 @@ async function generateAudios() {
 }
 
 onMounted(() => {
-  refresh(false);
+  // open on the world/scene/spot the address names, then start mirroring changes into it
+  refresh(false).then(() => { applyStudioUrl(); studioUrlReady = true; writeStudioUrl(true); });
   probeBridge().then(() => scheduleAutoRecord());
   // name the configured speech model on the paid-premium option (best effort —
   // a failed read just leaves the generic label)
@@ -2127,6 +2130,89 @@ function confirmDeleteScene(withDeeper) {
   deleteTarget.value = "";
   message.value = "Scene removed — save your edits to keep the change.";
 }
+
+// ── deep links (/platform/wikido/:topicId/:sceneId?spot=&wizard=&q=&status=) ───
+// The address mirrors the selected world and scene, the spot being edited, an
+// open wizard and the map-of-scenes search/filter — so refresh, Back/Forward
+// and a shared link land on the same place (see lib/wikido/studioUrl.js).
+// World and scene changes push history; spot / wizard / search just replace.
+// A wizard reopens at its first step (its later steps depend on earlier picks).
+const route = useRoute();
+const router = useRouter();
+let studioUrlReady = false;
+let applyingUrl = false; // while the address is being applied, state changes are not echoed back
+const inStudioRoute = () => route.params.section === "wikido";
+
+function currentStudioState() {
+  return {
+    topicId: selectedId.value,
+    sceneId: selectedSceneId.value,
+    spot: selectedSpotId.value,
+    wizard: wizardStart.value ? "place" : sceneWizardStart.value ? "scene" : lensWizardFor.value ? "lens" : "",
+    q: treeQuery.value.trim(),
+    statuses: [...treeStatuses.value],
+  };
+}
+function writeStudioUrl(forceReplace = false) {
+  if (!studioUrlReady || applyingUrl || !inStudioRoute()) return;
+  const st = currentStudioState();
+  if (st.topicId && !form.value) return; // a world is still loading
+  const root = form.value?.rootSceneId || "";
+  const target = buildStudioLocation(st, { rootSceneId: root });
+  if (sameLocation(target, route)) return;
+  const cur = parseStudioLocation(route);
+  const navigated = cur.topicId !== st.topicId || (cur.sceneId || root) !== (st.sceneId || root);
+  if (navigated && !forceReplace) router.push(target);
+  else router.replace(target);
+}
+watch(
+  [selectedId, selectedSceneId, selectedSpotId, treeQuery, treeStatuses, wizardStart, sceneWizardStart, lensWizardFor, form],
+  () => writeStudioUrl(),
+  { flush: "post" }
+);
+
+function applyStudioUrl() {
+  if (!inStudioRoute()) return;
+  const want = parseStudioLocation(route);
+  if (want.topicId && want.topicId !== selectedId.value) {
+    if (!topics.value.some((t) => t.id === want.topicId)) {
+      error.value = "That world isn't in the studio any more.";
+      router.replace(buildStudioLocation({ topicId: selectedId.value }, { rootSceneId: form.value?.rootSceneId || "" }));
+      return;
+    }
+    if (dirty.value) {
+      error.value = "Save or discard your changes before switching worlds.";
+      writeStudioUrl(true);
+      return;
+    }
+    selectedId.value = want.topicId;
+    loadSelected();
+  }
+  if (!form.value) return;
+  if (want.topicId) {
+    const root = form.value.rootSceneId;
+    const sceneId = want.sceneId || root;
+    selectedSceneId.value = form.value.scenes[sceneId] ? sceneId : root;
+    // the scene change clears the spot on the next flush; set it after that
+    applyingUrl = true;
+    nextTick(() => {
+      const sc = form.value?.scenes?.[selectedSceneId.value];
+      selectedSpotId.value = want.spot && sc?.hotspots?.some((h) => h.id === want.spot) ? want.spot : "";
+      applyingUrl = false;
+      nextTick(() => writeStudioUrl(true)); // settle the address on what was really applied
+    });
+  }
+  if (treeQuery.value.trim() !== want.q) treeQuery.value = want.q;
+  if ([...treeStatuses.value].sort().join() !== [...want.statuses].sort().join()) treeStatuses.value = new Set(want.statuses);
+  if (want.wizard === "place" && !wizardStart.value && isGlobeForm.value) openWizard();
+  else if (want.wizard === "scene" && !sceneWizardStart.value) openSceneWizard();
+  else if (want.wizard === "lens" && !lensWizardFor.value) openLensWizard();
+  else if (!want.wizard) { wizardStart.value = null; sceneWizardStart.value = null; lensWizardFor.value = ""; }
+}
+watch(() => route.fullPath, () => { if (studioUrlReady) applyStudioUrl(); });
+
+// "Open as child": the same place as a child sees it
+const childLink = computed(() => (selectedScene.value ? childLinkFor(selectedId.value, selectedSceneId.value, form.value.rootSceneId, selectedSpotId.value) : ""));
 </script>
 
 <template>
@@ -2742,6 +2828,7 @@ function confirmDeleteScene(withDeeper) {
             <textarea v-model="selectedScene.artPrompt" rows="3"></textarea>
           </label>
 
+          <p v-if="childLink" class="open-child"><a :href="childLink" target="_blank" rel="noopener">Open as child ↗</a> <small>— this scene as a child sees it (drafts preview for you)</small></p>
           <h3 class="pane-title">{{ isHubScene ? `Places on the globe (${selectedScene.hotspots.length})` : `Spots on this picture (${selectedScene.hotspots.length})` }}</h3>
           <div
             v-for="(spot, spotIndex) in selectedScene.hotspots"
@@ -3014,6 +3101,9 @@ function confirmDeleteScene(withDeeper) {
 </template>
 
 <style scoped>
+.open-child { margin: 0.2rem 0 0.4rem; font-size: 0.85rem; }
+.open-child a { font-weight: 700; color: #6D28D9; }
+.open-child small { color: #6b7280; }
 .studio { display: flex; flex-direction: column; gap: 1rem; }
 
 .create { display: flex; flex-direction: column; gap: 0.75rem; padding: 1rem 1.25rem; }

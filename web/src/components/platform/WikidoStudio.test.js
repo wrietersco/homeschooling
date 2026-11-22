@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
+import { createRouter, createMemoryHistory } from "vue-router";
 
 // jsdom has no ResizeObserver — the cover-placement composable degrades
 // gracefully without it, but the global must exist.
@@ -71,8 +72,17 @@ import WikidoStudio from "./WikidoStudio.vue";
 import WikidoGlobeEditor from "./WikidoGlobeEditor.vue";
 import { suggestWikidoScenes, addWikidoChildScene, planWikidoOutline, saveWikidoTopic, deleteWikidoTopic, fetchAllWikidoTopicsAdmin, adjustWikidoSpots, adjustWikidoAllSpots, planWikidoDepth, planWikidoRelinks, planVoiceoverClips, generateWikidoAudios, generateWikidoKokoroAudios, requestWikidoKokoroJob, stopWikidoKokoroJob, getWikidoKokoroJob, checkVoiceoverBridge, synthesizeOnBridge, attachWikidoAudio, startVoiceoverBridge, bridgeLauncherStatus } from "@/services/wikidoAdmin";
 
-async function mountStudio() {
-  const w = mount(WikidoStudio);
+// The studio mirrors its selection into the address (see lib/wikido/studioUrl.js),
+// so it mounts inside a router sitting on /platform/wikido.
+async function mountStudio(path = "/platform/wikido") {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: "/platform/:section?/:topicId?/:sceneId?", component: { template: "<div />" } }],
+  });
+  await router.push(path);
+  await router.isReady();
+  const w = mount(WikidoStudio, { global: { plugins: [router] } });
+  w.router = router;
   await flushPromises();
   return w;
 }
@@ -975,6 +985,40 @@ describe("WikidoStudio — visual spot placement", () => {
     expect(adjustWikidoAllSpots).toHaveBeenCalledWith({ topicId: "space" });
     expect(w.findAll(".pin")[0].attributes("style")).not.toBe(before);
     expect(w.text()).toMatch(/Auto-adjusted 1 scene \(2 spots placed\); skipped 1 without generated artwork\./);
+    w.unmount();
+  });
+});
+
+describe("WikidoStudio deep links", () => {
+  it("opens cold on the scene and spot named in the address, with an Open-as-child link", async () => {
+    const w = await mountStudio("/platform/wikido/space/galaxy-scene?spot=milky");
+    await flushPromises();
+    expect(w.find(".grow .pane-title").text()).toContain("What is a Galaxy?");
+    expect(w.find(".spot.selected").exists()).toBe(true);
+    expect(w.find(".open-child a").attributes("href")).toBe("/wikido/space/galaxy-scene?card=milky");
+    w.unmount();
+  });
+
+  it("an unknown scene lands on the world's entrance; an unknown world is explained", async () => {
+    const w = await mountStudio("/platform/wikido/space/nope");
+    await flushPromises();
+    expect(w.find(".grow .pane-title").text()).toContain("The Universe");
+    w.unmount();
+    const w2 = await mountStudio("/platform/wikido/ghost-world");
+    await flushPromises();
+    expect(w2.text()).toContain("isn't in the studio any more");
+    expect(w2.router.currentRoute.value.path).toBe("/platform/wikido/space");
+    w2.unmount();
+  });
+
+  it("selecting a scene or spot writes the address; Back returns", async () => {
+    const w = await mountStudio("/platform/wikido/space");
+    await flushPromises();
+    expect(w.router.currentRoute.value.path).toBe("/platform/wikido/space");
+    await w.findAll(".pin")[0].trigger("pointerdown");
+    await w.findAll(".pin")[0].trigger("pointerup");
+    await flushPromises();
+    expect(w.router.currentRoute.value.query.spot).toBe("galaxy");
     w.unmount();
   });
 });
