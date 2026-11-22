@@ -972,8 +972,12 @@ function revealScene(id) {
   hidden.forEach((a) => next.delete(a));
   setCollapsed(next);
 }
+function cssEsc(v) {
+  const t = String(v ?? "");
+  return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(t) : t.replace(/["\\]/g, "\\$&");
+}
 function scrollSceneIntoView(id = selectedSceneId.value) {
-  nextTick(() => document.querySelector(`[data-scene-row="${CSS.escape(id)}"]`)?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }));
+  nextTick(() => document.querySelector(`[data-scene-row="${cssEsc(id)}"]`)?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }));
 }
 function jumpToSelected() {
   clearTreeFilters();
@@ -1005,7 +1009,7 @@ function onTreeKey(e) {
     toggleCollapse(act.collapse || act.expand);
   } else if (act.select) {
     selectScene(act.select);
-    nextTick(() => document.querySelector(`[data-scene-row="${CSS.escape(act.select)}"] .scene-main`)?.focus());
+    nextTick(() => document.querySelector(`[data-scene-row="${cssEsc(act.select)}"] .scene-main`)?.focus());
   }
 }
 
