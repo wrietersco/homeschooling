@@ -8,6 +8,7 @@ import SubscriptionAdmin from "@/components/SubscriptionAdmin.vue";
 import UserAccountsAdmin from "@/components/UserAccountsAdmin.vue";
 import FamilyGrantsPanel from "@/components/FamilyGrantsPanel.vue";
 import WikidoStudio from "@/components/platform/WikidoStudio.vue";
+import ModelPicker from "@/components/platform/ModelPicker.vue";
 import {
   listFamilies, setFamilyStatus, listFamilyMembers,
   setMemberRole, removeMember, deleteFamily,
@@ -179,6 +180,7 @@ const llmSaving = ref(false);
 const llmSaved = ref(false);
 const llmError = ref("");
 const modelCatalog = ref({ text: [], tts: [], image: [], live: [], liveOther: [], voices: [] });
+const providerKeys = ref(null); // { gemini, openai, anthropic } booleans from the server; null until loaded
 const livePricing = ref({ source: "", checkedAt: "", unit: "", sessionNote: "" });
 const pricingMeta = ref({ checkedAt: "", sources: {} });
 const meteredPricing = ref({ text: {}, tts: {}, image: {} });
@@ -353,6 +355,32 @@ function syncLiveCapabilities(k) {
 // Switching the Learning-mode model may invalidate its thinking level.
 function onLearnModelChange(k) { syncLiveCapabilities(k); }
 // Switching a TTS agent's model may invalidate its voice — snap to a valid one.
+// ── Searchable model dropdown (ModelPicker) ──────────────────────────────────
+// Every provider's models are listed; an agent that can't switch provider only
+// allows Gemini (the rest show greyed out with the reason). Picking a model from
+// another provider on a switchable agent flips its provider to match.
+function pickerModels(k) {
+  const kind = agentMeta(k).kind;
+  return modelCatalog.value[kind] || modelCatalog.value.text || [];
+}
+function pickerAllowed(k) {
+  const kind = agentMeta(k).kind;
+  if (kind === "tts") return ["gemini", "openai"]; // Anthropic has no speech API
+  if (kind === "text") return providerSwitchable(k) ? null : ["gemini"];
+  return null;
+}
+function providerForId(id) {
+  if (/^claude-/i.test(id)) return "anthropic";
+  if (!/gemini/i.test(id) && /^(gpt-|o[0-9]|chatgpt|ft:|tts-1)/i.test(id)) return "openai";
+  return "gemini";
+}
+function onPickModel(k, m) {
+  const a = llmAgents.value[k];
+  if (!a) return;
+  const kind = agentMeta(k).kind;
+  if (providerSwitchable(k) && (kind === "text" || kind === "tts")) a.provider = m?.provider || providerForId(a.model || "");
+  onAgentModelChange(k);
+}
 function onAgentModelChange(k) {
   const kind = agentMeta(k).kind;
   if (kind === "live") syncLiveCapabilities(k);
@@ -389,6 +417,7 @@ async function loadModelCatalog() {
   try {
     const res = await getModelCatalog();
     modelCatalog.value = res.catalog || modelCatalog.value;
+    providerKeys.value = res.providerKeys || providerKeys.value;
     // The catalog is what says which features a model has, so reconcile the
     // already-loaded config with it (either load can finish first).
     for (const k of llmKeys.value) syncLiveCapabilities(k);
@@ -1558,18 +1587,7 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
         <div class="llm-card card">
           <h3 class="llm-h">Global default</h3>
           <p class="llm-desc muted">Used wherever an agent doesn't set its own value.</p>
-          <label>Model ID
-            <input v-model="llmDefault.model" type="text" placeholder="gemini-2.5-flash" />
-          </label>
-          <div v-if="modelById('text', llmDefault.model)" class="model-detail compact">
-            <div class="md-chips">
-              <span class="md-chip"><span class="md-chip-l">Cost</span>{{ modelById('text', llmDefault.model).cost }}</span>
-              <span class="md-chip"><span class="md-chip-l">Speed</span>{{ modelById('text', llmDefault.model).speed }}</span>
-              <span class="md-chip"><span class="md-chip-l">Price</span>{{ modelById('text', llmDefault.model).pricing }}</span>
-            </div>
-            <p class="md-when"><span class="md-when-l">When to use</span> {{ modelById('text', llmDefault.model).whenToUse }}</p>
-          </div>
-          <small v-else class="md-custom">Custom model ID — not in the curated catalog.</small>
+          <ModelPicker v-model="llmDefault.model" label="Model" :models="modelCatalog.text" :keys="providerKeys" />
           <div class="llm-row">
             <label>Temperature <span class="range-val">({{ llmDefault.temperature }})</span>
               <input v-model.number="llmDefault.temperature" type="range" min="0" max="2" step="0.05" />
@@ -1601,7 +1619,12 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
             <small v-else>Run this agent on Google Gemini, OpenAI, or Anthropic Claude. OpenAI/Claude are billed per use; require the <code>OPENAI_API_KEY</code> / <code>ANTHROPIC_API_KEY</code> secret respectively.</small>
           </label>
 
-          <label>Model ID
+          <ModelPicker
+            v-if="agentMeta(k).kind !== 'live' && pickerModels(k).length"
+            v-model="llmAgents[k].model" label="Model" :models="pickerModels(k)" :keys="providerKeys" :allowed="pickerAllowed(k)"
+            @select="onPickModel(k, $event)"
+          />
+          <label v-else>Model ID
             <select v-if="catalogFor(k).length" v-model="llmAgents[k].model" @change="onAgentModelChange(k)">
               <option v-for="m in catalogFor(k)" :key="m.id" :value="m.id">
                 {{ m.label }}{{ m.recommended ? ' ★' : '' }} — {{ m.id }}{{ m.availability?.state === 'unavailable' ? ' — UNAVAILABLE' : m.availability?.state === 'deprecating' ? ' — SHUTTING DOWN' : '' }}
