@@ -123,7 +123,10 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
-    path: "/platform",
+    // /platform (default section) and /platform/<section>[/…]: see lib/platformNav.js.
+    // topicId/sceneId are for the Wikido Studio section. One record, so moving
+    // between sections never remounts the view.
+    path: "/platform/:section?/:topicId?/:sceneId?",
     name: "platform",
     component: () => import("@/views/PlatformView.vue"),
     meta: { requiresAuth: true, role: "superadmin" },

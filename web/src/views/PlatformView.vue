@@ -1,5 +1,7 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { sectionFromSlug, sectionLocation } from "@/lib/platformNav";
 import { collection, doc, getDocs, onSnapshot, orderBy, query } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import SubscriptionAdmin from "@/components/SubscriptionAdmin.vue";
@@ -17,7 +19,20 @@ import {
 } from "@/services/admin";
 
 // ── Tabs ─────────────────────────────────────────────────────────────────────
-const tab = ref("families");
+// The URL is the source of truth for the section (and the family being looked
+// at): refresh, Back/Forward and shared links all land on the same page.
+const route = useRoute();
+const router = useRouter();
+const tab = computed({
+  get: () => sectionFromSlug(route.params.section) || "families",
+  set: (id) => router.push(sectionLocation(id)),
+});
+// merge small bits of sub-state (?family=, ?q=, ?status=) into the address bar
+function setQuery(patch) {
+  const q = { ...route.query };
+  for (const [k, v] of Object.entries(patch)) { if (v) q[k] = v; else delete q[k]; }
+  router.replace({ path: route.path, query: q });
+}
 const navGroups = [
   { label: "People & access", items: [{ id: "families", label: "Families", icon: "family", description: "A clear view of every family, their members, and account access." }, { id: "subscriptions", label: "Plans & subscriptions", icon: "card", description: "Review family learning-package requests, manage learning access, and set prices and support allowances." }, { id: "users", label: "User accounts", icon: "user", description: "Manage accounts, passwords, and individual access." }] },
   { label: "Insights & controls", items: [{ id: "usage", label: "Usage & health", icon: "chart", description: "Understand activity, usage trends, and service health." }, { id: "costs", label: "Cost reports", icon: "wallet", description: "Track your platform spending and costs by family." }, { id: "quota", label: "Provider capacity", icon: "sliders", description: "Set shared provider capacity and platform reserves." }] },
@@ -25,16 +40,22 @@ const navGroups = [
 ];
 const currentSection = computed(() => navGroups.flatMap((g) => g.items).find((i) => i.id === tab.value));
 const iconPaths = { family: "M3 20v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6M17 5a3 3 0 0 1 0 6m1 3a4 4 0 0 1 3 4v2", user: "M20 21v-2a7 7 0 0 0-14 0v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8", card: "M3 5h18v14H3zM3 10h18M7 15h3", chart: "M4 3v17h17M8 15v-4m5 4V6m5 9V9", wallet: "M3 5h17v15H3zM3 8h17m-5 5h6v4h-6z", sliders: "M5 3v5m0 4v9M12 3v10m0 4v4M19 3v2m0 4v12M2 8h6m1 9h6m1-12h6", spark: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z", grid: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z", book: "M12 5c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v15" };
-function selectSection(id) {
-  if (id === "usage") openUsageTab(); else if (id === "quota") openQuotaTab(); else if (id === "costs") openCostsTab(); else if (id === "qaida") openQaidaTab(); else tab.value = id;
+function selectSection(id) { tab.value = id; }
+// entering a section (by click, link, refresh or Back) loads what it shows
+function enterSection(id) {
+  if (id === "usage") openUsageTab(); else if (id === "quota") openQuotaTab(); else if (id === "costs") openCostsTab(); else if (id === "qaida") openQaidaTab();
 }
+watch(tab, enterSection, { immediate: true });
+// an unknown /platform/<slug> settles on the default section
+watch(() => route.params.section, (slug) => { if (slug && !sectionFromSlug(slug)) router.replace(sectionLocation("families")); }, { immediate: true });
 
 // ── Families ─────────────────────────────────────────────────────────────────
 const families = ref([]);
 const familiesLoading = ref(false);
 const familiesError = ref("");
 const expanded = ref({});
-const familySearch = ref(""), familyFilter = ref("all");
+const familySearch = ref(String(route.query.q || "")), familyFilter = ref(["active", "disabled"].includes(route.query.status) ? route.query.status : "all");
+watch([familySearch, familyFilter], ([q, st]) => { if (tab.value === "families") setQuery({ q: q.trim(), status: st === "all" ? "" : st }); });
 const activeFamilyCount = computed(() => families.value.filter((f) => f.status === "active").length);
 const totalMembers = computed(() => families.value.reduce((n, f) => n + Number(f.memberCount || 0), 0));
 const filteredFamilies = computed(() => families.value.filter((f) => (familyFilter.value === "all" || f.status === familyFilter.value) && `${f.name} ${f.id}`.toLowerCase().includes(familySearch.value.trim().toLowerCase())));
@@ -46,6 +67,9 @@ async function loadFamilies() {
   try {
     const res = await listFamilies();
     families.value = res.families;
+    const wanted = String(route.query.family || "");
+    const fam = tab.value === "families" && wanted && res.families.find((f) => f.id === wanted);
+    if (fam && !expanded.value[fam.id]) toggleExpand(fam);
   } catch (e) {
     familiesError.value = e?.message || "Could not load families.";
   } finally {
@@ -69,9 +93,11 @@ const toggleGrants = (fam) => { grantsOpen.value[fam.id] = !grantsOpen.value[fam
 async function toggleExpand(fam) {
   if (expanded.value[fam.id]) {
     delete expanded.value[fam.id];
+    if (route.query.family === fam.id) setQuery({ family: "" });
     return;
   }
   expanded.value[fam.id] = { loading: true, members: [], error: "" };
+  if (tab.value === "families") setQuery({ family: fam.id });
   try {
     const res = await listFamilyMembers(fam.id);
     expanded.value[fam.id] = { loading: false, members: res.members, error: "" };
@@ -572,7 +598,6 @@ const qaidaJobActive = computed(() => ["queued", "running"].includes(qaidaJob.va
 const qaidaJobStopped = computed(() => ["error", "cancelled", "paused"].includes(qaidaJob.value?.status));
 
 function openQaidaTab() {
-  tab.value = "qaida";
   if (!qaida.value.totalLessons && !qaidaLoading.value) loadQaida();
   if (!modelCatalog.value.tts?.length && !modelLoading.value) loadModelCatalog(); // for plan model pickers
   watchQaidaJob();
@@ -829,7 +854,6 @@ const usageLoading = ref(false);
 const usageError = ref("");
 
 function openUsageTab() {
-  tab.value = "usage";
   loadUsage();
 }
 async function loadUsage() {
@@ -857,7 +881,6 @@ const quotaError = ref("");
 const quotaMsg = ref("");
 
 function openQuotaTab() {
-  tab.value = "quota";
   loadQuota();
 }
 async function loadQuota() {
@@ -920,7 +943,6 @@ function breakdownRows(map) {
 }
 
 function openCostsTab() {
-  tab.value = "costs";
   if (!costOverview.value && !costLoading.value) loadCostOverview();
 }
 
@@ -932,6 +954,10 @@ async function loadCostOverview() {
     const res = await getCostOverview(costMonth.value || undefined);
     costOverview.value = res;
     costMonth.value = res.month;
+    // a shared link names a family: open its detail
+    const wanted = tab.value === "costs" ? String(route.query.family || "") : "";
+    const fam = wanted && res.families.find((f) => f.familyId === wanted);
+    if (fam) openFamilyCost(fam);
   } catch (e) {
     costError.value = e?.message || "Could not load costs.";
   } finally {
@@ -940,6 +966,7 @@ async function loadCostOverview() {
 }
 
 async function openFamilyCost(fam) {
+  if (tab.value === "costs") setQuery({ family: fam.familyId });
   costDetail.value = { familyId: fam.familyId, name: fam.name, loading: true };
   try {
     const res = await getFamilyCostDetail({ familyId: fam.familyId, month: costMonth.value });
@@ -1253,7 +1280,7 @@ onUnmounted(() => { if (qaidaJobUnsub) { qaidaJobUnsub(); qaidaJobUnsub = null; 
         <div v-if="costDetail" class="card cost-detail">
           <div class="detail-head">
             <h3 class="llm-h">{{ costDetail.name }} <code class="fam-id">{{ costDetail.familyId }}</code></h3>
-            <button class="linkish" @click="costDetail = null">Close</button>
+            <button class="linkish" @click="costDetail = null; setQuery({ family: '' })">Close</button>
           </div>
           <p v-if="costDetail.loading" class="muted sm-text">Loading detail…</p>
           <p v-else-if="costDetail.error" class="error sm-text">{{ costDetail.error }}</p>
