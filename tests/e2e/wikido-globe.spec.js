@@ -262,6 +262,7 @@ test("superadmin curates a globe world: pin bar, hub pad, and coordinate editing
 
   // the globe workspace shows the pin bar; the hub opens with the live globe editor
   await expect(page.locator(".pin-place")).toBeVisible();
+  await page.locator(".pin-place .advanced summary").click();
   await expect(page.locator(".pin-place input")).toBeVisible();
   await expect(page.locator(".wd-e")).toBeVisible();
   await expect(page.locator(".wd-e-pin")).toHaveCount(3);
