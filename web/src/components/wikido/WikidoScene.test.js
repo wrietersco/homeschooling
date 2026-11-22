@@ -219,3 +219,32 @@ describe("WikidoScene", () => {
     }
   });
 });
+
+describe("WikidoScene deep-link state", () => {
+  it("opens the card named by cardId and follows the URL when it changes", async () => {
+    const w = mount(WikidoScene, { props: { topic: pack, scene: rootScene, cardId: "signs-of-life" } });
+    expect(w.find(".wd-info").exists()).toBe(true);
+    await w.setProps({ cardId: "" });
+    expect(w.find(".wd-info").exists()).toBe(false);
+    expect(w.emitted("card")).toBeUndefined();
+  });
+
+  it("reports opening a card, and folds the narration panel from ?intro=", async () => {
+    const w = mount(WikidoScene, { props: { topic: pack, scene: rootScene, intro: false } });
+    expect(w.find(".wd-narration").exists()).toBe(false);
+    await w.find(".wd-hot").trigger("click");
+    expect(w.emitted("card")?.at(-1)?.[0]).toBe(rootScene.hotspots[0].id);
+    await w.find(".wd-intro-head").trigger("click");
+    expect(w.emitted("intro")?.at(-1)).toEqual([true]);
+  });
+
+  it("shows Copy link only when the view provides sharing", async () => {
+    const { WIKIDO_SHARE } = await import("@/lib/wikido/urlState");
+    const bare = mount(WikidoScene, { props: { topic: pack, scene: rootScene } });
+    expect(bare.find('button[aria-label="Copy link to this place"]').exists()).toBe(false);
+    const share = vi.fn();
+    const w = mount(WikidoScene, { props: { topic: pack, scene: rootScene }, global: { provide: { [WIKIDO_SHARE]: share } } });
+    await w.find('button[aria-label="Copy link to this place"]').trigger("click");
+    expect(share).toHaveBeenCalledWith({});
+  });
+});

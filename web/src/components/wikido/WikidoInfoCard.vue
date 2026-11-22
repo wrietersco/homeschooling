@@ -4,9 +4,10 @@
 // leads somewhere deeper — the big "Step inside" call to action. A cross-topic
 // doorway names the world it opens instead, or explains the door is dormant
 // when that world isn't published yet.
-import { computed } from "vue";
+import { computed, inject } from "vue";
 import SpeakButton from "@/components/SpeakButton.vue";
 import { resolveWikidoAudioUrl } from "@/lib/wikido/audio";
+import { WIKIDO_SHARE } from "@/lib/wikido/urlState";
 
 const props = defineProps({
   spot: { type: Object, required: true },
@@ -18,6 +19,7 @@ const props = defineProps({
   openable: { type: Boolean, default: true },
 });
 const emit = defineEmits(["close", "enter"]);
+const share = inject(WIKIDO_SHARE, null);
 
 const isDoor = computed(() => Boolean(props.spot.childSceneId));
 const spoken = computed(() =>
@@ -36,9 +38,14 @@ const enterLabel = computed(() => (props.cross ? `Step into ${props.crossTitle |
         <span class="material-symbols-rounded" aria-hidden="true">{{ cross ? "travel_explore" : isDoor ? "door_open" : "search" }}</span>
         {{ cross ? "A doorway to another world" : isDoor ? "You can go inside" : "Take a look" }}
       </span>
-      <button type="button" class="wd-close" aria-label="Close" @click="emit('close')">
-        <span class="material-symbols-rounded">close</span>
-      </button>
+      <span class="wd-head-actions">
+        <button v-if="share" type="button" class="wd-share" aria-label="Copy link to this card" title="Copy link" @click="share({ withCard: true })">
+          <span class="material-symbols-rounded">share</span>
+        </button>
+        <button type="button" class="wd-close" aria-label="Close" @click="emit('close')">
+          <span class="material-symbols-rounded">close</span>
+        </button>
+      </span>
     </header>
 
     <h2 class="wd-info-title">{{ spot.info.title }}</h2>
@@ -94,7 +101,8 @@ const enterLabel = computed(() => (props.cross ? `Step into ${props.crossTitle |
 .wd-kind .material-symbols-rounded { font-size: 14px; }
 .wd-kind.deeper { color: #9A3412; background: #FED7AA; }
 .wd-kind.world { color: #92400E; background: #FDE68A; }
-.wd-close {
+.wd-head-actions { display: inline-flex; align-items: center; gap: 0.15rem; }
+.wd-close, .wd-share {
   border: none;
   background: none;
   cursor: pointer;
@@ -104,8 +112,8 @@ const enterLabel = computed(() => (props.cross ? `Step into ${props.crossTitle |
   display: grid;
   place-items: center;
 }
-.wd-close:hover { background: #F3E8FF; color: #4C1D95; }
-.wd-close .material-symbols-rounded { font-size: 20px; }
+.wd-close:hover, .wd-share:hover { background: #F3E8FF; color: #4C1D95; }
+.wd-close .material-symbols-rounded, .wd-share .material-symbols-rounded { font-size: 20px; }
 
 .wd-info-title { margin: 0; font-size: 1.45rem; line-height: 1.15; }
 .wd-info-para { margin: 0; font-size: 0.95rem; line-height: 1.5; color: #4B5563; }

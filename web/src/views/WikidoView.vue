@@ -10,11 +10,13 @@
 // segment, landing on the target scene with its own ancestors as trail.
 // Breadcrumbs span the whole journey, so a crumb from the previous world steps
 // back across worlds.
-import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { computed, onBeforeUnmount, provide, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import {
+  WIKIDO_SHARE, buildWikidoLocation, coldJourneySegment, parseWikidoLocation, resolveWikidoTarget,
+} from "@/lib/wikido/urlState";
 import { listWikidoTopics, getWikidoTopic, loadWikidoTopic, fetchCloudTopics } from "@/services/wikido";
 import { sortStudioTopics } from "@/services/wikidoAdmin";
-import { ancestorChain } from "@/lib/wikido/tree";
 import { useWikidoProgress } from "@/lib/wikido/progress";
 import { useSpeech } from "@/composables/useSpeech";
 import { useAuthStore } from "@/stores/auth";
@@ -25,7 +27,15 @@ import { isGlobeHub } from "../../../functions/lib/wikidoGlobe.js";
 import WikidoGate from "@/components/wikido/WikidoGate.vue";
 import WikidoMusic from "@/components/wikido/WikidoMusic.vue";
 
+// The URL is the single source of truth for WHERE the child is (world, scene,
+// open card, globe camera, narration panel): every navigation pushes a route,
+// and the journey below is rebuilt from the route — so a shared link, a
+// refresh and the browser's Back/Forward all land on exactly the same state.
+// Auth needs no special handling: the route is public and WikidoGate signs
+// visitors in place, without leaving the URL.
 const router = useRouter();
+const route = useRoute();
+const loc = computed(() => parseWikidoLocation(route));
 const auth = useAuthStore();
 const { countSeen } = useWikidoProgress();
 const { stop } = useSpeech();
@@ -106,16 +116,115 @@ async function resolvePack(topicId) {
   return pack;
 }
 
-async function openTopic(summary) {
-  if (opening.value) return;
+// ── friendly notices + share ─────────────────────────────────────────────────
+const toast = ref("");
+let toastTimer = 0;
+let camTimer = 0;
+function notify(message) {
+  toast.value = message;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.value = ""; }, 4500);
+}
+
+const rootOf = (topicId) => packsById.value.get(topicId)?.rootSceneId || "";
+const locationFor = (state) => buildWikidoLocation(state, { rootSceneId: rootOf(state.topicId) });
+const wrapLng = (lng) => ((((lng + 180) % 360) + 360) % 360) - 180;
+
+// "Copy link": the Web Share sheet on phones, the clipboard everywhere else.
+// `camera` (globe) pins the exact view; `withCard` keeps the open card in it.
+async function share({ withCard = false, camera = null } = {}) {
+  const cur = loc.value;
+  const at = camera ? { lat: camera.lat, lng: wrapLng(camera.lng), zoom: camera.zoom } : cur.at;
+  const target = locationFor({ ...cur, card: withCard ? cur.card : "", at, intro: null });
+  const url = new URL(router.resolve(target).href, window.location.origin).href;
+  const coarse = window.matchMedia?.("(pointer: coarse)")?.matches;
+  if (coarse && navigator.share) {
+    try {
+      await navigator.share({ title: topic.value?.title ? `${topic.value.title} — Wikido` : "Wikido", url });
+      return;
+    } catch (e) {
+      if (e?.name === "AbortError") return; // the child closed the share sheet
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    notify("Link copied");
+  } catch {
+    window.prompt("Copy this link", url);
+  }
+}
+provide(WIKIDO_SHARE, share);
+
+// ── route → journey ──────────────────────────────────────────────────────────
+// Put `sceneId` on screen: stepping back along the journey trims it, a doorway
+// from the current scene extends it, and anything else (a cold open, Forward)
+// rebuilds the trail from the scene's natural ancestors.
+function placeScene(pack, sceneId) {
+  const j = journey.value;
+  let cut = null;
+  j.forEach((seg, si) => seg.scenes.forEach((id, ii) => {
+    if (seg.topicId === pack.id && id === sceneId) cut = { si, ii };
+  }));
+  if (cut) {
+    const atEnd = cut.si === j.length - 1 && cut.ii === j[cut.si].scenes.length - 1;
+    if (!atEnd) {
+      journey.value = j.slice(0, cut.si + 1).map((seg, i) => (i === cut.si ? { ...seg, scenes: seg.scenes.slice(0, cut.ii + 1) } : seg));
+    }
+    return;
+  }
+  const last = segment.value;
+  const here = last ? packsById.value.get(last.topicId)?.scenes[last.scenes.at(-1)] : null;
+  if (last && last.topicId === pack.id && here?.hotspots.some((h) => h.childSceneId === sceneId && !h.childTopicId)) {
+    journey.value = [...j.slice(0, -1), { ...last, scenes: [...last.scenes, sceneId] }];
+    return;
+  }
+  if (last && here?.hotspots.some((h) => h.childTopicId === pack.id && h.childSceneId === sceneId)) {
+    journey.value = [...j, coldJourneySegment(pack, sceneId)]; // a cross-topic doorway
+    return;
+  }
+  journey.value = [coldJourneySegment(pack, sceneId)];
+}
+
+let syncId = 0;
+async function syncRoute() {
+  const id = ++syncId;
+  clearTimeout(camTimer); // a camera note from the previous place must not stick to this one
+  if (!auth.user) return; // the gate is up; this re-runs once the visitor is in
+  const { topicId, sceneId, card } = loc.value;
+  if (!topicId) {
+    if (journey.value.length) { stop(); journey.value = []; }
+    return;
+  }
   opening.value = true;
   try {
-    const pack = await resolvePack(summary.id);
-    if (!pack) return; // validation errors already shouted in the console
-    journey.value = [{ topicId: pack.id, scenes: [pack.rootSceneId] }];
+    const pack = await resolvePack(topicId);
+    if (id !== syncId) return;
+    if (!pack) {
+      notify("That world isn't open right now — here are all the worlds.");
+      router.replace(locationFor({}));
+      return;
+    }
+    const target = resolveWikidoTarget(pack, { sceneId, card });
+    if (target.notice) notify(target.notice);
+    if (target.sceneId !== (sceneId || pack.rootSceneId) || target.card !== card) {
+      // a stale or switched-off link: settle the address bar on the nearest valid place
+      router.replace(locationFor({ ...loc.value, topicId, sceneId: target.sceneId, card: target.card }));
+    }
+    placeScene(pack, target.sceneId);
   } finally {
-    opening.value = false;
+    if (id === syncId) opening.value = false;
   }
+}
+watch(
+  () => `${loc.value.topicId}|${loc.value.sceneId}|${auth.user ? 1 : 0}`,
+  syncRoute,
+  { immediate: true }
+);
+
+// ── actions: each real navigation pushes a route ─────────────────────────────
+function openTopic(summary) {
+  if (opening.value) return;
+  router.push(locationFor({ topicId: summary.id }));
 }
 
 function enter(spot) {
@@ -126,61 +235,79 @@ function enter(spot) {
     return;
   }
   if (topic.value.scenes[spot.childSceneId]) {
-    journey.value = [
-      ...journey.value.slice(0, -1),
-      { ...segment.value, scenes: [...segment.value.scenes, spot.childSceneId] },
-    ];
+    router.push(locationFor({ topicId: topic.value.id, sceneId: spot.childSceneId }));
   }
 }
 
-// Step through a cross-topic doorway: load the other world (bundled packs
-// resolve on the spot; studio topics come from Firestore) and land on the
-// target scene with its own ancestors as the trail back to that world's root.
+// Step through a cross-topic doorway: load the other world first (bundled packs
+// resolve on the spot; studio topics come from Firestore), then go there. A
+// world that vanished leaves the child where they are.
 async function enterWorld(worldId, sceneId) {
   if (opening.value) return;
   opening.value = true;
   try {
     const pack = await resolvePack(worldId);
     if (!pack?.scenes[sceneId]) {
-      // the world vanished or failed to load — stay put; dropping it from the
-      // directory turns the doorway into an explained dormant door
+      // dropping it from the directory turns the doorway into an explained dormant door
       const next = new Set(doorFailures.value);
       next.add(worldId);
       doorFailures.value = next;
       return;
     }
-    journey.value = [...journey.value, { topicId: worldId, scenes: [...ancestorChain(pack.scenes, sceneId), sceneId] }];
   } finally {
     opening.value = false;
   }
+  router.push(locationFor({ topicId: worldId, sceneId }));
 }
 
 function navigate(target) {
-  let cut = null;
-  journey.value.forEach((seg, si) => {
-    seg.scenes.forEach((sceneId, ii) => {
-      if (seg.topicId === target.topicId && sceneId === target.sceneId) cut = { si, ii };
-    });
-  });
-  if (!cut) return;
-  journey.value = journey.value
-    .slice(0, cut.si + 1)
-    .map((seg, i) => (i === cut.si ? { ...seg, scenes: seg.scenes.slice(0, cut.ii + 1) } : seg));
+  router.push(locationFor({ topicId: target.topicId, sceneId: target.sceneId }));
 }
 
 function exit() {
   stop();
-  journey.value = [];
+  router.push(locationFor({}));
 }
 
-onBeforeUnmount(() => stop());
+// open card: push when one opens or closes (Back closes it), replace when it
+// merely switches to another card
+function onCard(cardId) {
+  const cur = loc.value;
+  if (!cur.topicId || cardId === cur.card) return;
+  const next = locationFor({ ...cur, card: cardId });
+  if (cur.card && cardId) router.replace(next);
+  else router.push(next);
+}
+function onIntro(open) {
+  if (loc.value.topicId) router.replace(locationFor({ ...loc.value, intro: open }));
+}
+// the globe camera moves constantly: remember it in the address bar (replace —
+// never history), debounced so a drag is one write
+function onCamera(camera) {
+  clearTimeout(camTimer);
+  camTimer = setTimeout(() => {
+    if (!loc.value.topicId) return;
+    router.replace(locationFor({ ...loc.value, at: { lat: camera.lat, lng: wrapLng(camera.lng), zoom: camera.zoom } }));
+  }, 400);
+}
+
+onBeforeUnmount(() => {
+  stop();
+  clearTimeout(camTimer);
+  clearTimeout(toastTimer);
+});
 </script>
 
 <template>
   <div class="wikido">
     <!-- ── session resolving: hold the backdrop so a signed-in visitor never
              sees the sign-in gate flash before Firebase reports the session ── -->
-    <div v-if="!auth.initialized" class="wd-wait" role="status" aria-label="Opening Wikido">
+    <div
+      v-if="!auth.initialized || (auth.user && loc.topicId && !topic && opening)"
+      class="wd-wait"
+      role="status"
+      aria-label="Opening Wikido"
+    >
       <span class="material-symbols-rounded wd-wait-logo">travel_explore</span>
     </div>
     <!-- ── gate: a shared link lands here — sign in / sign up in place,
@@ -221,9 +348,15 @@ onBeforeUnmount(() => stop());
       :scene="scene"
       :trail="trail"
       :topic-directory="topicDirectory"
+      :card-id="loc.card"
+      :intro="loc.intro"
+      :camera="loc.at"
       @enter="enter"
       @navigate="navigate"
       @exit="exit"
+      @card="onCard"
+      @intro="onIntro"
+      @camera="onCamera"
     >
       <template #tools><WikidoMusic /></template>
     </WikidoGlobe>
@@ -233,12 +366,20 @@ onBeforeUnmount(() => stop());
       :scene="scene"
       :trail="trail"
       :topic-directory="topicDirectory"
+      :card-id="loc.card"
+      :intro="loc.intro"
       @enter="enter"
       @navigate="navigate"
       @exit="exit"
+      @card="onCard"
+      @intro="onIntro"
     >
       <template #tools><WikidoMusic /></template>
     </WikidoScene>
+
+    <Transition name="wd-toast">
+      <p v-if="toast" class="wd-toast" role="status">{{ toast }}</p>
+    </Transition>
   </div>
 </template>
 
@@ -272,6 +413,28 @@ onBeforeUnmount(() => stop());
   0%, 100% { opacity: 0.55; transform: scale(0.97); }
   50% { opacity: 1; transform: scale(1.03); }
 }
+
+/* ── friendly notices ("Link copied", stale-link landings) ── */
+.wd-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 90;
+  max-width: min(90vw, 440px);
+  margin: 0;
+  padding: 0.6rem 1.1rem;
+  border-radius: 999px;
+  background: rgba(30, 18, 52, .94);
+  border: 1.5px solid rgba(253, 230, 138, .5);
+  color: #FFF7EA;
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .4);
+}
+.wd-toast-enter-active, .wd-toast-leave-active { transition: opacity .3s ease, transform .3s ease; }
+.wd-toast-enter-from, .wd-toast-leave-to { opacity: 0; transform: translate(-50%, 10px); }
 
 /* ── shelf ───────────────────────────────────────────────────────────── */
 .wd-shelf {

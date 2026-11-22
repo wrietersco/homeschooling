@@ -237,3 +237,43 @@ describe("WikidoGlobe initial view (regression: production showed no pins)", () 
     expect(spotLabel(w, "Pakistan")).toBeTruthy();
   });
 });
+
+describe("WikidoGlobe deep-link state", () => {
+  it("opens the card named by cardId and starts facing that place with no welcome drift", () => {
+    const w = mount(WikidoGlobe, { props: { topic: pack, scene: hub, trail: [], topicDirectory: {}, cardId: "pakistan" } });
+    expect(w.find(".wd-info").exists()).toBe(true);
+    expect(w.vm.rot.lambda).toBeCloseTo(69.3, 1);
+    expect(w.vm.rot.phi).toBeCloseTo(30.4, 1);
+  });
+
+  it("starts at the camera from ?at= and honours a folded narration panel", () => {
+    const w = mount(WikidoGlobe, {
+      props: { topic: pack, scene: hub, trail: [], topicDirectory: {}, camera: { lat: 31.5, lng: 74.3, zoom: 3 }, intro: false },
+    });
+    expect(w.vm.rot.lambda).toBeCloseTo(74.3, 1);
+    expect(w.vm.zoom).toBeCloseTo(3, 1);
+    expect(w.find(".wd-narration").exists()).toBe(false);
+  });
+
+  it("reports card and panel changes, and the camera only once the child moves it", async () => {
+    const w = mountGlobe();
+    w.vm.setZoom(2); // programmatic, before any interaction → no camera note
+    await flushPromises();
+    expect(w.emitted("camera")).toBeUndefined();
+    await facePakistan(w);
+    await spotLabel(w, "Pakistan").trigger("click");
+    expect(w.emitted("card")?.at(-1)).toEqual(["pakistan"]);
+    await w.find(".wd-intro-head").trigger("click");
+    expect(w.emitted("intro")?.at(-1)).toEqual([false]);
+    await w.find('button[aria-label="Zoom in"]').trigger("click");
+    await flushPromises();
+    expect(w.emitted("camera")?.length).toBeGreaterThan(0);
+  });
+
+  it("follows the URL: cardId changing closes the card", async () => {
+    const w = mount(WikidoGlobe, { props: { topic: pack, scene: hub, trail: [], topicDirectory: {}, cardId: "pakistan" } });
+    await w.setProps({ cardId: "" });
+    expect(w.find(".wd-info").exists()).toBe(false);
+    expect(w.emitted("card")).toBeUndefined(); // no echo back to the URL
+  });
+});

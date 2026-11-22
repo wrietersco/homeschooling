@@ -7,7 +7,7 @@
 // A hotspot may open a scene in ANOTHER topic (cross-topic doorway): the card
 // names that world, and the door stays dormant until the world is actually on
 // the shelf (topicDirectory) — a draft or missing world never breaks the screen.
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import SpeakButton from "@/components/SpeakButton.vue";
 import WikidoHotspot from "./WikidoHotspot.vue";
 import WikidoInfoCard from "./WikidoInfoCard.vue";
@@ -15,6 +15,7 @@ import { useWikidoProgress } from "@/lib/wikido/progress";
 import { resolveWikidoAudioUrl } from "@/lib/wikido/audio";
 import { useCoverPlacement } from "@/composables/useCoverPlacement";
 import { useSpeech } from "@/composables/useSpeech";
+import { WIKIDO_SHARE } from "@/lib/wikido/urlState";
 
 const props = defineProps({
   topic: { type: Object, required: true },
@@ -25,8 +26,13 @@ const props = defineProps({
   // Worlds a cross-topic doorway may open: { [topicId]: { title } }. A doorway
   // whose world is absent here shows its card but stays dormant.
   topicDirectory: { type: Object, default: null },
+  // deep-link state, owned by the URL (WikidoView): the open card's spot id and
+  // the narration panel (true/false, null = viewport default)
+  cardId: { type: String, default: "" },
+  intro: { type: Boolean, default: null },
 });
-const emit = defineEmits(["enter", "navigate", "exit"]);
+const emit = defineEmits(["enter", "navigate", "exit", "card", "intro"]);
+const share = inject(WIKIDO_SHARE, null);
 
 const { seen, markSeen, countSeen } = useWikidoProgress();
 const { stop } = useSpeech();
@@ -101,9 +107,10 @@ function onArtClickCapture(e) {
   e.preventDefault();
 }
 
-const selectedId = ref("");
+const selectedId = ref(props.cardId);
 // the narration card starts folded on phones so it never hides the picture
-const introOpen = ref(!isNarrow.value);
+const defaultIntro = () => (props.intro != null ? props.intro : !isNarrow.value);
+const introOpen = ref(defaultIntro());
 const imgReady = ref(false);
 
 // Dev-only hotspot calibration: press H (or the chip) to show a crosshair that
@@ -131,14 +138,23 @@ watch(
   () => props.scene.id,
   () => {
     stop();
-    selectedId.value = "";
-    introOpen.value = !isNarrow.value;
+    selectedId.value = props.cardId;
+    introOpen.value = defaultIntro();
     imgReady.value = false;
     pan.value = { x: 0, y: 0 };
     markSeen(props.topic.id, `scene:${props.scene.id}`);
   },
   { immediate: true }
 );
+
+// the URL owns the open card: a change from the address bar (Back/Forward)
+// opens or closes it, and a change made here is reported up to the URL
+watch(() => props.cardId, (id) => { selectedId.value = id; });
+watch(selectedId, (id) => { if (id !== props.cardId) emit("card", id); });
+function toggleIntro() {
+  introOpen.value = !introOpen.value;
+  emit("intro", introOpen.value);
+}
 
 function pick(spot) {
   selectedId.value = spot.id;
@@ -262,6 +278,9 @@ async function toggleFullscreen() {
         >
           <span class="material-symbols-rounded">my_location</span>
         </button>
+        <button v-if="share" type="button" class="wd-tool" aria-label="Copy link to this place" title="Copy link" @click="share({})">
+          <span class="material-symbols-rounded">share</span>
+        </button>
         <button type="button" class="wd-tool" aria-label="Toggle fullscreen" title="Fullscreen" @click="toggleFullscreen">
           <span class="material-symbols-rounded">fullscreen</span>
         </button>
@@ -294,7 +313,7 @@ async function toggleFullscreen() {
 
     <!-- scene narration (Gemini-style intro card) -->
     <footer class="wd-intro" :class="{ open: introOpen }">
-      <button type="button" class="wd-intro-head" :aria-expanded="introOpen" @click="introOpen = !introOpen">
+      <button type="button" class="wd-intro-head" :aria-expanded="introOpen" @click="toggleIntro">
         <h1 class="wd-title">{{ scene.title }}</h1>
         <span class="material-symbols-rounded wd-chev" aria-hidden="true">keyboard_arrow_down</span>
       </button>

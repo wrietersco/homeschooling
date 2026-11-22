@@ -9,7 +9,7 @@
 // Spots are plain doorways of the topic's root (hub) scene carrying lat/lng;
 // everything else — info cards, TTS, progress, cross-topic doors — is the
 // existing Wikido machinery.
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import SpeakButton from "@/components/SpeakButton.vue";
 import WikidoHotspot from "./WikidoHotspot.vue";
 import WikidoInfoCard from "./WikidoInfoCard.vue";
@@ -22,6 +22,7 @@ import {
 } from "@/lib/wikido/globe/projection";
 import { DEEP_RADIUS, drawGlobe } from "@/lib/wikido/globe/render";
 import OsmAttribution from "./OsmAttribution.vue";
+import { WIKIDO_SHARE } from "@/lib/wikido/urlState";
 import { isSpotEnabled } from "../../../../functions/lib/wikidoGlobe.js";
 
 const props = defineProps({
@@ -30,8 +31,14 @@ const props = defineProps({
   scene: { type: Object, required: true },
   trail: { type: Array, default: () => [] },
   topicDirectory: { type: Object, default: null },
+  // deep-link state, owned by the URL (WikidoView)
+  cardId: { type: String, default: "" },
+  intro: { type: Boolean, default: null },
+  // starting camera { lat, lng, zoom|null } from `?at=`; read once, on mount
+  camera: { type: Object, default: null },
 });
-const emit = defineEmits(["enter", "navigate", "exit"]);
+const emit = defineEmits(["enter", "navigate", "exit", "card", "intro", "camera"]);
+const share = inject(WIKIDO_SHARE, null);
 
 const { seen, markSeen, countSeen } = useWikidoProgress();
 const { stop } = useSpeech();
@@ -41,12 +48,20 @@ const { stop } = useSpeech();
 // after a moment (a perpetually moving target is impossible to tap — for
 // fingers and tests alike). Any pointer contact retires it immediately.
 const IDLE_SPIN_MS = 3500;
-const rot = ref(clampRotation({ lambda: 70, phi: 22 }));
-const zoom = ref(ZOOM_MIN);
-const selectedId = ref("");
-const hasInteracted = ref(false);
-const introOpen = ref(true);
-const spinning = ref(true);
+// A deep link may carry its own camera (`?at=`), or an open card whose place
+// should be in front — then there is no welcome drift: the view is already set.
+const startSpot = props.cardId ? (props.scene.hotspots || []).find((s) => s.id === props.cardId) : null;
+const startView = props.camera
+  ? { lambda: props.camera.lng, phi: props.camera.lat, zoom: props.camera.zoom }
+  : startSpot && Number.isFinite(+startSpot.lat) && Number.isFinite(+startSpot.lng)
+    ? { lambda: +startSpot.lng, phi: +startSpot.lat, zoom: null }
+    : null;
+const rot = ref(clampRotation(startView ? { lambda: startView.lambda, phi: startView.phi } : { lambda: 70, phi: 22 }));
+const zoom = ref(startView?.zoom ? clampZoom(startView.zoom) : ZOOM_MIN);
+const selectedId = ref(props.cardId);
+const hasInteracted = ref(Boolean(startView));
+const introOpen = ref(props.intro != null ? props.intro : true);
+const spinning = ref(!startView);
 let spinStartedAt = 0;
 
 function setZoom(z) {
@@ -96,6 +111,22 @@ function pick(spot) {
   animateRotationTo({ lambda: +spot.lng, phi: +spot.lat });
 }
 
+// the URL owns the open card (see WikidoScene); the camera is reported up,
+// debounced by the view, only once the child (not the welcome drift) moves it
+watch(() => props.cardId, (id) => { selectedId.value = id; });
+watch(selectedId, (id) => { if (id !== props.cardId) emit("card", id); });
+function currentCamera() {
+  return { lat: rot.value.phi, lng: rot.value.lambda, zoom: zoom.value };
+}
+watch(
+  () => [rot.value.lambda, rot.value.phi, zoom.value],
+  () => { if (hasInteracted.value || anim) emit("camera", currentCamera()); }
+);
+function toggleIntro() {
+  introOpen.value = !introOpen.value;
+  emit("intro", introOpen.value);
+}
+
 function activate(spot) {
   pick(spot);
   if (spot.childSceneId && doorOpen(spot)) emit("enter", spot);
@@ -105,8 +136,8 @@ watch(
   () => props.scene.id,
   () => {
     stop();
-    selectedId.value = "";
-    introOpen.value = true;
+    selectedId.value = props.cardId;
+    introOpen.value = props.intro != null ? props.intro : true;
     markSeen(props.topic.id, `scene:${props.scene.id}`);
   },
   { immediate: true }
@@ -439,6 +470,9 @@ async function toggleFullscreen() {
           <span class="material-symbols-rounded" aria-hidden="true">explore</span>
           {{ discovered }}/{{ spots.length }}
         </span>
+        <button v-if="share" type="button" class="wd-tool" aria-label="Copy link to this view" title="Copy link" @click="share({ camera: currentCamera() })">
+          <span class="material-symbols-rounded">share</span>
+        </button>
         <button type="button" class="wd-tool" aria-label="Toggle fullscreen" title="Fullscreen" @click="toggleFullscreen">
           <span class="material-symbols-rounded">fullscreen</span>
         </button>
@@ -475,7 +509,7 @@ async function toggleFullscreen() {
 
     <!-- welcome narration -->
     <footer class="wd-intro" :class="{ open: introOpen }">
-      <button type="button" class="wd-intro-head" :aria-expanded="introOpen" @click="introOpen = !introOpen">
+      <button type="button" class="wd-intro-head" :aria-expanded="introOpen" @click="toggleIntro">
         <h1 class="wd-title">{{ scene.title }}</h1>
         <span class="material-symbols-rounded wd-chev" aria-hidden="true">keyboard_arrow_down</span>
       </button>

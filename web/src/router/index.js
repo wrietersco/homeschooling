@@ -82,7 +82,10 @@ const routes = [
   // signed-in users play immediately — no family, onboarding, or subscription
   // required (skipping the guard is what exempts them from those redirects).
   {
-    path: "/wikido",
+    // Deep links: /wikido/:topicId/:sceneId?card=<spot>&at=lat,lng,zoom&intro=0|1
+    // (see lib/wikido/urlState.js). One route record, so moving between scenes
+    // never remounts the view.
+    path: "/wikido/:topicId?/:sceneId?",
     name: "wikido",
     component: () => import("@/views/WikidoView.vue"),
     meta: { public: true, immersive: true },

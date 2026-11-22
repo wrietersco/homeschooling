@@ -133,7 +133,7 @@ describe("wikido cloud topics", () => {
     await new Promise((r) => setTimeout(r, 0));
     const card = w.findAll(".wd-topic").find((c) => c.text().includes("The Water Cycle"));
     await card.trigger("click");
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 30)); // route push → pack load → scene
     expect(w.find(".wd-title").text()).toBe("The Water Cycle");
     expect(w.findAll(".wd-hot")).toHaveLength(2);
   });
@@ -154,7 +154,7 @@ async function mountView() {
   const { createRouter, createMemoryHistory } = await import("vue-router");
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: "/", component: { template: "<div />" } }, { path: "/wikido", component: WikidoView }],
+    routes: [{ path: "/", component: { template: "<div />" } }, { path: "/wikido/:topicId?/:sceneId?", component: WikidoView }],
   });
   await router.push("/wikido");
   await router.isReady();
