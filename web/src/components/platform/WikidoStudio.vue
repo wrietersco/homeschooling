@@ -26,6 +26,7 @@ import { useCoverPlacement } from "@/composables/useCoverPlacement";
 import { spotOutcome, sceneStatus, deletePlan, deleteSceneFrom, topicHealth, undoBuiltScenes, spotNeedsDetails, bundledTopicSummaries } from "@/lib/wikido/studioModel";
 import WikidoGlobeEditor from "@/components/platform/WikidoGlobeEditor.vue";
 import WikidoAddPlaceWizard from "@/components/platform/WikidoAddPlaceWizard.vue";
+import WikidoAddSceneWizard from "@/components/platform/WikidoAddSceneWizard.vue";
 import WikidoPlaceChecklist from "@/components/platform/WikidoPlaceChecklist.vue";
 import { placeChecklist, friendlyError } from "@/lib/wikido/placeWizard";
 import { globeDirectory, buildPlaceholderGlobeSpot } from "../../../../functions/lib/wikidoGlobe.js";
@@ -713,6 +714,57 @@ async function wizardRecordVoice(spotId) {
   await generateScopedAudios();
   selectedSceneId.value = hubId;
   if (!error.value) await generateScopedAudios({ hotspotId: spotId });
+  const problem = error.value;
+  error.value = "";
+  return problem || null;
+}
+
+// ── "Add a scene" wizard ──────────────────────────────────────────────────────
+// Like the place wizard it owns no data: it calls the same guarded paths as the
+// "Advanced" panel (suggest / outline / addWikidoChildScene) through these.
+const sceneWizardStart = ref(null); // null = closed; otherwise { parentId }
+
+function openSceneWizard(parentId = selectedSceneId.value) {
+  error.value = "";
+  message.value = "";
+  const hubOnly = isGlobeForm.value && parentId === form.value?.rootSceneId;
+  sceneWizardStart.value = { parentId: hubOnly ? "" : parentId };
+}
+// every engine reads the SAVED topic — ship unsaved edits first
+async function sceneWizardSaved() {
+  if (dirty.value && !(await save())) throw new Error(error.value || "Your edits could not be saved first.");
+}
+async function sceneWizardSuggest(parentSceneId) {
+  await sceneWizardSaved();
+  return suggestWikidoScenes({ topicId: selectedId.value, parentSceneId });
+}
+async function sceneWizardPlan(parentSceneId, total) {
+  await sceneWizardSaved();
+  return planWikidoOutline({ topicId: selectedId.value, parentSceneId, total });
+}
+async function sceneWizardCreate(args) {
+  await sceneWizardSaved();
+  return addWikidoChildScene({ topicId: selectedId.value, ...args });
+}
+// pull the server's new scenes (and the spots that open them) into the studio
+async function sceneWizardAdopt(sceneId) {
+  await refresh(true);
+  loadSelected();
+  selectedSceneId.value = form.value?.scenes?.[sceneId] ? sceneId : form.value?.rootSceneId || "";
+  layerParentId.value = selectedSceneId.value;
+}
+// a scene's narration, then the teaser clip on the spot that opens it
+async function sceneWizardVoice(sceneId) {
+  const parentOf = findParentSceneId(form.value.scenes, sceneId);
+  const spot = parentOf ? form.value.scenes[parentOf].hotspots.find((h) => h.childSceneId === sceneId && !h.childTopicId) : null;
+  error.value = "";
+  selectedSceneId.value = sceneId;
+  await generateScopedAudios();
+  if (!error.value && parentOf && spot) {
+    selectedSceneId.value = parentOf;
+    await generateScopedAudios({ hotspotId: spot.id });
+  }
+  selectedSceneId.value = form.value.scenes[sceneId] ? sceneId : form.value.rootSceneId;
   const problem = error.value;
   error.value = "";
   return problem || null;
@@ -1909,6 +1961,23 @@ function confirmDeleteScene(withDeeper) {
       @close="wizardStart = null"
     />
 
+    <WikidoAddSceneWizard
+      v-if="sceneWizardStart && form"
+      :pack="form"
+      :topic-status="selectedDoc?.status || 'draft'"
+      :start="sceneWizardStart"
+      :is-dirty="dirty"
+      :suggest="sceneWizardSuggest"
+      :plan-outline="sceneWizardPlan"
+      :create-scene="sceneWizardCreate"
+      :adopt="sceneWizardAdopt"
+      :paint-art="wizardPaint"
+      :record-voice="sceneWizardVoice"
+      :publish="wizardPublish"
+      :go-to-scene="selectScene"
+      @close="sceneWizardStart = null"
+    />
+
     <section v-if="form" class="workspace">
       <p v-if="isBundled" class="note">This bundled world is editable. Save creates a draft; publish when ready to show your changes to families.</p>
       <header class="ws-toolbar">
@@ -2103,6 +2172,7 @@ function confirmDeleteScene(withDeeper) {
               <button type="button" class="mini" title="Open every scene's branch" @click="expandAll">Expand all</button>
               <button type="button" class="mini" title="Fold every branch away, leaving the first level" @click="collapseAll">Collapse all</button>
               <button type="button" class="mini" title="Scroll to the scene you are editing" @click="jumpToSelected">Jump to selected</button>
+              <button type="button" class="mini add" title="A guided way to add a new scene" @click="openSceneWizard()">＋ Add a scene</button>
             </div>
             <div class="tree-search">
               <input v-model="treeQuery" type="search" placeholder="Search scenes…" aria-label="Search scenes" @keydown.esc.stop="treeQuery = ''" />
@@ -2170,7 +2240,7 @@ function confirmDeleteScene(withDeeper) {
               <template v-if="id === form.rootSceneId"> · entrance</template>
             </span>
             <div v-if="id === selectedSceneId" class="scene-actions">
-              <button v-if="form.scenes[id].hotspots.length < 8" type="button" class="mini add" @click="startDeeperLayer(id)">＋ Add scene under this</button>
+              <button v-if="form.scenes[id].hotspots.length < 8" type="button" class="mini add" @click="openSceneWizard(id)">＋ Add scene under this</button>
               <button type="button" class="mini" :disabled="!canMove(id, 'up')" title="Show earlier among its siblings" @click="moveScene(id, 'up')">↑ Earlier</button>
               <button type="button" class="mini" :disabled="!canMove(id, 'down')" title="Show later among its siblings" @click="moveScene(id, 'down')">↓ Later</button>
             </div>
@@ -2497,8 +2567,16 @@ function confirmDeleteScene(withDeeper) {
             <button class="btn" @click="addGlobeSpot">＋ Add a custom place by hand (landmark, town…)</button>
           </details>
 
-          <!-- grow -->
-          <section v-if="!isHubScene" class="grow card">
+          <!-- grow: the wizard is the main way in; the original controls live under Advanced -->
+          <section v-if="!isHubScene" class="grow card wz-entry">
+            <h3 class="pane-title">Add a scene under “{{ layerParentTitle }}”</h3>
+            <p class="muted">A guided, step-by-step way to add one scene — or a whole branch. Nothing is published until you say so.</p>
+            <button type="button" class="btn primary" :disabled="selectedScene.hotspots.length >= 8" @click="openSceneWizard(selectedSceneId)">＋ Add a scene…</button>
+            <small v-if="selectedScene.hotspots.length >= 8" class="muted">This picture already has 8 spots — choose another parent in the wizard.</small>
+          </section>
+          <details v-if="!isHubScene" class="advanced adv-grow">
+          <summary>Advanced — add scenes without the wizard</summary>
+          <section class="grow card">
             <h3 class="pane-title">Add a new scene under “{{ layerParentTitle }}”</h3>
             <p class="muted">
               The studio writes a new scene and adds a spot to <strong>{{ layerParentTitle }}</strong>’s picture that opens it.
@@ -2525,7 +2603,7 @@ function confirmDeleteScene(withDeeper) {
             </form>
           </section>
 
-          <section v-if="!isHubScene" class="grow card builder">
+          <section class="grow card builder">
             <h3 class="pane-title">Or plan a whole branch at once</h3>
             <p class="muted">
               The studio drafts an outline of new scenes under <strong>{{ layerParentTitle }}</strong>. Review and edit it first — nothing is created until you press Build.
@@ -2584,6 +2662,7 @@ function confirmDeleteScene(withDeeper) {
               </div>
             </div>
           </section>
+          </details>
 
           <div v-if="selectedScene.id !== form.rootSceneId" class="danger-zone">
             <button class="btn danger" @click="askDeleteScene(selectedScene.id)">Delete this scene…</button>
@@ -2858,6 +2937,9 @@ function confirmDeleteScene(withDeeper) {
 .kind legend { font-size: 0.78rem; font-weight: 700; color: var(--text2); padding: 0 0.3rem; }
 .kind label { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; }
 .advanced summary { cursor: pointer; font-size: 0.78rem; color: var(--muted); }
+.wz-entry .btn { align-self: flex-start; }
+.adv-grow { display: flex; flex-direction: column; gap: 0.6rem; }
+.adv-grow > summary { margin-bottom: 0.4rem; }
 
 /* grow */
 .pin-place { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.9rem 1rem; border: 1.5px solid #A5F3FC; background: #ECFEFF; }
