@@ -20,6 +20,7 @@ import {
   reorderWikidoTopics, sortStudioTopics,
 } from "@/services/wikidoAdmin";
 import { STATUS_FILTERS, ancestorIds, childCounts, keyAction, loadCollapsed, parentIds, saveCollapsed, visibleRows } from "@/lib/wikido/treeView";
+import { loosePlan, removeScenes, removeAllLoose, attachBranch, attachTargets, publishChecks } from "@/lib/wikido/looseScenes";
 import { buildSceneTree, moveSceneSibling, subtreeSceneIds, canMoveScene, moveSceneTo, moveSceneByDrop, resolveDrop, findParentSceneId } from "@/lib/wikido/tree";
 import { wikidoTopicPacks } from "@/lib/wikido";
 import { useCoverPlacement } from "@/composables/useCoverPlacement";
@@ -30,6 +31,8 @@ import WikidoAddSceneWizard from "@/components/platform/WikidoAddSceneWizard.vue
 import WikidoPlaceChecklist from "@/components/platform/WikidoPlaceChecklist.vue";
 import { placeChecklist, friendlyError } from "@/lib/wikido/placeWizard";
 import { globeDirectory, buildPlaceholderGlobeSpot } from "../../../../functions/lib/wikidoGlobe.js";
+import { mergeVisuals } from "../../../../functions/lib/wikidoSpotArt.js";
+import WikidoArtworkPlan from "./WikidoArtworkPlan.vue";
 import { withKeys, countOutline, removeOutlineNode, runOutline, summarizeRun, retryFailedItems } from "@/lib/wikido/outlineBuild";
 import { getLlmConfig } from "@/services/admin";
 
@@ -684,6 +687,10 @@ async function wizardPublish() {
   error.value = "";
   await togglePublish();
   if (selectedDoc.value?.status === "published") return null;
+  if (publishCheck.value) {
+    const first = publishCheck.value.blockers[0]?.text || publishCheck.value.notes.find((n) => n.key === "loose")?.text || "";
+    return `Not published yet — ${first} Close this window and use the “Before publishing” checklist on the page.`;
+  }
   const problem = friendlyError(error.value, "It could not be published. Close this and press “Publish to families” on the page.");
   error.value = "";
   return problem;
@@ -1271,10 +1278,9 @@ async function regenerateSceneImage(sceneId) {
     const scene = form.value.scenes[sceneId];
     if (scene) {
       scene.image.src = res.url;
-      moveSpotsTo(scene, res.placements);
+      mergeVisuals(scene, res.visuals); // subjects the agent chose for abstract spots; spots stay where they were
     }
-    const placed = (res.placements || []).length;
-    message.value = placed ? `Artwork updated — the agent placed ${placed} ${placed === 1 ? "spot" : "spots"} on the new picture.` : "Artwork updated.";
+    message.value = "Artwork updated — each spot was painted where it sits. Use ✦ Auto-adjust spots to fine-tune.";
     snapshot();
   } catch (e) {
     error.value = e?.message?.replace("internal: ", "") || "Artwork generation failed.";
@@ -1446,10 +1452,21 @@ async function addLayer() {
   }
 }
 
-async function togglePublish() {
+// What the child loader would make of this world, shown before it goes live.
+const publishCheck = ref(null); // null | { blockers, notes }
+async function togglePublish(force = false) {
   const next = selectedDoc.value?.status === "published" ? "draft" : "published";
   // unsaved edits ship with the publish save
   if (dirty.value && !(await save())) return;
+  if (next === "published") {
+    const c = publishChecks(form.value);
+    if (!force && (c.blockers.length || c.notes.some((n) => n.key === "loose"))) {
+      publishCheck.value = c;
+      return;
+    }
+    if (c.blockers.length) { publishCheck.value = c; return; } // never publish a world children could not open
+  }
+  publishCheck.value = null;
   // a published topic gets its full Kokoro voice first (when the bridge can)
   if (next === "published" && bridge.value.online && !voBusy.value) {
     const missing = planVoiceoverClips(form.value).length;
@@ -1575,6 +1592,42 @@ const sceneStatusOf = (id) => sceneStatus(form.value.scenes, form.value.scenes[i
 const outcomeOf = (spot) => spotOutcome(form.value.scenes, spot, otherWorlds.value);
 const health = computed(() => (form.value ? topicHealth(form.value.scenes, form.value.rootSceneId, otherWorlds.value, isGlobeForm.value ? form.value.rootSceneId : null) : []));
 const showHealth = ref(false);
+
+// ── loose scenes: scenes no spot leads to ─────────────────────────────────────
+const loose = computed(() => (form.value ? loosePlan(form.value.scenes, form.value.rootSceneId) : { ids: [], branches: [] }));
+const looseTargets = computed(() => (form.value ? attachTargets(form.value.scenes, form.value.rootSceneId, { excludeHub: isGlobeForm.value }) : []));
+const attachPick = ref({}); // branch head id → chosen parent scene id
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+function attachLoose(branch) {
+  const parentId = attachPick.value[branch.id] || looseTargets.value[0]?.id;
+  if (!parentId) { error.value = "No picture has room for another spot. Remove a spot first, or delete this scene."; return; }
+  form.value.scenes = attachBranch(form.value.scenes, branch.id, parentId);
+  message.value = `“${branch.title}” is now opened from “${form.value.scenes[parentId].title}”. Save edits to keep it.`;
+}
+function deleteLoose(branch) {
+  if (!window.confirm(`Delete “${branch.title}”${branch.count > 1 ? ` and its ${branch.count - 1} deeper ${branch.count - 1 === 1 ? "scene" : "scenes"}` : ""}? Nobody can reach ${branch.count === 1 ? "it" : "them"} now. This takes effect when you save.`)) return;
+  form.value.scenes = removeScenes(form.value.scenes, branch.ids);
+  message.value = "Deleted. Save edits to keep that.";
+}
+function cleanUpLoose() {
+  const n = loose.value.ids.length;
+  if (!n) return;
+  if (!window.confirm(`Delete all ${plural(n, "loose scene", "loose scenes")}? No picture leads to ${n === 1 ? "it" : "them"}, so children can't see ${n === 1 ? "it" : "them"} anyway. This takes effect when you save.`)) return;
+  form.value.scenes = removeAllLoose(form.value.scenes, form.value.rootSceneId);
+  message.value = `Cleaned up ${plural(n, "loose scene", "loose scenes")}. Save edits to keep that.`;
+}
+// After a spot stops opening a scene: if that scene (and what is under it) is
+// now unreachable, offer to delete it instead of silently leaving it loose.
+function offerDeleteIfLoose(oldChildId) {
+  if (!oldChildId || !form.value?.scenes?.[oldChildId]) return;
+  const branch = loose.value.branches.find((b) => b.ids.includes(oldChildId));
+  if (!branch) return;
+  const deeper = branch.count - 1;
+  const ok = window.confirm(`“${form.value.scenes[branch.id].title}”${deeper ? ` and its ${deeper} deeper ${deeper === 1 ? "scene" : "scenes"}` : ""} no longer ${branch.count === 1 ? "has" : "have"} any spot leading to ${branch.count === 1 ? "it" : "them"}. Delete ${branch.count === 1 ? "it" : "them"} too?
+
+OK = delete. Cancel = keep ${branch.count === 1 ? "it" : "them"} as loose scenes (you can attach them later).`);
+  if (ok) form.value.scenes = removeScenes(form.value.scenes, branch.ids);
+}
 const hasArt = (scene) => /^(https?:\/\/|\/wikido\/)/.test(String(scene?.image?.src || ""));
 
 // ── spots: numbered pins on the picture ───────────────────────────────────────
@@ -1725,12 +1778,20 @@ async function autoAdjustAllSpots() {
   }
 }
 
+function retargetSpot(spot, sceneId) {
+  const old = spot.childSceneId;
+  spot.childSceneId = sceneId;
+  if (old && old !== sceneId) nextTick(() => offerDeleteIfLoose(old));
+}
+
 // switch a spot between "shows a fact", "opens a scene here", and "opens
 // a scene in another world"
 function setSpotKind(spot, kind) {
+  const oldLocal = spot.childSceneId && !spot.childTopicId ? spot.childSceneId : "";
   if (kind === "fact") {
     delete spot.childSceneId;
     delete spot.childTopicId;
+    nextTick(() => offerDeleteIfLoose(oldLocal));
     return;
   }
   if (kind === "world") {
@@ -1738,6 +1799,7 @@ function setSpotKind(spot, kind) {
       const first = otherWorlds.value.values().next().value;
       if (first) setDoorWorld(spot, first.id);
     }
+    nextTick(() => offerDeleteIfLoose(oldLocal));
     return;
   }
   // "scene": a doorway inside this topic — a stale cross-topic target must be
@@ -2023,7 +2085,7 @@ function confirmDeleteScene(withDeeper) {
             {{ generatingImages ? "Painting scenes…" : missingArtwork.length ? `Generate artwork (${missingArtwork.length})` : "Artwork complete ✓" }}
           </button>
           <button class="btn" :disabled="saving || !dirty" @click="save">{{ saving ? "Saving…" : "Save edits" }}</button>
-          <button class="btn primary" :disabled="dirty" @click="togglePublish">
+          <button class="btn primary" :disabled="dirty" @click="togglePublish()">
             {{ selectedDoc?.status === "published" ? "Unpublish" : "Publish to families" }}
           </button>
           <button v-if="!isBundled" class="btn danger" @click="removeTopic">{{ selectedDoc?.bundledOrigin ? "Restore bundled version" : "Delete" }}</button>
@@ -2163,6 +2225,43 @@ function confirmDeleteScene(withDeeper) {
             <button type="button" class="link-btn" @click="selectScene(issue.sceneId)">Go to scene</button>
           </li>
         </ul>
+      </section>
+
+      <section v-if="publishCheck" class="pubcheck" role="region" aria-label="Before publishing">
+        <h3>Before publishing</h3>
+        <p class="muted">This is exactly what children will and won't see once the world is published.</p>
+        <ul>
+          <li v-for="(b, i) in publishCheck.blockers" :key="`b${i}`" class="error"><span>{{ b.text }}</span></li>
+          <li v-for="(n, i) in publishCheck.notes" :key="`n${i}`" class="warn">
+            <span>{{ n.text }}</span>
+            <button v-if="n.key === 'loose'" type="button" class="link-btn" @click="cleanUpLoose">Clean up all</button>
+          </li>
+        </ul>
+        <p v-if="publishCheck.blockers.length" class="muted">Fix the red items first — a world with them would not open for children.</p>
+        <div class="pubcheck-actions">
+          <button v-if="!publishCheck.blockers.length" type="button" class="btn primary" @click="togglePublish(true)">Publish anyway</button>
+          <button type="button" class="btn" @click="publishCheck = null">Not yet</button>
+        </div>
+      </section>
+
+      <section v-if="loose.ids.length" class="loosebox" aria-label="Loose scenes">
+        <h3>🧩 Loose scenes ({{ loose.ids.length }})</h3>
+        <p class="muted">No picture leads to {{ loose.ids.length === 1 ? "this scene" : "these scenes" }}, so children can't see {{ loose.ids.length === 1 ? "it" : "them" }}. Attach each one under a picture (that adds a spot to open it), or delete it.</p>
+        <ul>
+          <li v-for="b in loose.branches" :key="b.id">
+            <div class="loose-name"><strong>{{ b.title }}</strong><span v-if="b.count > 1" class="muted"> + {{ b.count - 1 }} deeper {{ b.count === 2 ? "scene" : "scenes" }}</span></div>
+            <div class="loose-actions">
+              <label class="sr-only" :for="`attach-${b.id}`">Attach “{{ b.title }}” to</label>
+              <select :id="`attach-${b.id}`" v-model="attachPick[b.id]">
+                <option :value="undefined" disabled>Attach to…</option>
+                <option v-for="t in looseTargets" :key="t.id" :value="t.id">{{ t.title }}</option>
+              </select>
+              <button type="button" class="btn" :disabled="!attachPick[b.id]" @click="attachLoose(b)">Attach</button>
+              <button type="button" class="btn danger" @click="deleteLoose(b)">Delete</button>
+            </div>
+          </li>
+        </ul>
+        <button type="button" class="btn danger" @click="cleanUpLoose">Clean up all</button>
       </section>
 
       <div class="ws-grid">
@@ -2393,6 +2492,8 @@ function confirmDeleteScene(withDeeper) {
           </div>
           </div>
 
+          <WikidoArtworkPlan v-if="selectedScene.id !== form.rootSceneId || !isGlobeForm" :scene="selectedScene" :scenes="form.scenes" />
+
           <label class="field">Scene title
             <input v-model="selectedScene.title" type="text" />
           </label>
@@ -2524,7 +2625,7 @@ function confirmDeleteScene(withDeeper) {
                 </label>
               </div>
               <label v-if="spot.childSceneId && !spot.childTopicId" class="field">Opens this scene
-                <select v-model="spot.childSceneId">
+                <select :value="spot.childSceneId" @change="retargetSpot(spot, $event.target.value)">
                   <option v-for="s in orderedScenes" :key="s.id" :value="s.id" :disabled="sceneAncestors.has(s.id)">{{ form.scenes[s.id].title }}</option>
                 </select>
               </label>
@@ -2800,6 +2901,17 @@ function confirmDeleteScene(withDeeper) {
 .model-line { margin: 0; padding: 0.6rem 0.9rem; border-radius: 12px; background: var(--primary-soft); color: var(--text2); font-size: 0.88rem; }
 .model-line strong { color: var(--primary); }
 
+.pubcheck, .loosebox { border: 1.5px solid #FDBA74; background: #FFF7ED; border-radius: 12px; padding: 0.7rem 0.9rem; display: flex; flex-direction: column; gap: 0.45rem; }
+.pubcheck h3, .loosebox h3 { margin: 0; font-size: 0.95rem; }
+.pubcheck ul, .loosebox ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.pubcheck li { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; font-size: 0.84rem; }
+.pubcheck li.error span::before { content: "● "; color: #DC2626; }
+.pubcheck li.warn span::before { content: "● "; color: #F59E0B; }
+.pubcheck-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.loosebox li { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 0.4rem 0.6rem; }
+.loose-actions { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; max-width: 100%; }
+.loose-actions select { max-width: 100%; min-width: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .health { border: 1.5px solid #FDE68A; background: #FFFBEB; border-radius: 12px; }
 .health-head { display: flex; align-items: center; gap: 0.5rem; width: 100%; border: none; background: none; cursor: pointer; font-family: inherit; font-weight: 700; font-size: 0.88rem; color: #92400E; padding: 0.55rem 0.85rem; text-align: left; }
 .health-badge { background: #F59E0B; color: #fff; border-radius: 999px; min-width: 1.4rem; text-align: center; padding: 0.05rem 0.4rem; font-size: 0.78rem; }

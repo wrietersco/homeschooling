@@ -66,10 +66,11 @@ export function normalizePackForLoad(pack) {
 // globe from loading — before this, one such scene made validation fail and the
 // child silently got the empty bundled shell: no pins at all.
 export function pruneSwitchedOffPlaces(pack) {
-  if (!pack || pack.view !== "globe" || !pack.scenes || !pack.rootSceneId) return pack;
+  if (!pack || !pack.scenes || !pack.rootSceneId) return pack;
   const hub = pack.scenes[pack.rootSceneId];
   if (!hub) return pack;
-  const keep = (hub.hotspots || []).filter((h) => h?.enabled !== false);
+  // switched-off places only exist on a globe's hub; every world drops loose scenes
+  const keep = pack.view === "globe" ? (hub.hotspots || []).filter((h) => h?.enabled !== false) : (hub.hotspots || []);
   const scenes = { ...pack.scenes, [pack.rootSceneId]: keep.length === (hub.hotspots || []).length ? hub : { ...hub, hotspots: keep } };
   const reachable = new Set([pack.rootSceneId]);
   const queue = [pack.rootSceneId];

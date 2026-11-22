@@ -1,4 +1,5 @@
 <script setup>
+import { publishChecks } from "@/lib/wikido/looseScenes";
 // "Add a scene" — a guided, five-step wizard for a total beginner:
 //   1 Where does it go?   2 What is it about?   3 Check and create
 //   4 Writing your scene  5 What's next (checklist + one-click next steps)
@@ -30,6 +31,8 @@ const props = defineProps({
   goToScene: { type: Function, default: () => {} }, // (sceneId) — select it in the studio
 });
 const emit = defineEmits(["close"]);
+// what children will and won't see (same rules as the loader) — shown on the finish screen
+const finishChecks = computed(() => { const c = publishChecks(props.pack); return [...c.blockers, ...c.notes].map((x) => x.text); });
 
 // ── state ─────────────────────────────────────────────────────────────────────
 const stepIdx = ref(0);
@@ -558,6 +561,10 @@ const parentPins = computed(() => (parent.value?.hotspots || []).map((h, i) => (
               </template>
               <template v-else>That scene is no longer in this world. Close this and check the map.</template>
             </p>
+            <div v-if="finishChecks.length" class="wz-warn" role="note">
+              <strong>Heads-up before you publish</strong>
+              <ul><li v-for="(t, i) in finishChecks" :key="i">{{ t }}</li></ul>
+            </div>
             <ul class="wz-steps" aria-label="Progress of the new scene">
               <li v-for="r in rows" :key="r.key" :class="r.ok ? 'ok' : 'todo'">
                 <span class="wz-mark" aria-hidden="true">{{ r.ok ? "✓" : "✗" }}</span>
@@ -612,6 +619,8 @@ const parentPins = computed(() => (parent.value?.hotspots || []).map((h, i) => (
 .wz-dots li.now { background: var(--primary); }
 .wz-body { padding: 0.8rem 1.4rem 0.4rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.7rem; min-height: 300px; }
 .wz-body > section { display: flex; flex-direction: column; gap: 0.7rem; }
+.wz-warn { border: 1.5px solid #FDBA74; background: #FFF7ED; border-radius: 10px; padding: 0.5rem 0.7rem; font-size: 0.88rem; color: var(--text2); }
+.wz-warn ul { margin: 0.25rem 0 0; padding-left: 1.1rem; }
 .wz-help { margin: 0; font-size: 0.95rem; color: var(--text2); }
 .wz-muted { margin: 0; font-size: 0.85rem; color: var(--muted); }
 .wz-foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.75rem; padding: 0.9rem 1.4rem 1.1rem; border-top: 1px solid var(--border); }

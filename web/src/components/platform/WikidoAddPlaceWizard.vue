@@ -1,4 +1,5 @@
 <script setup>
+import { publishChecks } from "@/lib/wikido/looseScenes";
 // "Add a place to the globe" — a guided, five-step wizard for a total beginner:
 //   1 What kind of place?  2 Which one?  3 Check the spot  4 Make its scene
 //   5 Turn it on for children   → then a finish screen saying exactly what is
@@ -35,6 +36,8 @@ const props = defineProps({
   isDirty: { type: Boolean, default: false },
 });
 const emit = defineEmits(["close"]);
+// what children will and won't see (same rules as the loader) — shown on the finish screen
+const finishChecks = computed(() => { const c = publishChecks(props.pack); return [...c.blockers, ...c.notes].map((x) => x.text); });
 
 // ── state ─────────────────────────────────────────────────────────────────────
 const kind = ref("");
@@ -530,6 +533,10 @@ watch(stepId, () => nextTick(() => dialogEl.value?.querySelector(".wz-body")?.sc
               <template v-else-if="check.scene">✓ {{ placeName }} is saved, but switched <strong>off</strong>.</template>
               <template v-else>✓ {{ placeName }} is pinned and saved — it has no scene yet, so it is switched <strong>off</strong>.</template>
             </p>
+            <div v-if="finishChecks.length" class="wz-warn" role="note">
+              <strong>Heads-up before you publish</strong>
+              <ul><li v-for="(t, i) in finishChecks" :key="i">{{ t }}</li></ul>
+            </div>
             <WikidoPlaceChecklist :check="check" class="wz-check" />
             <div v-if="todo.length" class="wz-todo">
               <h3>Still to do</h3>
@@ -592,6 +599,8 @@ watch(stepId, () => nextTick(() => dialogEl.value?.querySelector(".wz-body")?.sc
 .wz-dots li.now { background: var(--primary); }
 .wz-body { padding: 0.8rem 1.4rem 0.4rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.7rem; min-height: 260px; }
 .wz-body > section { display: flex; flex-direction: column; gap: 0.7rem; }
+.wz-warn { border: 1.5px solid #FDBA74; background: #FFF7ED; border-radius: 10px; padding: 0.5rem 0.7rem; font-size: 0.88rem; color: var(--text2); }
+.wz-warn ul { margin: 0.25rem 0 0; padding-left: 1.1rem; }
 .wz-help { margin: 0; font-size: 0.95rem; color: var(--text2); }
 .wz-muted { margin: 0; font-size: 0.85rem; color: var(--muted); }
 .wz-foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.75rem; padding: 0.9rem 1.4rem 1.1rem; border-top: 1px solid var(--border); }
