@@ -58,18 +58,19 @@ export function normalizePackForLoad(pack) {
   return pruneSwitchedOffPlaces(healed);
 }
 
-// A globe place that is switched off (`enabled: false`) is invisible to
-// children, so its scene — which may still be unpainted or half-written — must
-// not stop the WHOLE globe from loading. Drop those hub pins and any scene that
-// is no longer reachable from the entrance, then validate what children can see.
-// (Without this, one unfinished switched-off place made a published world fail
-// validation and the child silently got the empty bundled shell: no pins at all.)
+// Children can only ever see what is reachable from the globe's entrance, so a
+// globe world is loaded as exactly that: switched-off hub places (`enabled:
+// false`) are dropped, then every scene no longer reachable from the hub is
+// dropped too. Unfinished or orphaned scenes (an unpainted switched-off place,
+// leftovers of an abandoned pin, a deleted doorway) must never stop the WHOLE
+// globe from loading — before this, one such scene made validation fail and the
+// child silently got the empty bundled shell: no pins at all.
 export function pruneSwitchedOffPlaces(pack) {
   if (!pack || pack.view !== "globe" || !pack.scenes || !pack.rootSceneId) return pack;
   const hub = pack.scenes[pack.rootSceneId];
-  if (!hub || !(hub.hotspots || []).some((h) => h?.enabled === false)) return pack;
+  if (!hub) return pack;
   const keep = (hub.hotspots || []).filter((h) => h?.enabled !== false);
-  const scenes = { ...pack.scenes, [pack.rootSceneId]: { ...hub, hotspots: keep } };
+  const scenes = { ...pack.scenes, [pack.rootSceneId]: keep.length === (hub.hotspots || []).length ? hub : { ...hub, hotspots: keep } };
   const reachable = new Set([pack.rootSceneId]);
   const queue = [pack.rootSceneId];
   while (queue.length) {
@@ -81,8 +82,9 @@ export function pruneSwitchedOffPlaces(pack) {
       }
     }
   }
-  for (const id of Object.keys(scenes)) if (!reachable.has(id)) delete scenes[id];
-  return { ...pack, scenes };
+  let dropped = keep.length !== (hub.hotspots || []).length;
+  for (const id of Object.keys(scenes)) if (!reachable.has(id)) { delete scenes[id]; dropped = true; }
+  return dropped ? { ...pack, scenes } : pack;
 }
 
 function checkImage(img, path, errors) {

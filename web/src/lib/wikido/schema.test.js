@@ -250,4 +250,16 @@ describe("published globe worlds with unfinished switched-off places", () => {
     expect(normalizePackForLoad(w)).toBe(w);
     expect(normalizePackForLoad(livingThings)).toBe(livingThings);
   });
+  it("also loads a globe whose enabled places are fine but whose file carries orphaned scenes (production shape)", () => {
+    const w = world();
+    delete w.scenes.globe.hotspots[1].enabled; // everything on, no switched-off pin
+    w.scenes.ru = art("ru");
+    w.scenes["k2-amazing-facts"] = art("k2-amazing-facts"); // reachable from nothing
+    w.scenes["biryani-magic"] = art("biryani-magic");
+    expect(validateTopicPack(w).some((e) => e.includes("unreachable"))).toBe(true);
+    const loaded = normalizePackForLoad(w);
+    expect(validateTopicPack(loaded)).toEqual([]);
+    expect(loaded.scenes.globe.hotspots.map((h) => h.id)).toEqual(["pk", "ru"]);
+    expect(Object.keys(loaded.scenes).sort()).toEqual(["globe", "pk", "ru"]);
+  });
 });
