@@ -257,7 +257,7 @@ test("dated catalog prices agree with the meter's dated rates", () => {
 test("a saved retired model resolves to its replacement so calls never 404", () => {
   const cfgFor = (agent, model, now) => mergeAgentConfig({ default: {}, agents: { [agent]: { model } } }, agent, now);
   // already dead -> replaced immediately
-  assert.equal(cfgFor("guide", "gemini-2.0-flash").model, "gemini-2.5-flash");
+  assert.equal(cfgFor("guide", "gemini-2.0-flash").model, "gemini-3.5-flash-lite");
   assert.equal(cfgFor("image", "imagen-4.0-generate-001").model, "gemini-3.1-flash-image");
   assert.equal(cfgFor("image", "imagen-4.0-ultra-generate-001").model, "gemini-3-pro-image");
   // deprecating -> replaced on/after its shutdown date only
@@ -290,4 +290,22 @@ test("the new models are catalogued with provider, price and healthy availabilit
   // exactly one recommended model in the groups where a default is suggested
   assert.equal(MODEL_CATALOG.image.filter((m) => m.recommended).length, 1);
   assert.equal(MODEL_CATALOG.text.filter((m) => m.provider === "openai" && m.recommended).length, 1);
+});
+
+test("catalog lists the 5.5 Claude models and 3.8 TTS models with matching prices, and marks retirements", async () => {
+  const { MODEL_CATALOG, replacementForRetired } = await import("../agents/modelCatalog.js");
+  const { DEFAULT_PRICING } = await import("../lib/costMeter.js");
+  const text = Object.fromEntries(MODEL_CATALOG.text.map((m) => [m.id, m]));
+  for (const id of ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]) {
+    assert.equal(text[id].provider, "anthropic", id);
+    assert.equal(text[id].price.in, DEFAULT_PRICING.text[id].input, id);
+    assert.equal(text[id].price.out, DEFAULT_PRICING.text[id].output, id);
+  }
+  const tts = Object.fromEntries(MODEL_CATALOG.tts.map((m) => [m.id, m]));
+  assert.equal(tts["gemini-3.8-flash-tts"].price.out, 9);
+  assert.equal(tts["gemini-2.5-flash-preview-tts"].availability.state, "deprecating");
+  assert.equal(text["gemini-2.5-flash"].availability.date, "2026-12-01");
+  assert.equal(replacementForRetired("gemini-2.5-flash", new Date("2026-11-30T12:00:00Z")), null);
+  assert.equal(replacementForRetired("gemini-2.5-flash", new Date("2026-12-01T00:00:00Z")), "gemini-3.5-flash-lite");
+  assert.equal(replacementForRetired("gemini-2.5-flash-preview-tts", new Date("2026-12-18T00:00:00Z")), "gemini-3.8-flash-tts");
 });

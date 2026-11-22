@@ -118,3 +118,17 @@ test("recordCostEvent no-ops without a familyId", async () => {
   assert.equal(out, null);
   assert.equal(db.writes.length, 0);
 });
+
+import { priceText as _priceText, DEFAULT_PRICING as _DP } from "../lib/costMeter.js";
+test("Claude Haiku 5.5 bills the whole request at the long-prompt rate above 100k input tokens", () => {
+  const short = _priceText({ model: "claude-haiku-5-5", usage: { inputTokens: 100000, outputTokens: 1e6 } });
+  assert.equal(short.costUsd, 0.51); // 100k × $0.10/M + 1M × $0.50/M
+  const long = _priceText({ model: "claude-haiku-5-5", usage: { inputTokens: 200000, outputTokens: 1e6 } });
+  assert.equal(long.costUsd, 2.6); // 200k × $0.50/M + 1M × $2.50/M
+});
+
+test("Claude 5.5 and Gemini 3.8 TTS rates are in the default table", () => {
+  assert.equal(_priceText({ model: "claude-sonnet-5-5", usage: { inputTokens: 1e6, outputTokens: 1e6 } }).costUsd, 12);
+  assert.equal(_priceText({ model: "claude-opus-5-5", usage: { inputTokens: 1e6, outputTokens: 1e6 } }).costUsd, 24);
+  assert.ok(_DP.tts["gemini-3.8-flash-tts"] && _DP.tts["gemini-3.8-flash-lite-tts"]);
+});

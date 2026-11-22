@@ -648,6 +648,13 @@ export function effortFromThinkingBudget(thinkingBudget) {
 // a ceiling, not a target — low effort keeps actual spend (and latency) small.
 const MIN_MAX_TOKENS_WITH_THINKING = 16000;
 
+// The 5.5 generation (Haiku/Sonnet/Opus 5.5), Opus 5 and Fable always think
+// (adaptive); `thinking: {type:"disabled"}` is rejected. Verified against
+// platform.claude.com model overview 2026-11-22. Sampling params stay unsent.
+export function claudeThinkingAlwaysOn(model) {
+  return /^claude-(haiku|sonnet|opus)-5-5|^claude-opus-5$|^claude-fable-/i.test(String(model || ""));
+}
+
 // Production Anthropic client. Same generate() contract + retry/backoff policy
 // as the Gemini/OpenAI clients, so the runtime and resolveLlm treat all three
 // interchangeably. `max_tokens` is required by the Messages API (no server-side
@@ -669,9 +676,12 @@ export function createClaudeClient({ apiKey, model = DEFAULT_ANTHROPIC_MODEL, fe
         model,
         messages: buildClaudeMessages({ contents }),
       };
-      if (thinkingBudget > 0) {
+      if (thinkingBudget > 0 || claudeThinkingAlwaysOn(model)) {
         // "adaptive" is the ONLY on-mode Claude Sonnet 5 / Opus 4.7+ accept —
-        // budget_tokens has no replacement cap, so effort is the only dial.
+        // budget_tokens has no replacement cap, so effort is the only dial. The 5.5
+        // generation cannot switch thinking off at all (Sonnet 5.5 reports
+        // thinking.types.disabled.supported=false), so a budget of 0 there means
+        // "lowest effort" rather than "disabled" (effortFromThinkingBudget(0) = low).
         body.thinking = { type: "adaptive" };
         body.output_config = { effort: effortFromThinkingBudget(thinkingBudget) };
         maxTokens = Math.max(maxTokens, MIN_MAX_TOKENS_WITH_THINKING);
@@ -707,6 +717,15 @@ export function createClaudeClient({ apiKey, model = DEFAULT_ANTHROPIC_MODEL, fe
 
         const detail = await res.text().catch(() => "");
         lastErr = new Error(`Claude ${res.status}: ${detail.slice(0, 500)}`);
+        // A newer model that refuses "thinking disabled": retry once with adaptive
+        // thinking at the lowest effort instead of failing every call for the agent.
+        if (res.status === 400 && body.thinking?.type === "disabled" && /thinking/i.test(detail)) {
+          body.thinking = { type: "adaptive" };
+          body.output_config = { effort: "low" };
+          body.max_tokens = Math.max(body.max_tokens, MIN_MAX_TOKENS_WITH_THINKING);
+          attempt -= 1; // this retry doesn't consume the transient-error budget
+          continue;
+        }
         if (RETRYABLE_STATUSES.has(res.status) && attempt < maxRetries) {
           await sleep(backoffMs(baseDelayMs, attempt));
           continue;

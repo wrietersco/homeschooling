@@ -270,6 +270,24 @@ export const MODEL_CATALOG = {
 // clients — full tool round trips for text, real generations for image/speech). ──
 const NEW_TEXT = [
   {
+    id: "claude-haiku-5-5", label: "Claude Haiku 5.5", provider: "anthropic", newest: true,
+    cost: "Lowest", speed: "Fastest", pricing: "$0.10 in / $0.50 out per 1M tokens (prompts over 100k tokens: $0.50 / $2.50 for the whole request)", latency: "~1–3s",
+    quality: "Anthropic's cheapest current model: 1M-token context, 128k output, always-on adaptive thinking (kept at low effort by the app).",
+    whenToUse: "Cheapest Claude for high-volume, simple agents (brief, scheduler, bulk content). Keep prompts under 100k tokens or the price rises 5×. Use Sonnet 5.5 for curriculum or Quran-grounded content.",
+  },
+  {
+    id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", provider: "anthropic", newest: true,
+    cost: "Medium", speed: "Fast", pricing: "$2.00 in / $10.00 out per 1M tokens", latency: "~2–5s",
+    quality: "Current Sonnet: same price as Sonnet 5, up to 30% fewer tokens per task by Anthropic's testing. 1M context, 128k output. Thinking cannot be switched off.",
+    whenToUse: "The quality Claude pick for curriculum, syllabus, content and scheduler. Prefer it over Sonnet 5 at the same price.",
+  },
+  {
+    id: "claude-opus-5-5", label: "Claude Opus 5.5", provider: "anthropic",
+    cost: "High", speed: "Slower", pricing: "$4.00 in / $20.00 out per 1M tokens", latency: "~4–10s",
+    quality: "Anthropic's strongest generally-available Opus; always thinks.",
+    whenToUse: "Only for the hardest multi-constraint curriculum plans. Cheaper than Opus 4.8 and newer.",
+  },
+  {
     id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", provider: "gemini", newest: true,
     cost: "Low–Medium", speed: "Fast", pricing: "$0.75 in / $3.75 out per 1M tokens through 2026-12-31, then $1.50 / $7.50", latency: "~1–3s",
     quality: "Google's newest stable Flash model and its recommended default; strong at agentic and long multi-step work.",
@@ -363,6 +381,18 @@ const NEW_TEXT = [
 
 const NEW_TTS = [
   {
+    id: "gemini-3.8-flash-lite-tts", label: "Gemini 3.8 Flash-Lite TTS", provider: "gemini", newest: true, voices: GEMINI_VOICES,
+    cost: "Low", speed: "Medium", pricing: "$0.50 in / $6.00 out per 1M tokens through 2026-12-31, then $1.00 / $12.00", latency: "~2–5s",
+    quality: "Google's cheapest current speech model (the named replacement for the retiring 2.5 and 3.1 TTS models). Not yet call-verified in this app.",
+    whenToUse: "Cheapest narration once the 2.5 TTS models retire on 2026-12-18. Run Test all models before relying on it.",
+  },
+  {
+    id: "gemini-3.8-flash-tts", label: "Gemini 3.8 Flash TTS", provider: "gemini", newest: true, voices: GEMINI_VOICES,
+    cost: "Low–Medium", speed: "Medium", pricing: "$0.50 in / $9.00 out per 1M tokens through 2026-12-31, then $1.00 / $18.00", latency: "~2–5s",
+    quality: "Google's recommended speech model and the replacement for 2.5 Flash TTS. Not yet call-verified in this app.",
+    whenToUse: "Default narration choice after the 2.5 TTS models retire on 2026-12-18. Run Test all models before relying on it.",
+  },
+  {
     id: "gemini-3.1-flash-tts-preview", label: "Gemini 3.1 Flash TTS (preview)", provider: "gemini", newest: true, voices: GEMINI_VOICES,
     cost: "Higher", speed: "Medium", pricing: "$1.00 in / $20.00 out per 1M tokens", latency: "~2–5s",
     quality: "Google's newest and recommended speech model: low latency, natural pacing, same voices.",
@@ -418,7 +448,7 @@ for (const m of MODEL_CATALOG.text) if (m.id === "gpt-4o-mini") delete m.recomme
 // Verified against each provider's pricing page on PRICING_META.checkedAt; the
 // availability flags were verified by calling the API (a retired model returns 404).
 export const PRICING_META = {
-  checkedAt: "2026-09-20",
+  checkedAt: "2026-11-22",
   sources: {
     gemini: "https://ai.google.dev/gemini-api/docs/pricing",
     openai: "https://developers.openai.com/api/docs/pricing",
@@ -445,6 +475,9 @@ const PRICE_TABLE = {
   "gemini-3.5-flash-lite": { in: 0.3, out: 2.5, cachedIn: 0.03 },
   "gemini-3.1-flash-lite": { in: 0.25, out: 1.5, cachedIn: 0.025, audioIn: 0.5, note: "Audio input is $0.50/M." },
   "gemini-3.1-pro-preview": { in: 2.0, out: 12.0, cachedIn: 0.2, note: "Prompts over 200k tokens: $4.00 in / $18.00 out." },
+  "claude-haiku-5-5": { in: 0.1, out: 0.5, cachedIn: 0.01, note: "Prompts over 100k tokens (cache reads and writes count): $0.50 in / $2.50 out for the whole request." },
+  "claude-sonnet-5-5": { in: 2.0, out: 10.0, cachedIn: 0.1 },
+  "claude-opus-5-5": { in: 4.0, out: 20.0, cachedIn: 0.2 },
   "gpt-6-astra": { in: 10.0, out: 50.0, cachedIn: 1.0, note: "Long context: $20 in / $75 out." },
   "gpt-5.6-sol": { in: 4.0, out: 20.0, cachedIn: 0.4, note: "Long context: $8 in / $30 out." },
   "gpt-5.6-terra": { in: 2.0, out: 12.0, cachedIn: 0.2, note: "Long context: $4 in / $18 out." },
@@ -454,6 +487,8 @@ const PRICE_TABLE = {
   "gpt-5.4-mini": { in: 0.75, out: 4.5, cachedIn: 0.075 },
   "gpt-5.4-nano": { in: 0.2, out: 1.25, cachedIn: 0.02 },
   // speech
+  "gemini-3.8-flash-lite-tts": { in: 0.5, out: 6.0, until: "2026-12-31", then: { in: 1.0, out: 12.0 }, note: "Intro price through 2026-12-31; doubles on 2027-01-01. Input is text; output is audio." },
+  "gemini-3.8-flash-tts": { in: 0.5, out: 9.0, until: "2026-12-31", then: { in: 1.0, out: 18.0 }, note: "Intro price through 2026-12-31; doubles on 2027-01-01. Input is text; output is audio." },
   "gemini-3.1-flash-tts-preview": { in: 1.0, out: 20.0, note: "Input is text; output is audio." },
   "gemini-2.5-flash-preview-tts": { in: 0.5, out: 10.0, note: "Input is text; output is audio." },
   "gemini-2.5-pro-preview-tts": { in: 1.0, out: 20.0, note: "Input is text; output is audio." },
@@ -475,6 +510,11 @@ const PRICE_TABLE = {
 
 // state: "ok" | "deprecating" | "unavailable" — see the note for the evidence.
 const AVAILABILITY = {
+  "gemini-2.5-flash": { state: "deprecating", date: "2026-12-01", note: "Google retires this on 1 December 2026 and routes requests to Gemini 3.5 Flash-Lite. The app switches to it on that date if it is still selected." },
+  "gemini-2.5-pro": { state: "deprecating", date: "2026-12-01", note: "Google retires this on 1 December 2026 and routes requests to Gemini 3.8 Flash. The app switches to it on that date if it is still selected." },
+  "gemini-2.5-flash-preview-tts": { state: "deprecating", date: "2026-12-18", note: "Google retires this on 18 December 2026; the app then uses Gemini 3.8 Flash TTS." },
+  "gemini-2.5-pro-preview-tts": { state: "deprecating", date: "2026-12-18", note: "Google retires this on 18 December 2026; the app then uses Gemini 3.8 Flash TTS." },
+  "gemini-3.1-flash-tts-preview": { state: "deprecating", date: "2026-12-18", note: "Google retires this on 18 December 2026; the app then uses Gemini 3.8 Flash TTS." },
   "gemini-2.0-flash": { state: "unavailable", note: "Google now answers 404 “no longer available”. Choosing it makes every call with that agent fail." },
   "gemini-2.5-flash-image": { state: "deprecating", date: "2026-10-02", note: "Google shuts this model down on 2 October 2026. The app switches to Gemini 3.1 Flash Image automatically on that date if it is still selected." },
   "imagen-4.0-fast-generate-001": { state: "unavailable", note: "Not served by the Gemini API any more (404), and absent from Google's pricing page." },
@@ -550,7 +590,12 @@ export function capabilityForAgent(agentKey) {
 // after the provider retires it, the config resolves to the replacement from the
 // date given (or immediately when `from` is omitted, i.e. it is already dead).
 export const RETIRED_MODELS = {
-  "gemini-2.0-flash": { replacement: "gemini-2.5-flash" },
+  "gemini-2.5-flash": { replacement: "gemini-3.5-flash-lite", from: "2026-12-01" },
+  "gemini-2.5-pro": { replacement: "gemini-3.8-flash", from: "2026-12-01" },
+  "gemini-2.5-flash-preview-tts": { replacement: "gemini-3.8-flash-tts", from: "2026-12-18" },
+  "gemini-2.5-pro-preview-tts": { replacement: "gemini-3.8-flash-tts", from: "2026-12-18" },
+  "gemini-3.1-flash-tts-preview": { replacement: "gemini-3.8-flash-tts", from: "2026-12-18" },
+  "gemini-2.0-flash": { replacement: "gemini-3.5-flash-lite" },
   "gemini-2.5-flash-image": { replacement: "gemini-3.1-flash-image", from: "2026-10-02" },
   "imagen-4.0-fast-generate-001": { replacement: "gemini-3.1-flash-lite-image" },
   "imagen-4.0-generate-001": { replacement: "gemini-3.1-flash-image" },

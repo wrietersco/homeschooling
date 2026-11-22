@@ -8,6 +8,7 @@ import {
   parseClaudeResponse,
   createClaudeClient,
   effortFromThinkingBudget,
+  claudeThinkingAlwaysOn,
 } from "../agents/llm.js";
 
 // ─── Request translation: Gemini contents → Anthropic messages ─────────────────
@@ -229,4 +230,47 @@ test("createClaudeClient.generate throws a labeled error on a non-retryable 400"
 
 test("createClaudeClient throws without an API key", () => {
   assert.throws(() => createClaudeClient({ apiKey: "" }), /ANTHROPIC_API_KEY is required/);
+});
+
+// ─── 5.5 generation (thinking cannot be disabled) ──────────────────────────────
+
+test("claudeThinkingAlwaysOn flags the 5.5 generation only", () => {
+  for (const m of ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5"]) assert.ok(claudeThinkingAlwaysOn(m), m);
+  for (const m of ["claude-sonnet-5", "claude-opus-4-8", "", undefined]) assert.ok(!claudeThinkingAlwaysOn(m), String(m));
+});
+
+test("createClaudeClient never sends thinking:disabled to a 5.5 model — low-effort adaptive with a safe max_tokens instead", async () => {
+  let captured = null;
+  const fetchImpl = async (url, opts) => {
+    captured = JSON.parse(opts.body);
+    return { ok: true, json: async () => ({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 4 } }) };
+  };
+  const client = createClaudeClient({ apiKey: "sk", model: "claude-haiku-5-5", fetchImpl });
+  const r = await client.generate({ system: "s", contents: [{ role: "user", parts: [{ text: "hi" }] }], config: { thinkingBudget: 0, maxOutputTokens: 2048, temperature: 0.4 } });
+  assert.deepEqual(captured.thinking, { type: "adaptive" });
+  assert.deepEqual(captured.output_config, { effort: "low" });
+  assert.equal(captured.max_tokens, 16000);
+  assert.equal(captured.temperature, undefined);
+  assert.deepEqual(r.usage, { inputTokens: 3, outputTokens: 4, thoughtTokens: 0, totalTokens: 7 });
+});
+
+test("createClaudeClient retries once with adaptive thinking when an unknown model rejects thinking:disabled", async () => {
+  const bodies = [];
+  const fetchImpl = async (url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    if (bodies.length === 1) return { ok: false, status: 400, text: async () => "thinking.type.disabled is not supported for this model" };
+    return { ok: true, json: async () => ({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }) };
+  };
+  const client = createClaudeClient({ apiKey: "sk", model: "claude-future-9", fetchImpl, baseDelayMs: 1 });
+  const r = await client.generate({ contents: [{ role: "user", parts: [{ text: "hi" }] }] });
+  assert.equal(r.text, "ok");
+  assert.deepEqual(bodies[0].thinking, { type: "disabled" });
+  assert.deepEqual(bodies[1].thinking, { type: "adaptive" });
+  assert.deepEqual(bodies[1].output_config, { effort: "low" });
+});
+
+test("createClaudeClient surfaces a clear 401 when the key is rejected", async () => {
+  const fetchImpl = async () => ({ ok: false, status: 401, text: async () => '{"error":{"type":"authentication_error"}}' });
+  const client = createClaudeClient({ apiKey: "bad", model: "claude-haiku-5-5", fetchImpl });
+  await assert.rejects(() => client.generate({ contents: [{ role: "user", parts: [{ text: "hi" }] }] }), /Claude 401/);
 });

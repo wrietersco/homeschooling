@@ -54,11 +54,21 @@ export const DEFAULT_PRICING = {
     // on 2026-09-01 was cancelled (verified 2026-09-20).
     "claude-sonnet-5": { input: 2.00, output: 10.00 },
     "claude-opus-4-8": { input: 5.00, output: 25.00 },
+    // 5.5 generation (verified against platform.claude.com pricing 2026-11-22).
+    // Haiku 5.5 is billed at a 5× higher rate for the WHOLE request once the prompt
+    // passes 100k tokens (`longPrompt`, applied by priceText).
+    "claude-haiku-5-5": { input: 0.10, output: 0.50, longPrompt: { over: 100000, input: 0.50, output: 2.50 } },
+    "claude-sonnet-5-5": { input: 2.00, output: 10.00 },
+    "claude-opus-5-5": { input: 4.00, output: 20.00 },
   },
   tts: {
     "gemini-2.5-flash-preview-tts": { input: 0.50, output: 10.00 },
     "gemini-2.5-pro-preview-tts": { input: 1.00, output: 20.00 },
     "gemini-3.1-flash-tts-preview": { input: 1.00, output: 20.00 },
+    // Gemini 3.8 speech: intro prices through 2026-12-31, double on 2027-01-01
+    // (from Google's pricing page 2026-11-22; no call-verification yet).
+    "gemini-3.8-flash-tts": { input: 0.50, output: 9.00, until: "2026-12-31", then: { input: 1.00, output: 18.00 } },
+    "gemini-3.8-flash-lite-tts": { input: 0.50, output: 6.00, until: "2026-12-31", then: { input: 1.00, output: 12.00 } },
     // OpenAI's audio response carries no token counts, so these are billed via the
     // audioSeconds→output-tokens fallback (25 tok/s) in priceTts. gpt-4o-mini-tts
     // is token-priced (~$0.015/min audio); tts-1/-hd are really per-character but
@@ -137,9 +147,11 @@ export function effectiveRate(rate, now = new Date()) {
 
 // Thinking tokens are billed at the output rate, so fold them into output.
 export function priceText({ model, usage = {}, pricing = DEFAULT_PRICING, now = new Date() }) {
-  const rate = effectiveRate(pricing.text?.[model], now) || FALLBACK.text;
+  let rate = effectiveRate(pricing.text?.[model], now) || FALLBACK.text;
   const input = Number(usage.inputTokens) || 0;
   const output = (Number(usage.outputTokens) || 0) + (Number(usage.thoughtTokens) || 0);
+  // Long-prompt tier (Claude Haiku 5.5): the whole request is billed at the higher rate.
+  if (rate.longPrompt && input > rate.longPrompt.over) rate = { ...rate, input: rate.longPrompt.input, output: rate.longPrompt.output };
   const costUsd = round6((input * rate.input + output * rate.output) / 1e6);
   return { costUsd, rate };
 }

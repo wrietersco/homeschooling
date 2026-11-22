@@ -8,7 +8,7 @@ test("AGENT_KEYS covers every configurable agent", () => {
 });
 
 test("mergeAgentConfig falls back to built-in defaults when nothing stored", () => {
-  const cfg = mergeAgentConfig({ default: {}, agents: {} }, "content");
+  const cfg = mergeAgentConfig({ default: {}, agents: {} }, "content", new Date("2026-11-22T00:00:00Z"));
   assert.equal(cfg.model, AGENT_DEFAULTS.content.model);
   assert.equal(cfg.temperature, 0.5);
   assert.equal(cfg.maxOutputTokens, 8192); // raised from 4096 to avoid truncating large qaida/reading content

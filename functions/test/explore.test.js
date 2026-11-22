@@ -388,7 +388,7 @@ test("retired / deprecating models are flagged (verified by calling the API)", (
   assert.equal(state("image", "imagen-4.0-generate-001"), "unavailable");
   assert.equal(state("image", "gemini-2.5-flash-image"), "deprecating");
   assert.equal(MODEL_CATALOG.image.find((m) => m.id === "gemini-2.5-flash-image").availability.date, "2026-10-02");
-  assert.equal(state("text", "gemini-2.5-flash"), "ok");
+  assert.equal(state("text", "gemini-2.5-flash"), "deprecating");
 });
 
 // ── Session highlights: free-shaped JSON, hard limits ────────────────────────
