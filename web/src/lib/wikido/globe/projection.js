@@ -4,7 +4,11 @@
 
 export const DEG = Math.PI / 180;
 export const ZOOM_MIN = 1;
-export const ZOOM_MAX = 6;
+// Zoom is a squared magnification: the globe's radius on screen grows with
+// sqrt(zoom). 2e9 ⇒ ~45,000× the whole-Earth view, i.e. a ~350 m wide window
+// on a phone-sized map — one landmark fills the screen.
+export const ZOOM_MAX = 2e9;
+export const EARTH_RADIUS_KM = 6371;
 
 // Zoom threshold per spot level. The globe opens at country level; zooming in
 // once reveals city spots, once more reveals location spots (landmarks).
@@ -16,6 +20,69 @@ export const LEVEL_ZOOM = { country: 1, city: 2.2, location: 3.8 };
 export const COUNTRY_ZOOM_WITH_CONTINENTS = 1.7;
 
 export const SPOT_LEVELS = ["continent", "country", "city", "location"];
+
+// 0 at country-scale zooms → 1 once zoomed far in (about zoom 3000+). Drives the
+// things that must change smoothly with depth: bigger zoom steps, drag speed.
+export function deepWeight(zoom) {
+  const t = (Math.log10(Math.max(1, Number(zoom) || 1)) - 0.5) / 3;
+  return Math.min(1, Math.max(0, t));
+}
+
+// Logarithmic zoom steps: a button click / wheel notch / pinch multiplies the
+// zoom by `base` at world scale and by base³ deep down, so ~25 clicks span the
+// whole range instead of ~70.
+export function zoomFactor(zoom, base) {
+  return Math.pow(base, 1 + 2 * deepWeight(zoom));
+}
+
+// Drag speed (degrees per pixel) so the ground tracks the finger: slower as
+// you zoom in, and longitude is stretched by 1/cos(lat) once zoomed in (the
+// view is near-flat there, a degree of longitude is shorter away from the
+// equator).
+export function dragRates(zoom, phi) {
+  const k = 0.2495 / Math.sqrt(Math.max(1, zoom));
+  const w = deepWeight(zoom);
+  const cos = Math.max(0.15, Math.cos((Number(phi) || 0) * DEG));
+  return { lng: k * (1 + (1 / cos - 1) * w), lat: k };
+}
+
+// ── zoom ⇄ real-world scale ───────────────────────────────────────────────────
+// `radiusFactor` is the editor/explorer's fraction of the shorter canvas side
+// used as the globe radius at zoom 1 (0.42 / 0.38).
+export function pixelsPerKm(zoom, minDim, radiusFactor) {
+  return (minDim * radiusFactor * Math.sqrt(zoom)) / EARTH_RADIUS_KM;
+}
+export function spanKmAtZoom(zoom, minDim, radiusFactor) {
+  return minDim / pixelsPerKm(zoom, minDim, radiusFactor);
+}
+export function zoomForSpanKm(km, minDim, radiusFactor) {
+  const ppk = minDim / Math.max(0.01, km);
+  const z = Math.pow((ppk * EARTH_RADIUS_KM) / (minDim * radiusFactor), 2);
+  return clampZoom(z);
+}
+export function formatSpan(km) {
+  if (km >= 1000) return `${Math.round(km / 100) * 100} km`;
+  if (km >= 10) return `${Math.round(km)} km`;
+  if (km >= 1) return `${km.toFixed(1)} km`;
+  return `${Math.round(km * 1000)} m`;
+}
+// How wide a view should be when we zoom TO a place of this level.
+export const FOCUS_SPAN_KM = { continent: 9000, country: 1800, city: 30, location: 1.2 };
+export function focusZoomForLevel(level, minDim = 400, radiusFactor = 0.42) {
+  const km = FOCUS_SPAN_KM[level] ?? FOCUS_SPAN_KM.city;
+  // continents/countries never zoom closer than the whole-planet view allows
+  return Math.max(ZOOM_MIN * 1.4, zoomForSpanKm(km, minDim, radiusFactor));
+}
+// Decimals worth showing for a lat/lng at this zoom (1 ≈ 11 km … 6 ≈ 0.1 m).
+export function decimalsForZoom(zoom) {
+  const z = Number(zoom) || 1;
+  if (z < 20) return 1;
+  if (z < 300) return 2;
+  if (z < 3e4) return 3;
+  if (z < 3e6) return 4;
+  if (z < 3e8) return 5;
+  return 6;
+}
 
 export function clampZoom(z) {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(z) || ZOOM_MIN));
@@ -158,8 +225,8 @@ export function currentLevelAtZoom(zoom, { continents = false } = {}) {
 }
 
 // Readable coordinate readout for the studio: 31.5°N, 74.3°E
-export function formatLatLng(lat, lng) {
+export function formatLatLng(lat, lng, decimals = 1) {
   const ns = lat >= 0 ? "N" : "S";
   const ew = lng >= 0 ? "E" : "W";
-  return `${Math.abs(lat).toFixed(1)}°${ns}, ${Math.abs(lng).toFixed(1)}°${ew}`;
+  return `${Math.abs(lat).toFixed(decimals)}°${ns}, ${Math.abs(lng).toFixed(decimals)}°${ew}`;
 }

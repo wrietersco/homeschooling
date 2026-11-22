@@ -6,8 +6,8 @@
 // row. Dragging the planet itself spins it; buttons/wheel zoom.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
-  ZOOM_MAX, ZOOM_MIN, clampRotation, clampZoom, formatLatLng,
-  projectSpot, screenToLatLng,
+  ZOOM_MAX, ZOOM_MIN, clampRotation, clampZoom, decimalsForZoom, dragRates, focusZoomForLevel, formatLatLng,
+  formatSpan, projectSpot, screenToLatLng, spanKmAtZoom, zoomFactor,
 } from "@/lib/wikido/globe/projection";
 import { drawGlobe } from "@/lib/wikido/globe/render";
 
@@ -17,10 +17,12 @@ const props = defineProps({
   // catalog places the system knows but this globe has not added yet — drawn as
   // faint dots at their known coordinates; clicking one adds it (switched off)
   ghosts: { type: Array, default: () => [] },
-  // zoom used when the editor opens already facing a selected pin
-  focusZoom: { type: Number, default: 1.8 },
+  // zoom used when the editor opens already facing a selected pin; 0 = pick by
+  // the pin's kind (continent / country / city / landmark)
+  focusZoom: { type: Number, default: 0 },
 });
-const emit = defineEmits(["select", "relocate", "add-place"]);
+const emit = defineEmits(["select", "relocate", "add-place", "view"]);
+const RADIUS_FACTOR = 0.42;
 
 const rot = ref(clampRotation({ lambda: 70, phi: 22 }));
 const zoom = ref(ZOOM_MIN);
@@ -44,12 +46,19 @@ import("@/lib/wikido/globe/borders.js")
 
 function globeRadius() {
   const { w, h } = size.value;
-  return Math.max(10, Math.min(w, h) * 0.42 * Math.sqrt(zoom.value));
+  return Math.max(10, Math.min(w, h) * RADIUS_FACTOR * Math.sqrt(zoom.value));
 }
 
 function geometry() {
   const { w, h } = size.value;
   return { cx: w / 2, cy: h / 2, r: globeRadius() };
+}
+
+// a pin far outside the window (deep zoom flings it millions of pixels away) is
+// not drawn — except the one being dragged
+const dragId = ref("");
+function nearWindow(p, w, h, id) {
+  return id === dragId.value || (p.x > -150 && p.x < w + 150 && p.y > -150 && p.y < h + 150);
 }
 
 // pin numbers follow the studio's places list (doorway order), not depth
@@ -66,8 +75,15 @@ const placed = computed(() => {
       const p = projectSpot(+spot.lat, +spot.lng, rot.value, { cx, cy, r });
       return { spot, ...p };
     })
-    .filter((p) => p.visible)
+    .filter((p) => p.visible && nearWindow(p, w, h, p.spot.id))
     .sort((a, b) => a.depth - b.depth);
+});
+
+// how wide the window is, once zoomed in far enough to matter
+const scaleLabel = computed(() => {
+  const { w, h } = size.value;
+  if (!w || zoom.value < 300) return "";
+  return `≈ ${formatSpan(spanKmAtZoom(zoom.value, Math.min(w, h), RADIUS_FACTOR))} across`;
 });
 
 const levelClass = (level) => `lvl-${level || "city"}`;
@@ -81,7 +97,7 @@ const ghostsPlaced = computed(() => {
   return props.ghosts
     .filter((place) => !taken.has(place.spotId))
     .map((place) => ({ place, ...projectSpot(+place.lat, +place.lng, rot.value, { cx, cy, r }) }))
-    .filter((p) => p.visible)
+    .filter((p) => p.visible && nearWindow(p, w, h, ""))
     .sort((a, b) => a.depth - b.depth);
 });
 
@@ -93,8 +109,10 @@ function draw() {
   const { cx, cy, r } = geometry();
   const rings = placed.value
     .filter((p) => p.spot.level !== "country" && p.spot.level !== "continent")
-    .map((p) => ({ x: p.x, y: p.y, radius: 11 * Math.sqrt(zoom.value), opacity: 1 }));
-  drawGlobe(g, { w, h, rot: rot.value, r }, { borders: borders.value, rings, dpr: window.devicePixelRatio || 1 });
+    .map((p) => ({ x: p.x, y: p.y, radius: Math.min(11 * Math.sqrt(zoom.value), 28), opacity: 1 }));
+  drawGlobe(g, { w, h, rot: rot.value, r }, {
+    borders: borders.value, rings, dpr: window.devicePixelRatio || 1, onTile: () => { needsDraw = true; },
+  });
 }
 
 function frame() {
@@ -152,7 +170,7 @@ function onPointerMove(e) {
   if (pinch && pointers.size === 2) {
     const [a, b] = [...pointers.values()];
     const dist = Math.hypot(a.x - b.x, a.y - b.y);
-    if (pinch.dist > 0) zoomTo(pinch.zoom * (dist / pinch.dist));
+    if (pinch.dist > 0) zoomTo(pinch.zoom * Math.pow(dist / pinch.dist, Math.log10(Math.max(1, pinch.zoom)) > 2 ? 3 : 1.5));
     return;
   }
   if (pinDrag && e.pointerId === pinDrag.id) {
@@ -160,9 +178,9 @@ function onPointerMove(e) {
     const { cx, cy, r } = geometry();
     const { lat, lng } = screenToLatLng(e.clientX - rect.left, e.clientY - rect.top, rot.value, { cx, cy, r });
     pinDrag.moved = true;
-    pinDrag.lat = Math.round(lat * 10000) / 10000;
-    pinDrag.lng = Math.round(lng * 10000) / 10000;
-    readout.value = `${pinDrag.spot.label}: ${formatLatLng(lat, lng)} — unsaved`;
+    pinDrag.lat = Math.round(lat * 1e6) / 1e6; // ~0.1 m: accurate even at the deepest zoom
+    pinDrag.lng = Math.round(lng * 1e6) / 1e6;
+    readout.value = `${pinDrag.spot.label}: ${formatLatLng(lat, lng, Math.max(4, decimalsForZoom(zoom.value)))} — unsaved`;
     emit("relocate", pinDrag.spot.id, pinDrag.lat, pinDrag.lng);
     needsDraw = true;
     return;
@@ -173,8 +191,8 @@ function onPointerMove(e) {
   if (!drag.moved && Math.hypot(dx, dy) < 5) return;
   drag.moved = true;
   dragging.value = true;
-  const k = 0.26 / Math.sqrt(zoom.value);
-  rot.value = clampRotation({ lambda: drag.lambda - dx * k, phi: drag.phi + dy * k });
+  const k = dragRates(zoom.value, drag.phi);
+  rot.value = clampRotation({ lambda: drag.lambda - dx * k.lng, phi: drag.phi + dy * k.lat });
   needsDraw = true;
 }
 
@@ -184,6 +202,7 @@ function onPointerUp(e) {
   if (pinDrag && e.pointerId === pinDrag.id) {
     const movedPin = pinDrag;
     pinDrag = null;
+    dragId.value = "";
     if (!movedPin.moved) emit("select", movedPin.spot.id);
     return;
   }
@@ -205,19 +224,41 @@ function startPinDrag(e, spot) {
   e.stopPropagation();
   e.target.setPointerCapture?.(e.pointerId);
   pinDrag = { id: e.pointerId, spot, moved: false };
+  dragId.value = spot.id;
 }
 
 function onWheel(e) {
   e.preventDefault();
-  zoomTo(zoom.value * (e.deltaY < 0 ? 1.13 : 1 / 1.13));
+  const f = zoomFactor(zoom.value, 1.13);
+  zoomTo(zoom.value * (e.deltaY < 0 ? f : 1 / f));
 }
 
 function zoomTo(target) {
   zoom.value = clampZoom(target);
   needsDraw = true;
+  emit("view", { zoom: zoom.value, decimals: decimalsForZoom(zoom.value) });
+}
+
+// the zoom that suits a place of this kind (continent … landmark)
+function focusZoomFor(spot) {
+  if (props.focusZoom > 0) return clampZoom(props.focusZoom);
+  const { w, h } = size.value;
+  return focusZoomForLevel(spot?.level, Math.min(w, h) || 400, RADIUS_FACTOR);
+}
+
+// glide to a pin AND zoom to its level; asking again from there goes deeper
+function zoomToSpot(spot) {
+  if (!spot || !Number.isFinite(+spot.lat) || !Number.isFinite(+spot.lng)) return;
+  const want = focusZoomFor(spot);
+  const deeper = zoom.value >= want * 0.9 ? zoom.value * zoomFactor(zoom.value, 1.35) ** 3 : want;
+  animateRotationTo({ lambda: +spot.lng, phi: +spot.lat }, clampZoom(deeper));
+}
+function zoomToSelected() {
+  zoomToSpot(props.spots.find((s) => s.id === props.selectedId));
 }
 function zoomStep(dir) {
-  zoomTo(zoom.value * (dir > 0 ? 1.35 : 1 / 1.35));
+  const f = zoomFactor(zoom.value, 1.35);
+  zoomTo(zoom.value * (dir > 0 ? f : 1 / f));
 }
 function resetView() {
   zoomTo(ZOOM_MIN);
@@ -233,18 +274,21 @@ watch(
     if (spot && Number.isFinite(+spot.lat)) animateRotationTo({ lambda: +spot.lng, phi: +spot.lat });
   }
 );
-function animateRotationTo(target) {
+function animateRotationTo(target, zoomTarget) {
   const from = { ...rot.value };
   const to = clampRotation(target);
   let dLambda = to.lambda - from.lambda;
   if (dLambda > 180) dLambda -= 360;
   if (dLambda < -180) dLambda += 360;
-  anim = { from, dLambda, dPhi: to.phi - from.phi, t: 0 };
+  const z0 = zoom.value;
+  const z1 = zoomTarget ? clampZoom(zoomTarget) : z0;
+  anim = { from, dLambda, dPhi: to.phi - from.phi, t: 0, z0, z1, step: z1 === z0 ? 0.055 : 0.03 };
 }
 function stepRotationAnim() {
   const a = anim;
-  a.t = Math.min(1, a.t + 0.055);
+  a.t = Math.min(1, a.t + a.step);
   const e = a.t < 0.5 ? 2 * a.t * a.t : 1 - Math.pow(-2 * a.t + 2, 2) / 2;
+  if (a.z1 !== a.z0) zoomTo(Math.exp(Math.log(a.z0) + (Math.log(a.z1) - Math.log(a.z0)) * e));
   rot.value = clampRotation({ lambda: a.from.lambda + a.dLambda * e, phi: a.from.phi + a.dPhi * e });
   needsDraw = true;
   if (a.t >= 1) anim = null;
@@ -258,7 +302,8 @@ onMounted(() => {
   const focus = props.spots.find((s) => s.id === props.selectedId);
   if (focus && Number.isFinite(+focus.lat) && Number.isFinite(+focus.lng)) {
     rot.value = clampRotation({ lambda: +focus.lng, phi: +focus.lat });
-    zoom.value = clampZoom(props.focusZoom);
+    zoom.value = focusZoomFor(focus);
+    emit("view", { zoom: zoom.value, decimals: decimalsForZoom(zoom.value) });
   }
   if (typeof ResizeObserver !== "undefined") {
     ro = new ResizeObserver(resize);
@@ -299,19 +344,21 @@ onBeforeUnmount(() => {
       :class="[levelClass(p.spot.level), { selected: p.spot.id === selectedId, off: p.spot.enabled === false }]"
       :style="{ left: `${p.x}px`, top: `${p.y}px`, zIndex: 5 + Math.round(p.depth * 20) }"
       :aria-label="`Spot ${numbering.get(p.spot.id)}: ${p.spot.label}${p.spot.enabled === false ? ' (switched off)' : ''} — drag to relocate`"
-      :title="`${p.spot.label} — ${formatLatLng(+p.spot.lat, +p.spot.lng)} (${p.spot.level}${p.spot.enabled === false ? ', switched off' : ''}). Drag to relocate.`"
+      :title="`${p.spot.label} — ${formatLatLng(+p.spot.lat, +p.spot.lng)} (${p.spot.level}${p.spot.enabled === false ? ', switched off' : ''}). Drag to relocate; double-click to zoom in.`"
       @pointerdown="startPinDrag($event, p.spot)"
+      @dblclick.stop="zoomToSpot(p.spot)"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
       @pointercancel="onPointerUp"
     >{{ numbering.get(p.spot.id) }}</button>
 
     <div class="wd-e-tools" role="group" aria-label="Editor globe zoom">
+      <button v-if="selectedId" type="button" class="wd-e-btn" aria-label="Zoom to this pin" title="Zoom to this pin (double-clicking a pin does the same)" @click="zoomToSelected"><span class="material-symbols-rounded">my_location</span></button>
       <button type="button" class="wd-e-btn" aria-label="Zoom in" :disabled="zoom >= ZOOM_MAX" @click="zoomStep(1)"><span class="material-symbols-rounded">add</span></button>
       <button type="button" class="wd-e-btn" aria-label="Zoom out" :disabled="zoom <= ZOOM_MIN" @click="zoomStep(-1)"><span class="material-symbols-rounded">remove</span></button>
       <button type="button" class="wd-e-btn" aria-label="Reset view" title="Back to the whole Earth" @click="resetView"><span class="material-symbols-rounded">public</span></button>
     </div>
-    <p class="wd-e-readout" role="status">{{ readout }}</p>
+    <p class="wd-e-readout" role="status">{{ readout || scaleLabel }}</p>
   </div>
 </template>
 

@@ -90,7 +90,7 @@ describe("globe projection", () => {
 
   it("clamps zoom and rotation into safe ranges", () => {
     expect(clampZoom(0.2)).toBe(ZOOM_MIN);
-    expect(clampZoom(99)).toBe(ZOOM_MAX);
+    expect(clampZoom(1e12)).toBe(ZOOM_MAX);
     expect(clampRotation({ lambda: 270, phi: 120 })).toEqual({ lambda: -90, phi: 85 });
     expect(clampRotation({ lambda: -200, phi: -120 })).toEqual({ lambda: 160, phi: -85 });
   });
@@ -159,5 +159,45 @@ describe("globe projection", () => {
     expect(formatLatLng(31.55, 74.34)).toBe("31.6°N, 74.3°E");
     expect(formatLatLng(-22.91, -43.17)).toBe("22.9°S, 43.2°W");
     expect(180 / Math.PI).toBeCloseTo(1 / DEG, 6);
+  });
+});
+
+describe("deep zoom (landmark level)", () => {
+  it("zooms far enough that a landmark-sized area fills a phone-sized view", async () => {
+    const m = await import("./projection");
+    const span = m.spanKmAtZoom(m.ZOOM_MAX, 400, 0.42);
+    expect(span).toBeLessThan(1);
+    expect(span).toBeGreaterThan(0.1);
+  });
+
+  it("takes bigger zoom steps deeper in, and drags slower", async () => {
+    const m = await import("./projection");
+    expect(m.zoomFactor(1, 1.35)).toBeCloseTo(1.35 ** 1);
+    expect(m.zoomFactor(1e6, 1.35)).toBeCloseTo(1.35 ** 3);
+    expect(m.dragRates(1e6, 0).lat).toBeLessThan(m.dragRates(4, 0).lat / 100);
+    // deep down, longitude is stretched by 1/cos(lat) so the ground follows the finger
+    expect(m.dragRates(1e8, 60).lng).toBeCloseTo(m.dragRates(1e8, 60).lat * 2, 1);
+  });
+
+  it("shows more decimals as you zoom in, and the pin round-trips at max zoom", async () => {
+    const m = await import("./projection");
+    expect(m.decimalsForZoom(1)).toBe(1);
+    expect(m.decimalsForZoom(m.ZOOM_MAX)).toBe(6);
+    expect(m.formatLatLng(51.5055, -0.0754, 4)).toBe("51.5055°N, 0.0754°W");
+    const rot = { lambda: -0.0754, phi: 51.5055 };
+    const geo = { cx: 200, cy: 200, r: 0.42 * 400 * Math.sqrt(m.ZOOM_MAX) };
+    const p = m.projectSpot(51.50555, -0.07535, rot, geo);
+    const back = m.screenToLatLng(p.x, p.y, rot, geo);
+    expect(back.lat).toBeCloseTo(51.50555, 8);
+    expect(back.lng).toBeCloseTo(-0.07535, 8);
+  });
+
+  it("picks a focus zoom per place kind: deeper for landmarks than countries", async () => {
+    const m = await import("./projection");
+    const z = (l) => m.focusZoomForLevel(l, 400, 0.42);
+    expect(z("continent")).toBeLessThan(z("country"));
+    expect(z("country")).toBeLessThan(z("city"));
+    expect(z("city")).toBeLessThan(z("location"));
+    expect(z("location")).toBeLessThanOrEqual(m.ZOOM_MAX);
   });
 });

@@ -169,8 +169,8 @@ describe("WikidoGlobe", () => {
 
   it("exposes a programmatic zoom clamp for tests and power users", () => {
     const w = mountGlobe();
-    w.vm.setZoom(99);
-    expect(w.vm.zoom).toBeLessThanOrEqual(6);
+    w.vm.setZoom(1e15);
+    expect(w.vm.zoom).toBeLessThanOrEqual(2e9);
     w.vm.setZoom(0.1);
     expect(w.vm.zoom).toBeGreaterThanOrEqual(1);
   });

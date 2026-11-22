@@ -178,7 +178,9 @@ async function leavePick() {
 }
 
 // ── step 3: the spot ──────────────────────────────────────────────────────────
-const readout = computed(() => (liveSpot.value ? formatLatLng(+liveSpot.value.lat, +liveSpot.value.lng) : ""));
+// more decimals as the map zooms in, so a landmark pin can be placed to a few metres
+const readoutDecimals = ref(1);
+const readout = computed(() => (liveSpot.value ? formatLatLng(+liveSpot.value.lat, +liveSpot.value.lng, readoutDecimals.value) : ""));
 
 // ── step 4: the scene ─────────────────────────────────────────────────────────
 const SCENE_NOTES = [
@@ -468,6 +470,7 @@ watch(stepId, () => nextTick(() => dialogEl.value?.querySelector(".wz-body")?.sc
                   :spots="[liveSpot]"
                   :selected-id="liveSpot.id"
                   @relocate="relocate"
+                  @view="(v) => { readoutDecimals = v.decimals; }"
                 />
               </div>
               <p class="wz-readout" role="status">📍 {{ readout }}</p>

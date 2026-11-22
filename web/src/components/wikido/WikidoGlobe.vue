@@ -17,8 +17,8 @@ import { useWikidoProgress } from "@/lib/wikido/progress";
 import { resolveWikidoAudioUrl } from "@/lib/wikido/audio";
 import { useSpeech } from "@/composables/useSpeech";
 import {
-  ZOOM_MAX, ZOOM_MIN, clampRotation, clampZoom, currentLevelAtZoom,
-  projectSpot, spotOpacityAtZoom,
+  ZOOM_MAX, ZOOM_MIN, clampRotation, clampZoom, currentLevelAtZoom, dragRates,
+  projectSpot, spotOpacityAtZoom, zoomFactor,
 } from "@/lib/wikido/globe/projection";
 import { drawGlobe } from "@/lib/wikido/globe/render";
 import { isSpotEnabled } from "../../../../functions/lib/wikidoGlobe.js";
@@ -75,7 +75,9 @@ const placed = computed(() => {
     .map((spot) => {
       const p = projectSpot(+spot.lat, +spot.lng, rot.value, { cx, cy, r });
       const opacity = spotOpacityAtZoom(spot.level, zoom.value, { continents: hasContinents.value });
-      return { spot, ...p, opacity, shown: p.visible && opacity > 0.02 };
+      // deep zoom throws far-off pins to absurd pixel positions: keep only those near the window
+      const near = p.x > -200 && p.x < w + 200 && p.y > -200 && p.y < h + 200;
+      return { spot, ...p, opacity, shown: p.visible && near && opacity > 0.02 };
     })
     .filter((p) => p.shown)
     .sort((a, b) => a.depth - b.depth); // far first, so near spots stack on top
@@ -168,8 +170,10 @@ function draw() {
   const r = globeRadius();
   const rings = placed.value
     .filter((p) => p.spot.level !== "country" && p.spot.level !== "continent")
-    .map((p) => ({ x: p.x, y: p.y, radius: 11 * Math.sqrt(zoom.value), opacity: p.opacity }));
-  drawGlobe(g, { w, h, rot: rot.value, r }, { borders: borders.value, rings, dpr: window.devicePixelRatio || 1 });
+    .map((p) => ({ x: p.x, y: p.y, radius: Math.min(11 * Math.sqrt(zoom.value), 28), opacity: p.opacity }));
+  drawGlobe(g, { w, h, rot: rot.value, r }, {
+    borders: borders.value, rings, dpr: window.devicePixelRatio || 1, onTile: () => { needsDraw = true; },
+  });
 }
 
 function frame(ts) {
@@ -245,7 +249,7 @@ function onPointerMove(e) {
   if (pinch && pointers.size === 2) {
     const [a, b] = [...pointers.values()];
     const dist = Math.hypot(a.x - b.x, a.y - b.y);
-    if (pinch.dist > 0) zoomTo(pinch.zoom * (dist / pinch.dist));
+    if (pinch.dist > 0) zoomTo(pinch.zoom * Math.pow(dist / pinch.dist, 1 + 2 * (Math.log10(Math.max(1, pinch.zoom)) > 2 ? 1 : 0.5)));
     return;
   }
   if (!drag || e.pointerId !== drag.id) return;
@@ -255,10 +259,10 @@ function onPointerMove(e) {
   drag.moved = true;
   dragging.value = true;
   hintVisible.value = false;
-  const k = 0.26 / Math.sqrt(zoom.value);
+  const k = dragRates(zoom.value, drag.phi);
   rot.value = clampRotation({
-    lambda: drag.lambda - dx * k,
-    phi: drag.phi + dy * k,
+    lambda: drag.lambda - dx * k.lng,
+    phi: drag.phi + dy * k.lat,
   });
   needsDraw = true;
 }
@@ -290,7 +294,8 @@ function onWheel(e) {
   e.preventDefault();
   hasInteracted.value = true;
   hintVisible.value = false;
-  zoomTo(zoom.value * (e.deltaY < 0 ? 1.13 : 1 / 1.13));
+  const f = zoomFactor(zoom.value, 1.13);
+  zoomTo(zoom.value * (e.deltaY < 0 ? f : 1 / f));
 }
 
 function zoomTo(target) {
@@ -301,7 +306,8 @@ function zoomTo(target) {
 function zoomStep(dir) {
   hasInteracted.value = true;
   hintVisible.value = false;
-  zoomTo(zoom.value * (dir > 0 ? 1.35 : 1 / 1.35));
+  const f = zoomFactor(zoom.value, 1.35);
+  zoomTo(zoom.value * (dir > 0 ? f : 1 / f));
 }
 
 function resetView() {
