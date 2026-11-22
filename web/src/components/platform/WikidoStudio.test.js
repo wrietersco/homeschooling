@@ -59,6 +59,7 @@ vi.mock("@/services/wikidoAdmin", () => ({
   planWikidoRelinks: vi.fn(async () => ({ moves: [] })),
   reorderWikidoTopics: vi.fn(),
   sortStudioTopics: (t) => t,
+  writeWikidoPerspective: vi.fn(async ({ sceneId, lens }) => ({ sceneId: `${sceneId}-${lens}`, baseId: sceneId, saved: true, perspectives: [], scene: { id: `${sceneId}-${lens}`, title: "L", narration: "n", perspectiveOf: sceneId, lens, image: { src: "", alt: "a" }, hotspots: [] } })),
   BRIDGE_URL: "http://localhost:8787",
 }));
 

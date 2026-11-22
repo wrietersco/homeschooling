@@ -452,3 +452,69 @@ export function dropUnreadyLenses(pack) {
   for (const id of before) if (!after.has(id)) delete next[id];
   return { ...pack, scenes: next };
 }
+
+// ── building a lens scene from the writer's answer ────────────────────────────
+const clampPct = (n, lo, hi, d) => (Number.isFinite(+n) && n !== null && n !== "" ? Math.min(hi, Math.max(lo, +n)) : d);
+const slug = (s) => String(s || "").toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+
+// The writer's (or a previewed) scene -> a saveable lens scene, or { errors }.
+// Keeps at most 8 complete spots, spreads missing coordinates, appends the
+// lens's art guidance to the picture brief, and stamps the back-link.
+export function buildLensScene(raw, { baseId, base, lensId, sceneId }) {
+  const lens = perspectiveById(lensId);
+  const errors = [];
+  if (!lens || lensId === MAIN_LENS) return { errors: ["unknown perspective"] };
+  const src = raw?.scene && typeof raw.scene === "object" ? raw.scene : raw;
+  const title = String(src?.title || `${base?.title || baseId} — ${lens.name}`).trim().slice(0, 90);
+  const narration = String(src?.narration || "").trim().slice(0, 900);
+  if (!narration) errors.push("the perspective has no narration");
+  const seen = new Set();
+  const hotspots = [];
+  for (const h of Array.isArray(src?.hotspots) ? src.hotspots : []) {
+    if (hotspots.length >= 8) break;
+    let id = slug(h?.id || h?.label);
+    const label = String(h?.label || "").trim().slice(0, 60);
+    const cardTitle = String(h?.info?.title || label).trim().slice(0, 90);
+    const body = (Array.isArray(h?.info?.body) ? h.info.body : [h?.info?.body]).map((x) => String(x || "").trim()).filter(Boolean).slice(0, 4);
+    if (!id || !label || !body.length) continue;
+    const stem = id;
+    let n = 2;
+    while (seen.has(id)) id = `${stem}-${n++}`;
+    seen.add(id);
+    const k = hotspots.length;
+    const visual = String(h?.visual || "").trim();
+    const fact = String(h?.info?.fact || "").trim();
+    hotspots.push({
+      id,
+      label,
+      blurb: String(h?.blurb || cardTitle).trim().slice(0, 90),
+      x: Math.round(clampPct(h?.x, 6, 94, 12 + ((k * 23) % 76))),
+      y: Math.round(clampPct(h?.y, 10, 90, 25 + ((k * 17) % 55))),
+      ...(visual ? { visual: visual.slice(0, 140) } : {}),
+      info: { title: cardTitle, body, ...(fact ? { fact: fact.slice(0, 300) } : {}) },
+    });
+  }
+  if (hotspots.length < 3) errors.push(`the perspective needs at least 3 spots (got ${hotspots.length})`);
+  if (errors.length) return { errors };
+  const brief = String(src?.artPrompt || "").trim().slice(0, 1200);
+  const guidance = `Perspective: ${lens.name}. ${lens.art}`;
+  return {
+    errors: [],
+    scene: {
+      id: sceneId,
+      title,
+      narration,
+      perspectiveOf: baseId,
+      lens: lensId,
+      artPrompt: brief.includes(guidance) ? brief : `${brief}${brief ? " " : ""}${guidance}`,
+      image: { src: "", alt: String(src?.image?.alt || `${title}: ${lens.description}`).slice(0, 240) },
+      hotspots,
+    },
+  };
+}
+
+// The base scene's lens list with lensId -> sceneId added (or replaced).
+export function withLensEntry(base, lensId, sceneId) {
+  const list = (Array.isArray(base?.perspectives) ? base.perspectives : []).filter((e) => e?.id !== lensId);
+  return [...list.map((e) => ({ id: e.id, sceneId: e.sceneId })), { id: lensId, sceneId }];
+}

@@ -59,6 +59,9 @@ export const getWikidoKokoroJob = (data) => call("getWikidoKokoroJob", { timeout
 
 // Spot details — the agent writes one spot's card (label, teaser, card text,
 // fun fact) from the scene/picture context (superadmin only).
+// Perspectives — write one lens (History, Culture…) of a scene; dryRun previews
+// without saving, draft saves a previewed lens unchanged.
+export const writeWikidoPerspective = (data) => call("writeWikidoPerspective", { timeout: 240_000 })(data || {});
 export const generateWikidoSpotDetails = (data) => call("generateWikidoSpotDetails", { timeout: 120_000 })(data || {});
 // topic-wide depth assessment — read-only; the studio builds what it proposes
 export const planWikidoDepth = (data) => call("planWikidoDepth", { timeout: 180_000 })(data || {});

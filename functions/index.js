@@ -137,6 +137,10 @@ export {
   reorderWikidoTopics,
 } from "./agents/wikido.js";
 
+// Wikido Perspectives — write one lens (History, Culture…) of a scene; the
+// studio paints and voices it through the ordinary scene pipelines.
+export { writeWikidoPerspective } from "./agents/wikidoPerspectives.js";
+
 // Wikido Kokoro audio job — fire-and-forget queue for the free premium voice.
 // The studio enqueues and can close the tab; the scheduled worker drains the
 // queue clip by clip (same shape as the Qaida audio job).

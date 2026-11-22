@@ -17,8 +17,14 @@ import {
   checkVoiceoverBridge, synthesizeOnBridge, planVoiceoverClips, attachWikidoAudio, generateWikidoAudios, generateWikidoKokoroAudios, scopeVoiceoverClips, BRIDGE_URL,
   requestWikidoKokoroJob, stopWikidoKokoroJob, getWikidoKokoroJob,
   startVoiceoverBridge, bridgeLauncherStatus,
-  reorderWikidoTopics, sortStudioTopics,
+  reorderWikidoTopics, sortStudioTopics, writeWikidoPerspective,
 } from "@/services/wikidoAdmin";
+import { useLensQueue, createMutex, createPatchLog } from "@/composables/useLensQueue";
+import { defaultLensJobs, newLensJob, jobActive } from "@/lib/wikido/perspectiveJobs";
+import { baseSceneId, lensEntries, perspectiveById, isPerspectiveScene } from "../../../../functions/lib/wikidoPerspectives.js";
+import WikidoPerspectiveStrip from "./WikidoPerspectiveStrip.vue";
+import WikidoAddPerspectiveWizard from "./WikidoAddPerspectiveWizard.vue";
+import WikidoLensQueue from "./WikidoLensQueue.vue";
 import { STATUS_FILTERS, ancestorIds, childCounts, keyAction, loadCollapsed, parentIds, saveCollapsed, visibleRows } from "@/lib/wikido/treeView";
 import { loosePlan, removeScenes, removeAllLoose, attachBranch, attachTargets, publishChecks } from "@/lib/wikido/looseScenes";
 import { buildSceneTree, moveSceneSibling, subtreeSceneIds, canMoveScene, moveSceneTo, moveSceneByDrop, resolveDrop, findParentSceneId } from "@/lib/wikido/tree";
@@ -45,6 +51,7 @@ const error = ref("");
 
 async function refresh(keepSelection = true) {
   loading.value = true;
+  lastFetchAt = Date.now();
   try {
     const bundledIds = new Set(wikidoTopicPacks.map((p) => p.id));
     const cloud = sortStudioTopics(await fetchAllWikidoTopicsAdmin());
@@ -604,6 +611,11 @@ function loadSelected() {
   delete form.value?.bundledOrigin;
   if (doc?.bundled) form.value.status = "draft";
   originalJson.value = form.value && !doc?.bundled ? JSON.stringify(form.value) : "";
+  // perspective steps that landed after this doc was fetched are applied again
+  if (form.value && !doc?.bundled) {
+    lensPatches.replay(selectedId.value, lastFetchAt, form.value);
+    originalJson.value = JSON.stringify(form.value);
+  }
   selectedSceneId.value = form.value?.rootSceneId || "";
   message.value = "";
   error.value = "";
@@ -636,6 +648,7 @@ async function pinPlace() {
     await refresh(true);
     loadSelected();
     selectedSceneId.value = res.sceneId;
+    queueDefaultLenses(res.sceneId);
   } catch (e) {
     placeNote.value = "";
     error.value = e?.message?.replace(/^(internal|invalid-argument|failed-precondition): /, "") || "Could not pin that place.";
@@ -671,6 +684,7 @@ async function wizardMakeScene(query) {
   const res = await generateWikidoGlobeScene({ topicId: selectedId.value, query });
   await refresh(true);
   loadSelected();
+  queueDefaultLenses(res?.sceneId);
   return res;
 }
 
@@ -751,7 +765,7 @@ async function sceneWizardPlan(parentSceneId, total) {
 }
 async function sceneWizardCreate(args) {
   await sceneWizardSaved();
-  return addWikidoChildScene({ topicId: selectedId.value, ...args });
+  return addChildSceneWithLenses(args);
 }
 // pull the server's new scenes (and the spots that open them) into the studio
 async function sceneWizardAdopt(sceneId) {
@@ -775,6 +789,157 @@ async function sceneWizardVoice(sceneId) {
   const problem = error.value;
   error.value = "";
   return problem || null;
+}
+
+// ── Perspectives (lenses) ─────────────────────────────────────────────────────
+// A lens is a scene with perspectiveOf/lens (functions/lib/wikidoPerspectives.js).
+// New scenes get their default lenses (History · Culture · Architecture, or
+// topic lenses) made in the background; "＋ Add a perspective" adds any other.
+const serverLock = createMutex();
+const lensPatches = createPatchLog();
+let lastFetchAt = 0;
+const LENS_AUTO_KEY = "wikido.studio.autoLenses";
+const autoLenses = ref((() => { try { return localStorage.getItem(LENS_AUTO_KEY) !== "0"; } catch { return true; } })());
+watch(autoLenses, (on) => { try { localStorage.setItem(LENS_AUTO_KEY, on ? "1" : "0"); } catch { /* private mode */ } });
+
+// apply a finished server step to the form AND its snapshot (+ remember it)
+function patchLens(topicId, apply) {
+  lensPatches.record(topicId, apply);
+  if (selectedId.value !== topicId || !form.value) return;
+  apply(form.value);
+  if (originalJson.value) {
+    const snap = JSON.parse(originalJson.value);
+    apply(snap);
+    originalJson.value = JSON.stringify(snap);
+  }
+}
+const lensStepError = (e) => String(e?.message || e || "failed").replace(/^[a-z-]+: /i, "");
+
+const lensQueue = useLensQueue({
+  async write(job) {
+    const known = lensEntries(form.value?.scenes?.[job.baseId], form.value?.scenes).find((e) => e.id === job.lens);
+    if (selectedId.value === job.topicId && known) return known.sceneId; // made already (e.g. a retry after a lost answer)
+    job.note = "Writing the spots and cards…";
+    return serverLock.run(async () => {
+      let res;
+      try {
+        res = await writeWikidoPerspective({ topicId: job.topicId, sceneId: job.baseId, lens: job.lens, focus: job.focus || undefined, draft: job.draft || undefined });
+      } catch (e) {
+        if (!/already has/i.test(e?.message || "")) throw e;
+        // it exists on the server already: adopt it
+        const doc = (await fetchAllWikidoTopicsAdmin()).find((t) => t.id === job.topicId);
+        const entry = lensEntries(doc?.scenes?.[job.baseId], doc?.scenes).find((x) => x.id === job.lens);
+        if (!entry) throw e;
+        res = { sceneId: entry.sceneId, baseId: job.baseId, scene: doc.scenes[entry.sceneId], perspectives: doc.scenes[job.baseId].perspectives };
+      }
+      const { sceneId, baseId, scene, perspectives } = res;
+      patchLens(job.topicId, (f) => {
+        if (!f.scenes?.[baseId]) return; // the base arrives with the next reload
+        f.scenes[sceneId] = JSON.parse(JSON.stringify(scene));
+        f.scenes[baseId].perspectives = perspectives.map((x) => ({ ...x }));
+      });
+      return sceneId;
+    });
+  },
+  async paint(job) {
+    const scene = form.value?.scenes?.[job.sceneId];
+    if (selectedId.value === job.topicId && /^https?:\/\//.test(String(scene?.image?.src || ""))) return;
+    job.note = "Painting the picture (about a minute)…";
+    await serverLock.run(async () => {
+      const res = await generateWikidoSceneImage({ topicId: job.topicId, sceneId: job.sceneId });
+      patchLens(job.topicId, (f) => {
+        const sc = f.scenes?.[job.sceneId];
+        if (!sc) return;
+        sc.image = { ...(sc.image || {}), src: res.url };
+        mergeVisuals(sc, res.visuals);
+      });
+    });
+  },
+  async voice(job) {
+    const scene = form.value?.scenes?.[job.sceneId];
+    if (selectedId.value !== job.topicId || !scene) throw new Error("Open this world in the studio to record its voice.");
+    const clips = planVoiceoverClips({ scenes: { [job.sceneId]: scene } });
+    const engine = scopedEngine.value === "paid" ? "paid" : "kokoro";
+    const failed = [];
+    let done = 0;
+    for (let i = 0; i < clips.length; i += 5) {
+      const chunk = clips.slice(i, i + 5).map((c) => c.id);
+      job.note = `Recording the voice… ${done}/${clips.length}`;
+      let res;
+      try {
+        res = await serverLock.run(() => (engine === "paid"
+          ? generateWikidoAudios({ topicId: job.topicId, clipIds: chunk })
+          : generateWikidoKokoroAudios({ topicId: job.topicId, clipIds: chunk })));
+      } catch (e) {
+        failed.push(lensStepError(e));
+        if (/pool|resource-exhausted/i.test(e?.message || "")) break;
+        continue;
+      }
+      for (const r of collectServerClipResults(res)) {
+        if (r.url) {
+          done += 1;
+          patchLens(job.topicId, (f) => {
+            const { sceneId, hotspotId } = clipParts(r.id);
+            const sc = f.scenes?.[sceneId];
+            if (!sc) return;
+            if (!hotspotId) { sc.audio = r.url; sc.audioEngine = engine; return; }
+            const h = sc.hotspots?.find((x) => x.id === hotspotId);
+            if (h) { h.audio = r.url; h.audioEngine = engine; }
+          });
+        } else failed.push(`${r.id}: ${r.error}`);
+      }
+      if (res?.stoppedEarly) { failed.push("the shared speech pool ran dry"); break; }
+    }
+    if (failed.length) throw new Error(`${done} of ${clips.length} clips recorded — ${failed[0]}`);
+  },
+});
+
+// queue the default lenses for a scene the server just created
+function queueDefaultLenses(sceneId) {
+  if (!autoLenses.value || !sceneId || !form.value) return;
+  const scenes = form.value.scenes[sceneId] ? form.value.scenes : { ...form.value.scenes, [sceneId]: { title: "", hotspots: [] } };
+  lensQueue.enqueue(defaultLensJobs({ ...form.value, scenes }, selectedId.value, sceneId));
+}
+async function addChildSceneWithLenses(args) {
+  const res = await addWikidoChildScene({ topicId: selectedId.value, ...args });
+  queueDefaultLenses(res?.sceneId);
+  return res;
+}
+
+const topicLensJobs = computed(() => lensQueue.jobs.value.filter((j) => j.topicId === selectedId.value));
+const selectedBaseId = computed(() => (form.value && selectedSceneId.value ? baseSceneId(form.value.scenes, selectedSceneId.value) : ""));
+const selectedIsLens = computed(() => isPerspectiveScene(form.value?.scenes?.[selectedSceneId.value]));
+const selectedLensName = computed(() => perspectiveById(form.value?.scenes?.[selectedSceneId.value]?.lens)?.name || "");
+function selectLens(sceneId) {
+  if (form.value?.scenes?.[sceneId]) selectedSceneId.value = sceneId;
+}
+function removeLens(sceneId) {
+  const sc = form.value?.scenes?.[sceneId];
+  if (!sc || !isPerspectiveScene(sc)) return;
+  const name = perspectiveById(sc.lens)?.name || sc.lens;
+  if (!window.confirm(`Remove the ${name} perspective? Its picture, spots and recordings go with it (after you save).`)) return;
+  const baseId = sc.perspectiveOf;
+  form.value.scenes = deleteSceneFrom(form.value.scenes, sceneId);
+  if (selectedSceneId.value === sceneId) selectedSceneId.value = baseId;
+  for (const h of sc.hotspots || []) if (h.childSceneId && !h.childTopicId) offerDeleteIfLoose(h.childSceneId);
+  message.value = `The ${name} perspective is removed — press Save edits to make it final.`;
+}
+
+// "＋ Add a perspective" wizard — owns no data, like the other wizards
+const lensWizardFor = ref(""); // base scene id, "" = closed
+function openLensWizard(sceneId = selectedSceneId.value) {
+  if (!form.value?.scenes?.[sceneId]) return;
+  error.value = "";
+  message.value = "";
+  lensWizardFor.value = baseSceneId(form.value.scenes, sceneId);
+}
+async function lensWizardPreview(lens, focus) {
+  if (dirty.value && !(await save())) throw new Error(error.value || "Your edits could not be saved first.");
+  const res = await writeWikidoPerspective({ topicId: selectedId.value, sceneId: lensWizardFor.value, lens, focus: focus || undefined, dryRun: true });
+  return res.scene;
+}
+function lensWizardStart(lens, draft, focus) {
+  return lensQueue.enqueue([newLensJob({ topicId: selectedId.value, baseId: lensWizardFor.value, lens, draft, focus })])[0];
 }
 
 // status of one hub place, for the checklist on its card
@@ -1211,7 +1376,13 @@ function snapshot() {
   originalJson.value = JSON.stringify(form.value);
 }
 
+// Save takes turns with the perspective queue's server steps (see useLensQueue).
 async function save() {
+  if (!form.value || saving.value) return false;
+  if (serverLock.busy) message.value = "Waiting for a perspective step to finish, then saving…";
+  return serverLock.run(saveNow);
+}
+async function saveNow() {
   if (!form.value || saving.value) return false;
   saving.value = true;
   error.value = "";
@@ -1384,7 +1555,7 @@ async function buildOutline() {
     run = await runOutline({
       outline: outline.value,
       parentSceneId: parentId,
-      createScene: (args) => addWikidoChildScene({ topicId: selectedId.value, ...args }),
+      createScene: addChildSceneWithLenses,
       onUpdate: (items) => { buildItems.value = items; },
       shouldStop: () => stopRequested.value,
     });
@@ -1393,7 +1564,7 @@ async function buildOutline() {
       message.value = 'Retrying failed scenes…';
       await retryFailedItems({
         items: run.items,
-        createScene: (args) => addWikidoChildScene({ topicId: selectedId.value, ...args }),
+        createScene: addChildSceneWithLenses,
         rootParentSceneId: parentId,
         onUpdate: (items) => { buildItems.value = items; },
       });
@@ -1432,8 +1603,7 @@ async function addLayer() {
   try {
     // save unsaved edits first so the server grows the CURRENT scene
     if (dirty.value && !(await save())) return;
-    const res = await addWikidoChildScene({
-      topicId: selectedId.value,
+    const res = await addChildSceneWithLenses({
       parentSceneId: parentId,
       label: layerLabel.value.trim(),
       focus: layerFocus.value.trim(),
@@ -1846,7 +2016,7 @@ async function addMoreDepth() {
       const run = await runOutline({
         outline,
         parentSceneId: branch.parentSceneId,
-        createScene: (args) => addWikidoChildScene({ topicId: selectedId.value, ...args }),
+        createScene: addChildSceneWithLenses,
         onUpdate: (items) => {
           const s = summarizeRun(items);
           depthNote.value = `Writing scenes… ${s.done} done${s.failed ? `, ${s.failed} failed` : ""}.`;
@@ -1857,7 +2027,7 @@ async function addMoreDepth() {
         depthNote.value = "Retrying failed scenes…";
         await retryFailedItems({
           items: run.items,
-          createScene: (args) => addWikidoChildScene({ topicId: selectedId.value, ...args }),
+          createScene: addChildSceneWithLenses,
           rootParentSceneId: branch.parentSceneId,
           onUpdate: (items) => {
             const s = summarizeRun(items);
@@ -1878,7 +2048,7 @@ async function addMoreDepth() {
       error.value = `Some scenes failed: ${failedItems.slice(0, 3).join(" · ")} — press ✦ Add more depth again for the rest.`;
     }
     if (added) {
-      message.value = `Added ${added} new deeper scenes with full content — paint them with “Generate artwork”.`;
+      message.value = `Added ${added} new deeper scenes with full content — paint them with “Generate artwork”.${autoLenses.value ? " Their perspectives (History, Culture, Architecture…) are being made — see “Making perspectives”." : " Use “＋ Add a perspective” on a scene to show it another way."}`;
     } else {
       error.value = error.value || `No scenes could be added: ${failedItems[0] || "the assessment came back empty — try again."}`;
     }
@@ -2044,6 +2214,32 @@ function confirmDeleteScene(withDeeper) {
       @close="sceneWizardStart = null"
     />
 
+    <WikidoAddPerspectiveWizard
+      v-if="lensWizardFor && form && form.scenes[lensWizardFor]"
+      :pack="form"
+      :scene-id="lensWizardFor"
+      :topic-status="selectedDoc?.status || 'draft'"
+      :is-dirty="dirty"
+      :jobs="topicLensJobs"
+      :preview="lensWizardPreview"
+      :start="lensWizardStart"
+      :retry="lensQueue.retry"
+      :publish="wizardPublish"
+      :go-to="selectLens"
+      @close="lensWizardFor = ''"
+    />
+
+    <WikidoLensQueue
+      v-if="form && topicLensJobs.length"
+      :pack="form"
+      :jobs="topicLensJobs"
+      :auto="autoLenses"
+      @retry="lensQueue.retry"
+      @retry-all="lensQueue.retryAll"
+      @clear="lensQueue.clearFinished"
+      @select="selectLens"
+    />
+
     <section v-if="form" class="workspace">
       <p v-if="isBundled" class="note">This bundled world is editable. Save creates a draft; publish when ready to show your changes to families.</p>
       <header class="ws-toolbar">
@@ -2062,6 +2258,9 @@ function confirmDeleteScene(withDeeper) {
             title="Steer where ✦ Add more depth goes. Leave empty and the curator decides."
             @keydown.enter.prevent="addMoreDepth"
           />
+          <label class="auto-lenses" title="When a new scene is made (any wizard, Pin a place, Add more depth), also make its History, Culture and Architecture perspectives — spots, artwork and voice.">
+            <input v-model="autoLenses" type="checkbox" /> 🔭 Auto-perspectives for new scenes
+          </label>
           <button class="btn primary" :disabled="depthBusy || relinkBusy" title="The agent assesses the whole topic and adds new deeper scenes with content (unsaved edits are saved first)" @click="addMoreDepth">
             {{ depthBusy ? (depthNote || "Assessing the topic…") : "✦ Add more depth" }}
           </button>
@@ -2305,7 +2504,7 @@ function confirmDeleteScene(withDeeper) {
             class="scene-row"
             :data-scene-row="id"
             :class="[
-              { active: id === selectedSceneId, nested: depth > 0, dragging: dragSceneId === id, context: treeView.matchIds && !treeView.matchIds.has(id), hit: treeView.matchIds && treeView.matchIds.has(id) },
+              { active: id === selectedBaseId, nested: depth > 0, dragging: dragSceneId === id, context: treeView.matchIds && !treeView.matchIds.has(id), hit: treeView.matchIds && treeView.matchIds.has(id) },
               dropHint && dropHint.rowId === id ? `drop-${dropHint.mode}` : '',
             ]"
             :style="{ marginLeft: `${depth * 0.9}rem` }"
@@ -2321,7 +2520,7 @@ function confirmDeleteScene(withDeeper) {
               @dragstart="onDragStart($event, id)"
               @dragend="onDragEnd"
             >⠿</span>
-            <button type="button" class="scene-main" :aria-current="id === selectedSceneId" @click="selectScene(id)">
+            <button type="button" class="scene-main" :aria-current="id === selectedBaseId" @click="selectScene(id)">
               <span class="scene-thumb">
                 <img v-if="hasArt(form.scenes[id])" :src="form.scenes[id].image.src" alt="" />
                 <span v-else class="thumb-empty">🖼</span>
@@ -2342,7 +2541,7 @@ function confirmDeleteScene(withDeeper) {
               {{ form.scenes[id].hotspots.length }} {{ form.scenes[id].hotspots.length === 1 ? "spot" : "spots" }}
               <template v-if="id === form.rootSceneId"> · entrance</template>
             </span>
-            <div v-if="id === selectedSceneId" class="scene-actions">
+            <div v-if="id === selectedBaseId" class="scene-actions">
               <button v-if="form.scenes[id].hotspots.length < 8" type="button" class="mini add" @click="openSceneWizard(id)">＋ Add scene under this</button>
               <button type="button" class="mini" :disabled="!canMove(id, 'up')" title="Show earlier among its siblings" @click="moveScene(id, 'up')">↑ Earlier</button>
               <button type="button" class="mini" :disabled="!canMove(id, 'down')" title="Show later among its siblings" @click="moveScene(id, 'down')">↓ Later</button>
@@ -2358,14 +2557,15 @@ function confirmDeleteScene(withDeeper) {
         <!-- scene editor -->
         <div v-if="selectedScene" class="scene-editor">
           <p class="crumb">
-            <template v-if="incomingDoorways.length">Opened from: {{ incomingDoorways.join(" · ") }}</template>
+            <template v-if="selectedIsLens">🔭 The <strong>{{ selectedLensName }}</strong> perspective of “{{ form.scenes[selectedBaseId]?.title }}” — children switch to it with the perspective buttons on that scene.</template>
+            <template v-else-if="incomingDoorways.length">Opened from: {{ incomingDoorways.join(" · ") }}</template>
             <template v-else-if="selectedScene.id === form.rootSceneId">This is the entrance — the first picture a child sees.</template>
             <template v-else>⚠ No spot opens this scene yet, so children can’t reach it.</template>
           </p>
 
           <!-- the scene hangs from a PRIMARY parent; more doorways may share it.
                Moving re-hangs this scene's own doorway — links from other spots stay. -->
-          <label v-if="selectedScene.id !== form.rootSceneId" class="field parent-field">Primary parent (the picture whose spot opens this one)
+          <label v-if="selectedScene.id !== form.rootSceneId && !selectedIsLens" class="field parent-field">Primary parent (the picture whose spot opens this one)
             <select :value="currentParentId ?? ''" @change="changeParent($event.target.value)">
               <option v-if="!currentParentId" value="">— none yet: this scene is unreachable —</option>
               <option v-for="row in orderedScenes" :key="row.id" :value="row.id" :disabled="!allowedParentIds.has(row.id)">
@@ -2374,10 +2574,21 @@ function confirmDeleteScene(withDeeper) {
             </select>
           </label>
           <p v-if="incomingDoorways.length > 1" class="muted parent-note">Shared scene — opened from {{ incomingDoorways.length }} doorways. Its artwork, spots and recordings exist once; every door leads here.</p>
-          <p v-if="selectedScene.id !== form.rootSceneId && deeperSceneCount" class="muted parent-note">
+          <p v-if="selectedScene.id !== form.rootSceneId && deeperSceneCount && !selectedIsLens" class="muted parent-note">
             Choosing a parent moves this scene and its {{ deeperSceneCount }} deeper {{ deeperSceneCount === 1 ? "scene" : "scenes" }} along with it.
           </p>
           <p v-else-if="selectedScene.id === form.rootSceneId" class="muted parent-note">The entrance always comes first, so it has no parent — every other scene hangs from some picture.</p>
+
+          <WikidoPerspectiveStrip
+            v-if="!isHubScene"
+            :pack="form"
+            :scene-id="selectedSceneId"
+            :jobs="topicLensJobs"
+            @select="selectLens"
+            @add="openLensWizard()"
+            @retry="lensQueue.retry"
+            @remove="removeLens"
+          />
 
           <!-- the globe hub: the editor IS the planet -->
           <div v-if="isHubScene" class="hub-editor-zone">
@@ -3130,4 +3341,5 @@ function confirmDeleteScene(withDeeper) {
 .modal h3 { margin: 0; }
 .plan { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.88rem; color: var(--text2); }
 .modal-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
+.auto-lenses { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; font-weight: 700; color: var(--text2); white-space: nowrap; }
 </style>

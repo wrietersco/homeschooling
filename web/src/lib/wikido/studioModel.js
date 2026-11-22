@@ -251,10 +251,16 @@ export function spotNeedsDetails(spot) {
 // fact). Returns a NEW scenes map.
 export function undoBuiltScenes(scenes, createdIds) {
   const gone = new Set(createdIds);
+  // perspective pictures made for a built scene go with it (also when the
+  // studio only knows them by their back-link)
+  for (const [sid, s] of Object.entries(scenes || {})) if (s?.perspectiveOf && gone.has(s.perspectiveOf)) gone.add(sid);
   const next = {};
   for (const [sid, s] of Object.entries(scenes || {})) {
     if (gone.has(sid)) continue;
     next[sid] = { ...s, hotspots: (s.hotspots || []).filter((h) => !(opensLocalScene(h) && gone.has(h.childSceneId))) };
+    if (Array.isArray(s.perspectives) && s.perspectives.some((e) => gone.has(e?.sceneId))) {
+      next[sid].perspectives = s.perspectives.filter((e) => !gone.has(e?.sceneId));
+    }
   }
   return next;
 }

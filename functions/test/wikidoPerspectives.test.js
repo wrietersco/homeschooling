@@ -147,3 +147,21 @@ test("buildPerspectivePrompt carries lens guidance and avoids repeating the over
   assert.match(prompt, /mosques/);
   assert.match(prompt, /"hotspots"/);
 });
+
+test("buildLensScene: complete spots kept (max 8), back-link + art guidance stamped, thin answers rejected", async () => {
+  const { buildLensScene, withLensEntry } = await import("../lib/wikidoPerspectives.js");
+  const spots = Array.from({ length: 10 }, (_, i) => ({ label: `Thing ${i % 9}`, blurb: "b", info: { body: ["text"] }, ...(i === 0 ? { x: "oops" } : { x: 20, y: 30 }) }));
+  spots.push({ label: "", info: { body: ["x"] } });
+  const out = buildLensScene({ scene: { narration: "Long ago…", artPrompt: "A timeline.", hotspots: spots } }, { baseId: "asia", base: { title: "Asia" }, lensId: "history", sceneId: "asia-history" });
+  assert.deepEqual(out.errors, []);
+  assert.equal(out.scene.hotspots.length, 8);
+  assert.equal(out.scene.perspectiveOf, "asia");
+  assert.equal(out.scene.lens, "history");
+  assert.equal(out.scene.title, "Asia — History");
+  assert.match(out.scene.artPrompt, /^A timeline\. Perspective: History\./);
+  assert.ok(out.scene.hotspots.every((h) => h.x >= 6 && h.x <= 94));
+  assert.equal(new Set(out.scene.hotspots.map((h) => h.id)).size, 8);
+  assert.ok(buildLensScene({ narration: "x", hotspots: spots.slice(0, 2) }, { baseId: "a", lensId: "food", sceneId: "a-food" }).errors[0].includes("at least 3"));
+  assert.ok(buildLensScene({ hotspots: spots }, { baseId: "a", lensId: "food", sceneId: "a-food" }).errors[0].includes("narration"));
+  assert.deepEqual(withLensEntry({ perspectives: [{ id: "food", sceneId: "a-food" }] }, "map", "a-map"), [{ id: "food", sceneId: "a-food" }, { id: "map", sceneId: "a-map" }]);
+});
