@@ -8,6 +8,8 @@
 // lists it in `perspectives: [{ id, sceneId }]`. A scene without `perspectives`
 // is simply its own single "Overview" lens — no migration.
 
+import { resolvePlaceQuery } from "./wikidoGazetteer.js";
+
 export const MAIN_LENS = "main";
 export const MAX_LENSES_PER_SCENE = 12;
 
@@ -278,6 +280,9 @@ export function sceneKind(pack, sceneId) {
     if (CITY_RE.test(title)) return "city";
     return base === pack.rootSceneId ? "region" : "landmark";
   }
+  // a picture world about a real place: the gazetteer knows countries, capitals, cities, continents
+  const place = resolvePlaceQuery(title);
+  if (place && LEVEL_KIND[place.level]) return LEVEL_KIND[place.level];
   if (LANDMARK_RE.test(title)) return "landmark";
   if (REGION_RE.test(title)) return "region";
   return "topic";

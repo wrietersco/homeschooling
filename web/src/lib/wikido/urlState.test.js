@@ -36,10 +36,10 @@ describe("parseWikidoLocation", () => {
     expect(parseWikidoLocation({
       params: { topicId: "earth", sceneId: "lahore" },
       query: { card: "fort", at: "31,74,3", intro: "0" },
-    })).toEqual({ topicId: "earth", sceneId: "lahore", card: "fort", at: { lat: 31, lng: 74, zoom: 3 }, intro: false });
+    })).toEqual({ topicId: "earth", sceneId: "lahore", card: "fort", at: { lat: 31, lng: 74, zoom: 3 }, intro: false, lens: "" });
   });
   it("is empty for the shelf and drops unsafe ids", () => {
-    expect(parseWikidoLocation({ params: {}, query: {} })).toEqual({ topicId: "", sceneId: "", card: "", at: null, intro: null });
+    expect(parseWikidoLocation({ params: {}, query: {} })).toEqual({ topicId: "", sceneId: "", card: "", at: null, intro: null, lens: "" });
     expect(parseWikidoLocation({ params: { topicId: "a b/../" }, query: { card: "<x>", intro: "9" } })).toMatchObject({ topicId: "", card: "", intro: null });
   });
 });
@@ -53,7 +53,7 @@ describe("buildWikidoLocation", () => {
     expect(buildWikidoLocation({ topicId: "earth", at: { lat: 1.234, lng: 5, zoom: 2 } }).query).toEqual({ at: "1.23,5,2" });
   });
   it("round-trips through parse", () => {
-    const state = { topicId: "earth", sceneId: "lahore", card: "fort", at: null, intro: true };
+    const state = { topicId: "earth", sceneId: "lahore", card: "fort", at: null, intro: true, lens: "history" };
     const loc = buildWikidoLocation(state, { rootSceneId: "hub" });
     const [, , topicId, sceneId] = loc.path.split("/");
     expect(parseWikidoLocation({ params: { topicId, sceneId }, query: loc.query })).toEqual(state);
@@ -65,10 +65,10 @@ describe("resolving against a pack", () => {
     expect([...reachableSceneIds(pack)].sort()).toEqual(["hub", "lahore", "pakistan"]);
   });
   it("accepts a valid scene + card", () => {
-    expect(resolveWikidoTarget(pack, { sceneId: "lahore", card: "fort" })).toEqual({ sceneId: "lahore", card: "fort", notice: "" });
+    expect(resolveWikidoTarget(pack, { sceneId: "lahore", card: "fort" })).toEqual({ sceneId: "lahore", lens: "", displaySceneId: "lahore", card: "fort", notice: "" });
   });
   it("lands on the root for the bare topic URL", () => {
-    expect(resolveWikidoTarget(pack, { sceneId: "", card: "" })).toEqual({ sceneId: "hub", card: "", notice: "" });
+    expect(resolveWikidoTarget(pack, { sceneId: "", card: "" })).toEqual({ sceneId: "hub", lens: "", displaySceneId: "hub", card: "", notice: "" });
   });
   it("falls back to the root, with a notice, for unknown, switched-off and loose scenes", () => {
     for (const sceneId of ["nope", "hidden", "loose"]) {
@@ -91,5 +91,32 @@ describe("resolving against a pack", () => {
   });
   it("builds the cold-open journey from natural ancestors", () => {
     expect(coldJourneySegment(pack, "lahore")).toEqual({ topicId: "earth", scenes: ["hub", "pakistan", "lahore"] });
+  });
+});
+
+describe("perspectives (lens) in the URL", () => {
+  const lensPack = JSON.parse(JSON.stringify(pack));
+  lensPack.scenes.pakistan.perspectives = [{ id: "history", sceneId: "pakistan-history" }];
+  lensPack.scenes["pakistan-history"] = { id: "pakistan-history", title: "Pakistan — History", perspectiveOf: "pakistan", lens: "history", hotspots: [spot("mughals", { childSceneId: "mughal-fort" })] };
+  lensPack.scenes["mughal-fort"] = { id: "mughal-fort", title: "Mughal Fort", hotspots: [spot("gate")] };
+
+  it("lens rides as ?lens= and Overview is omitted", () => {
+    expect(buildWikidoLocation({ topicId: "earth", sceneId: "pakistan", lens: "history" }).query).toEqual({ lens: "history" });
+    expect(buildWikidoLocation({ topicId: "earth", sceneId: "pakistan", lens: "main" }).query).toEqual({});
+  });
+  it("resolves a lens to its picture, a lens scene id to base + lens, and an unknown lens to the Overview", () => {
+    expect(resolveWikidoTarget(lensPack, { sceneId: "pakistan", lens: "history", card: "mughals" }))
+      .toEqual({ sceneId: "pakistan", lens: "history", displaySceneId: "pakistan-history", card: "mughals", notice: "" });
+    expect(resolveWikidoTarget(lensPack, { sceneId: "pakistan-history", card: "" }))
+      .toMatchObject({ sceneId: "pakistan", lens: "history", displaySceneId: "pakistan-history" });
+    const food = resolveWikidoTarget(lensPack, { sceneId: "pakistan", lens: "food", card: "" });
+    expect(food).toMatchObject({ sceneId: "pakistan", lens: "", displaySceneId: "pakistan" });
+    expect(food.notice).toMatch(/main picture/);
+  });
+  it("scenes opened from a lens are reachable, with the lens in their trail", () => {
+    expect(reachableSceneIds(lensPack).has("mughal-fort")).toBe(true);
+    expect(resolveWikidoTarget(lensPack, { sceneId: "mughal-fort", card: "gate" })).toMatchObject({ sceneId: "mughal-fort", card: "gate", notice: "" });
+    expect(coldJourneySegment(lensPack, "mughal-fort")).toEqual({ topicId: "earth", scenes: ["hub", "pakistan-history", "mughal-fort"] });
+    expect(coldJourneySegment(lensPack, "pakistan-history")).toEqual({ topicId: "earth", scenes: ["hub", "pakistan-history"] });
   });
 });

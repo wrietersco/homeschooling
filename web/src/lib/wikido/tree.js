@@ -67,7 +67,10 @@ export function ancestorChain(scenes, sceneId) {
   let current = sceneId;
   while (true) {
     seen.add(current);
-    const parent = findParentSceneId(scenes, current);
+    // a perspective picture sits where its scene sits: its parent is the scene's parent
+    const lookup = scenes?.[current]?.perspectiveOf && scenes[scenes[current].perspectiveOf] ? scenes[current].perspectiveOf : current;
+    if (lookup !== current) seen.add(lookup);
+    const parent = findParentSceneId(scenes, lookup);
     if (!parent || seen.has(parent)) break;
     chain.unshift(parent);
     current = parent;

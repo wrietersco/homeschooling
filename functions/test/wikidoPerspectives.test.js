@@ -165,3 +165,10 @@ test("buildLensScene: complete spots kept (max 8), back-link + art guidance stam
   assert.ok(buildLensScene({ hotspots: spots }, { baseId: "a", lensId: "food", sceneId: "a-food" }).errors[0].includes("narration"));
   assert.deepEqual(withLensEntry({ perspectives: [{ id: "food", sceneId: "a-food" }] }, "map", "a-map"), [{ id: "food", sceneId: "a-food" }, { id: "map", sceneId: "a-map" }]);
 });
+
+test("sceneKind: a picture world about a real country or city is a place", () => {
+  assert.equal(sceneKind({ rootSceneId: "p", scenes: { p: { title: "Pakistan" } } }, "p"), "country");
+  assert.equal(sceneKind({ rootSceneId: "p", scenes: { p: { title: "Lahore" } } }, "p"), "city");
+  assert.equal(sceneKind({ rootSceneId: "p", scenes: { p: { title: "Asia" } } }, "p"), "region");
+  assert.equal(sceneKind({ rootSceneId: "p", scenes: { p: { title: "The Human Heart" } } }, "p"), "topic");
+});

@@ -26,6 +26,9 @@ import WikidoTopicCard from "@/components/wikido/WikidoTopicCard.vue";
 import { isGlobeHub } from "../../../functions/lib/wikidoGlobe.js";
 import WikidoGate from "@/components/wikido/WikidoGate.vue";
 import WikidoMusic from "@/components/wikido/WikidoMusic.vue";
+import WikidoLensBar from "@/components/wikido/WikidoLensBar.vue";
+import { sceneLenses, baseSceneId, MAIN_LENS } from "../../../functions/lib/wikidoPerspectives.js";
+import { playLensTurn, preloadImage, warmLensTurn } from "@/lib/wikido/lensTransition";
 
 // The URL is the single source of truth for WHERE the child is (world, scene,
 // open card, globe camera, narration panel): every navigation pushes a route,
@@ -127,7 +130,13 @@ function notify(message) {
 }
 
 const rootOf = (topicId) => packsById.value.get(topicId)?.rootSceneId || "";
-const locationFor = (state) => buildWikidoLocation(state, { rootSceneId: rootOf(state.topicId) });
+// a perspective picture's URL is its scene's URL + ?lens= (one canonical URL per view)
+function locationFor(state) {
+  const pack = packsById.value.get(state.topicId);
+  const sc = pack?.scenes?.[state.sceneId];
+  const s = sc?.perspectiveOf && pack.scenes[sc.perspectiveOf] ? { ...state, sceneId: sc.perspectiveOf, lens: sc.lens } : state;
+  return buildWikidoLocation(s, { rootSceneId: rootOf(state.topicId) });
+}
 const wrapLng = (lng) => ((((lng + 180) % 360) + 360) % 360) - 180;
 
 // "Copy link": the Web Share sheet on phones, the clipboard everywhere else.
@@ -165,6 +174,15 @@ function placeScene(pack, sceneId) {
   j.forEach((seg, si) => seg.scenes.forEach((id, ii) => {
     if (seg.topicId === pack.id && id === sceneId) cut = { si, ii };
   }));
+  // switching perspective swaps the picture in place — same spot in the trail
+  if (!cut) {
+    const lastSeg = j[j.length - 1];
+    const lastId = lastSeg?.scenes.at(-1);
+    if (lastSeg && lastSeg.topicId === pack.id && lastId && baseSceneId(pack.scenes, lastId) === baseSceneId(pack.scenes, sceneId) && lastId !== sceneId) {
+      journey.value = [...j.slice(0, -1), { ...lastSeg, scenes: [...lastSeg.scenes.slice(0, -1), sceneId] }];
+      return;
+    }
+  }
   if (cut) {
     const atEnd = cut.si === j.length - 1 && cut.ii === j[cut.si].scenes.length - 1;
     if (!atEnd) {
@@ -190,7 +208,7 @@ async function syncRoute() {
   const id = ++syncId;
   clearTimeout(camTimer); // a camera note from the previous place must not stick to this one
   if (!auth.user) return; // the gate is up; this re-runs once the visitor is in
-  const { topicId, sceneId, card } = loc.value;
+  const { topicId, sceneId, card, lens } = loc.value;
   if (!topicId) {
     if (journey.value.length) { stop(); journey.value = []; }
     return;
@@ -204,19 +222,19 @@ async function syncRoute() {
       router.replace(locationFor({}));
       return;
     }
-    const target = resolveWikidoTarget(pack, { sceneId, card });
+    const target = resolveWikidoTarget(pack, { sceneId, card, lens });
     if (target.notice) notify(target.notice);
-    if (target.sceneId !== (sceneId || pack.rootSceneId) || target.card !== card) {
+    if (target.sceneId !== (sceneId || pack.rootSceneId) || target.card !== card || target.lens !== (lens || "")) {
       // a stale or switched-off link: settle the address bar on the nearest valid place
-      router.replace(locationFor({ ...loc.value, topicId, sceneId: target.sceneId, card: target.card }));
+      router.replace(locationFor({ ...loc.value, topicId, sceneId: target.sceneId, card: target.card, lens: target.lens }));
     }
-    placeScene(pack, target.sceneId);
+    placeScene(pack, target.displaySceneId);
   } finally {
     if (id === syncId) opening.value = false;
   }
 }
 watch(
-  () => `${loc.value.topicId}|${loc.value.sceneId}|${auth.user ? 1 : 0}`,
+  () => `${loc.value.topicId}|${loc.value.sceneId}|${loc.value.lens}|${auth.user ? 1 : 0}`,
   syncRoute,
   { immediate: true }
 );
@@ -291,6 +309,41 @@ function onCamera(camera) {
   }, 400);
 }
 
+// ── perspectives: one scene, several ways of looking at it ──────────────────
+const lensList = computed(() => (topic.value && scene.value && !onGlobe.value ? sceneLenses(topic.value.scenes, scene.value.id) : []));
+const activeLens = computed(() => (scene.value?.perspectiveOf ? scene.value.lens : MAIN_LENS));
+const stageEl = ref(null);
+const turning = ref(false);
+watch(() => lensList.value.length > 1, (has) => { if (has) warmLensTurn(); }, { immediate: true });
+function warmLens(id) {
+  const l = lensList.value.find((x) => x.id === id);
+  if (l) preloadImage(l.scene?.image?.src);
+}
+async function pickLens(id) {
+  if (turning.value || id === activeLens.value || !topic.value) return;
+  const list = lensList.value;
+  const from = list.find((l) => l.id === activeLens.value);
+  const to = list.find((l) => l.id === id);
+  if (!to) return;
+  turning.value = true;
+  try {
+    await preloadImage(to.scene?.image?.src, 1200); // turn onto a picture that is there
+    const turn = await playLensTurn({
+      container: stageEl.value,
+      fromSrc: from?.scene?.image?.src,
+      toSrc: to.scene?.image?.src,
+      direction: list.indexOf(to) >= list.indexOf(from) ? 1 : -1,
+    });
+    await turn.covered;
+    stop();
+    // a perspective is a way of looking, not a new place: replace, never push
+    router.replace(locationFor({ topicId: topic.value.id, sceneId: to.sceneId, intro: loc.value.intro }));
+    await turn.done;
+  } finally {
+    turning.value = false;
+  }
+}
+
 onBeforeUnmount(() => {
   stop();
   clearTimeout(camTimer);
@@ -299,7 +352,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="wikido">
+  <div ref="stageEl" class="wikido">
     <!-- ── session resolving: hold the backdrop so a signed-in visitor never
              sees the sign-in gate flash before Firebase reports the session ── -->
     <div
@@ -376,6 +429,14 @@ onBeforeUnmount(() => {
     >
       <template #tools><WikidoMusic /></template>
     </WikidoScene>
+    <WikidoLensBar
+      v-if="scene && !onGlobe && lensList.length > 1"
+      :lenses="lensList"
+      :active="activeLens"
+      :busy="turning"
+      @pick="pickLens"
+      @warm="warmLens"
+    />
 
     <Transition name="wd-toast">
       <p v-if="toast" class="wd-toast" role="status">{{ toast }}</p>

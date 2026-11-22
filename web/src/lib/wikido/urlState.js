@@ -10,11 +10,14 @@
 //   …?at=<lat>,<lng>,<zoom>              globe camera (globe hub only)
 //   …?intro=0|1                          narration panel folded (0) / open (1);
 //                                        omitted = the viewport's default
+//   …?lens=<perspectiveId>               the scene seen through a perspective
+//                                        (History, Food…); omitted = Overview
 //
 // The root scene never appears in the path (`/wikido/:topicId` IS the root),
 // so there is exactly one canonical URL per place.
 import { ancestorChain } from "./tree.js";
 import { isGlobePack, isSpotEnabled } from "../../../../functions/lib/wikidoGlobe.js";
+import { lensEntries, MAIN_LENS } from "../../../../functions/lib/wikidoPerspectives.js";
 
 const ID_RE = /^[\w.-]{1,120}$/;
 const cleanId = (v) => {
@@ -56,17 +59,19 @@ export function parseWikidoLocation(route) {
     card: cleanId(query.card),
     at: parseAt(first(query.at)),
     intro: intro === "0" ? false : intro === "1" ? true : null,
+    lens: cleanId(query.lens),
   };
 }
 
 // state → router location { path, query }. `rootSceneId` lets the root scene
 // collapse into the topic URL. Empty/default fields are left out.
 export function buildWikidoLocation(state = {}, { rootSceneId = "" } = {}) {
-  const { topicId, sceneId, card, at, intro } = state;
+  const { topicId, sceneId, card, at, intro, lens } = state;
   if (!topicId) return { path: "/wikido", query: {} };
   let path = `/wikido/${encodeURIComponent(topicId)}`;
   if (sceneId && sceneId !== rootSceneId) path += `/${encodeURIComponent(sceneId)}`;
   const query = {};
+  if (lens && lens !== MAIN_LENS) query.lens = lens;
   if (card) query.card = card;
   if (at) {
     const s = formatAt(at);
@@ -93,6 +98,7 @@ export function reachableSceneIds(pack) {
       if (globe && id === pack.rootSceneId && !isSpotEnabled(h)) continue;
       walk(h.childSceneId);
     }
+    for (const e of lensEntries(scenes[id], scenes)) walk(e.sceneId); // perspective pictures
   };
   walk(pack?.rootSceneId);
   return out;
@@ -112,25 +118,42 @@ export function cardAvailable(pack, sceneId, cardId) {
 
 // Decide where a (possibly stale) link really lands. Unknown or unreachable
 // scene → the nearest reachable ancestor (else the root); unknown card → no
-// card. `notice` is a friendly sentence for a toast, or "".
-export function resolveWikidoTarget(pack, { sceneId, card }) {
+// card; a perspective the scene doesn't have (or isn't ready) → its Overview.
+// A link straight to a perspective picture means its scene seen through that
+// lens. → { sceneId (the base scene, for the URL), lens ("" = Overview),
+// displaySceneId (the picture on screen), card, notice }
+export function resolveWikidoTarget(pack, { sceneId, card, lens = "" }) {
   const rootId = pack.rootSceneId;
   const reachable = reachableSceneIds(pack);
   let notice = "";
   let landed = sceneId || rootId;
+  let lensId = lens && lens !== MAIN_LENS ? lens : "";
+  const asked = pack.scenes[landed];
+  if (asked?.perspectiveOf && pack.scenes[asked.perspectiveOf]) {
+    lensId = asked.lens || "";
+    landed = asked.perspectiveOf;
+  }
   if (!reachable.has(landed)) {
-    const fallback = [...ancestorChain(pack.scenes, landed)].reverse().find((id) => reachable.has(id)) || rootId;
+    const fallback = [...ancestorChain(pack.scenes, landed)].reverse().find((id) => reachable.has(id) && !pack.scenes[id]?.perspectiveOf) || rootId;
     const title = pack.scenes[fallback]?.title || pack.title;
     notice = `That place isn't open any more, so we brought you to ${title}.`;
-    landed = fallback;
-    return { sceneId: landed, card: "", notice };
+    return { sceneId: fallback, lens: "", displaySceneId: fallback, card: "", notice };
+  }
+  let display = landed;
+  if (lensId) {
+    const entry = lensEntries(pack.scenes[landed], pack.scenes).find((e) => e.id === lensId);
+    if (entry) display = entry.sceneId;
+    else {
+      lensId = "";
+      notice = "That way of looking isn't ready yet — here's the main picture.";
+    }
   }
   let cardId = card || "";
-  if (cardId && !cardAvailable(pack, landed, cardId)) {
+  if (cardId && !cardAvailable(pack, display, cardId)) {
     cardId = "";
-    notice = "That card isn't there any more — here's the whole place instead.";
+    notice = notice || "That card isn't there any more — here's the whole place instead.";
   }
-  return { sceneId: landed, card: cardId, notice };
+  return { sceneId: landed, lens: lensId, displaySceneId: display, card: cardId, notice };
 }
 
 // Where the journey (breadcrumb path) of a cold-opened scene runs: its natural

@@ -246,7 +246,7 @@ const stageMark = { idle: "○", running: "⏳", done: "✓", failed: "✗" };
           <!-- 4 · next -->
           <section v-else-if="stepId === 'next'">
             <p class="wz-banner" :class="check?.exists ? 'good' : 'wait'">
-              <template v-if="check?.exists">🎉 “{{ base?.title }}” now has a {{ check.name }} perspective.</template>
+              <template v-if="check?.exists">🎉 “{{ base?.title }}” now has {{ /^[AEIOU]/i.test(check.name) ? "an" : "a" }} {{ check.name }} perspective.</template>
               <template v-else>That perspective is no longer in this world. Close this and check the scene.</template>
             </p>
             <ul v-if="check" class="wz-steps" aria-label="Progress of the new perspective">
