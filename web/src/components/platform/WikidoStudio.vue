@@ -24,6 +24,9 @@ import { wikidoTopicPacks } from "@/lib/wikido";
 import { useCoverPlacement } from "@/composables/useCoverPlacement";
 import { spotOutcome, sceneStatus, deletePlan, deleteSceneFrom, topicHealth, undoBuiltScenes, spotNeedsDetails, bundledTopicSummaries } from "@/lib/wikido/studioModel";
 import WikidoGlobeEditor from "@/components/platform/WikidoGlobeEditor.vue";
+import WikidoAddPlaceWizard from "@/components/platform/WikidoAddPlaceWizard.vue";
+import WikidoPlaceChecklist from "@/components/platform/WikidoPlaceChecklist.vue";
+import { placeChecklist } from "@/lib/wikido/placeWizard";
 import { globeDirectory, buildPlaceholderGlobeSpot } from "../../../../functions/lib/wikidoGlobe.js";
 import { withKeys, countOutline, removeOutlineNode, runOutline, summarizeRun, retryFailedItems } from "@/lib/wikido/outlineBuild";
 import { getLlmConfig } from "@/services/admin";
@@ -635,6 +638,69 @@ async function pinPlace() {
     placeBusy.value = false;
   }
 }
+
+// ── "Add a place" wizard ──────────────────────────────────────────────────────
+// The guided way in (see WikidoAddPlaceWizard). It owns no data: these callbacks
+// reuse the studio's own save / scene / artwork / voice paths.
+const wizardStart = ref(null); // null = closed; otherwise { spotId?, catalogSpotId? }
+
+function openWizard(start = {}) {
+  error.value = "";
+  message.value = "";
+  wizardStart.value = start;
+}
+
+// Add a switched-off pin for a place whose coordinates are known. Idempotent.
+function wizardEnsureSpot(place) {
+  const hub = form.value.scenes[form.value.rootSceneId];
+  const existing = hub.hotspots.find((h) => h.id === place.spotId);
+  if (existing) return existing.id;
+  hub.hotspots.push(buildPlaceholderGlobeSpot(place));
+  return place.spotId;
+}
+
+// Write the scene for a place (the existing "pin by name" agent). Unsaved edits
+// — including the new pin — are saved first; the studio stays on the globe hub.
+async function wizardMakeScene(query) {
+  if (dirty.value && !(await save())) throw new Error(error.value || "Your edits could not be saved first.");
+  const res = await generateWikidoGlobeScene({ topicId: selectedId.value, query });
+  await refresh(true);
+  loadSelected();
+  return res;
+}
+
+function wizardSetEnabled(spotId, on) {
+  const spot = form.value?.scenes?.[form.value.rootSceneId]?.hotspots?.find((h) => h.id === spotId);
+  if (!spot) return false;
+  setPlaceEnabled(spot, on);
+  return on ? spot.enabled !== false : spot.enabled === false;
+}
+
+async function wizardPaint(sceneId) {
+  error.value = "";
+  await regenerateSceneImage(sceneId);
+  const problem = error.value;
+  error.value = "";
+  return problem || null;
+}
+
+// Record the place's scene, then the hub teaser for the place itself.
+async function wizardRecordVoice(spotId) {
+  const spot = form.value?.scenes?.[form.value.rootSceneId]?.hotspots?.find((h) => h.id === spotId);
+  if (!spot?.childSceneId) return "This place has no scene to record yet.";
+  const hubId = form.value.rootSceneId;
+  error.value = "";
+  selectedSceneId.value = spot.childSceneId;
+  await generateScopedAudios();
+  selectedSceneId.value = hubId;
+  if (!error.value) await generateScopedAudios({ hotspotId: spotId });
+  const problem = error.value;
+  error.value = "";
+  return problem || null;
+}
+
+// status of one hub place, for the checklist on its card
+const placeStatus = (spot) => placeChecklist(form.value, spot);
 
 // ── the places directory: every continent and country the system knows ───────
 // Nobody types coordinates for these — each catalog place already knows where
@@ -1693,6 +1759,24 @@ function confirmDeleteScene(withDeeper) {
     </section>
 
     <!-- workspace -->
+    <WikidoAddPlaceWizard
+      v-if="wizardStart && form && isGlobeForm"
+      :pack="form"
+      :directory="directory"
+      :topic-status="selectedDoc?.status || 'draft'"
+      :start="wizardStart"
+      :is-dirty="dirty"
+      :ensure-spot="wizardEnsureSpot"
+      :make-scene="wizardMakeScene"
+      :set-enabled="wizardSetEnabled"
+      :relocate="relocateGlobeSpot"
+      :save-now="save"
+      :paint-art="wizardPaint"
+      :record-voice="wizardRecordVoice"
+      :publish="togglePublish"
+      @close="wizardStart = null"
+    />
+
     <section v-if="form" class="workspace">
       <p v-if="isBundled" class="note">This bundled world is editable. Save creates a draft; publish when ready to show your changes to families.</p>
       <header class="ws-toolbar">
@@ -1834,39 +1918,32 @@ function confirmDeleteScene(withDeeper) {
         <p v-if="voFailed.length" class="muted">Failed clips: {{ voFailed.join(", ") }} — try again.</p>
       </section>
 
-      <!-- globe worlds: pin places by name; the agent resolves, writes, and pins -->
+      <!-- globe worlds: one obvious way to add a place; the old controls live under Advanced -->
       <section v-if="isGlobeForm" class="pin-place card">
-        <div>
-          <h3 class="pane-title">🌍 Pin a place on the globe</h3>
-          <p class="muted">
-            Type any continent, country, capital, city or famous place. The system finds its spot on the planet,
-            writes the scene, and pins the doorway — continent and country spots show first, city spots appear as
-            the child zooms in, and landmark spots when they zoom close. To add a continent or country
-            <em>without</em> a scene, use the directory under the globe — it starts switched off.
-          </p>
+        <div class="pin-place-main">
+          <p class="pin-place-line">🌍 Add continents, countries, cities and landmarks to this globe — we guide you step by step.</p>
+          <button type="button" class="btn primary pin-add" @click="openWizard()">＋ Add a place</button>
         </div>
-        <form class="layer-form" @submit.prevent="pinPlace">
-          <input
-            v-model="placeQuery"
-            type="text"
-            placeholder="e.g. “Pakistan”, “Lahore”, “Eiffel Tower”"
-            aria-label="Place to pin on the globe"
-          />
-          <button class="btn primary" type="submit" :disabled="placeBusy || !placeQuery.trim()">
-            {{ placeBusy ? (placeNote || "Pinning…") : "＋ Pin this place" }}
-          </button>
-        </form>
+        <details class="advanced">
+          <summary>Advanced — pin by typing a name</summary>
+          <form class="layer-form" @submit.prevent="pinPlace">
+            <input
+              v-model="placeQuery"
+              type="text"
+              placeholder="e.g. “Pakistan”, “Lahore”, “Eiffel Tower”"
+              aria-label="Place to pin on the globe"
+            />
+            <button class="btn" type="submit" :disabled="placeBusy || !placeQuery.trim()">
+              {{ placeBusy ? (placeNote || "Pinning…") : "＋ Pin this place" }}
+            </button>
+          </form>
+          <p class="muted">Finds the place, writes its scene and pins it in one go.</p>
+        </details>
       </section>
 
-      <p class="model-line">
-        <template v-if="isGlobeForm">
-          This world opens on a <strong>3D globe</strong>. Every place is a <strong>spot on the planet</strong> that
-          <strong>opens a scene</strong> — zoom in to reveal city and landmark spots.
-        </template>
-        <template v-else>
-          A topic is a <strong>map of scenes</strong>. Each scene is a picture with <strong>spots</strong>.
-          A spot either <strong>shows a fact</strong>, <strong>opens another scene</strong>, or <strong>opens another world</strong>.
-        </template>
+      <p v-if="!isGlobeForm" class="model-line">
+        A topic is a <strong>map of scenes</strong>. Each scene is a picture with <strong>spots</strong>.
+        A spot either <strong>shows a fact</strong>, <strong>opens another scene</strong>, or <strong>opens another world</strong>.
       </p>
 
       <section v-if="health.length" class="health" :class="{ open: showHealth }">
@@ -1968,30 +2045,24 @@ function confirmDeleteScene(withDeeper) {
                 :ghosts="ghostPlaces"
                 @select="selectSpot"
                 @relocate="relocateGlobeSpot"
-                @add-place="addCatalogPlace"
+                @add-place="(id) => openWizard({ catalogSpotId: id })"
               />
               <div class="hub-editor-copy">
                 <p>
-                  This is the <strong>globe hub</strong> — children open the world on a 3D Earth and tap the pinned
-                  places. Continent spots show first, then countries, and city and landmark spots appear as they zoom in.
-                </p>
-                <p>
-                  The system already knows where <strong>every continent and country</strong> goes: the faint dots on
-                  the planet are places you haven't added yet — click one (or use the directory below) to add it.
-                  New places start <strong>switched off</strong>; add scenes, then switch them on. Click a pin to
-                  edit its card below, or <strong>drag</strong> it to fine-tune its spot.
+                  Children tap pinned places on this 3D Earth. Drag a pin to nudge it; click a faint dot to add that place.
                 </p>
                 <p v-if="selectedScene.hotspots.length" class="muted">
                   {{ selectedScene.hotspots.length }} place{{ selectedScene.hotspots.length === 1 ? "" : "s" }} added
-                  ({{ selectedScene.hotspots.filter((h) => h.enabled !== false).length }} on) — the list below is the order children explore them in.
+                  ({{ selectedScene.hotspots.filter((h) => h.enabled !== false).length }} on for children).
                 </p>
+                <p v-else class="muted">No places yet — press “＋ Add a place” above to start.</p>
               </div>
             </div>
 
             <!-- every continent & country, with coordinates already known -->
             <details class="places-directory">
               <summary>
-                🧭 Directory — all continents &amp; countries
+                🧭 Advanced — directory of all continents &amp; countries
                 <span class="muted">({{ directoryAdded }} of {{ directory.length }} added)</span>
               </summary>
               <div class="directory-bar">
@@ -2159,6 +2230,11 @@ function confirmDeleteScene(withDeeper) {
               <button type="button" class="spot-del" :aria-label="`Remove spot ${spot.label}`" title="Remove this spot and its local scene branch" @click="removeHotspot(selectedScene, spot.id)">Remove</button>
             </div>
 
+            <div v-if="isHubScene" class="place-status">
+              <WikidoPlaceChecklist :check="placeStatus(spot)" />
+              <button v-if="!placeStatus(spot).complete" type="button" class="btn finish-place" @click="openWizard({ spotId: spot.id })">Finish this place →</button>
+            </div>
+
             <div v-if="spot.id === selectedSpotId" class="spot-body">
               <label class="field">Spot name
                 <input v-model="spot.label" type="text" />
@@ -2246,7 +2322,10 @@ function confirmDeleteScene(withDeeper) {
             </div>
           </div>
           <button v-if="!isHubScene" class="btn" @click="addHotspot(selectedScene)">＋ Add a spot to this picture</button>
-          <button v-else class="btn" @click="addGlobeSpot">＋ Add a custom place by hand (landmark, town…)</button>
+          <details v-else class="advanced hand-add">
+            <summary>Advanced — add a custom place by hand</summary>
+            <button class="btn" @click="addGlobeSpot">＋ Add a custom place by hand (landmark, town…)</button>
+          </details>
 
           <!-- grow -->
           <section v-if="!isHubScene" class="grow card">
@@ -2595,6 +2674,13 @@ function confirmDeleteScene(withDeeper) {
 
 /* grow */
 .pin-place { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.9rem 1rem; border: 1.5px solid #A5F3FC; background: #ECFEFF; }
+.pin-place-main { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.pin-place-line { margin: 0; font-weight: 700; color: var(--text); flex: 1 1 280px; }
+.pin-add { font-size: 1rem; padding: 0.65rem 1.2rem; }
+.pin-place .advanced .layer-form { margin-top: 0.5rem; }
+.place-status { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; padding: 0 0.75rem 0.55rem; }
+.finish-place { font-size: 0.8rem; padding: 0.3rem 0.8rem; border-color: var(--primary); color: var(--primary); font-weight: 800; }
+.hand-add .btn { margin-top: 0.4rem; }
 .pin-place .pane-title { margin-top: 0; }
 .pin-place .muted { margin: 0; }
 .hub-editor-zone { border: 1.5px solid var(--border); border-radius: 14px; padding: 0.75rem; background: #F8F7FC; }

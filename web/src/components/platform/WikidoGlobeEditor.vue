@@ -17,6 +17,8 @@ const props = defineProps({
   // catalog places the system knows but this globe has not added yet — drawn as
   // faint dots at their known coordinates; clicking one adds it (switched off)
   ghosts: { type: Array, default: () => [] },
+  // zoom used when the editor opens already facing a selected pin
+  focusZoom: { type: Number, default: 1.8 },
 });
 const emit = defineEmits(["select", "relocate", "add-place"]);
 
@@ -252,6 +254,12 @@ defineExpose({ setZoom: zoomTo, zoom, rot, resize });
 
 onMounted(() => {
   resize();
+  // opened with a pin already chosen (the add-a-place wizard): start facing it
+  const focus = props.spots.find((s) => s.id === props.selectedId);
+  if (focus && Number.isFinite(+focus.lat) && Number.isFinite(+focus.lng)) {
+    rot.value = clampRotation({ lambda: +focus.lng, phi: +focus.lat });
+    zoom.value = clampZoom(props.focusZoom);
+  }
   if (typeof ResizeObserver !== "undefined") {
     ro = new ResizeObserver(resize);
     ro.observe(wrapEl.value);
