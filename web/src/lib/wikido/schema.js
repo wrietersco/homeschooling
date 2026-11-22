@@ -54,7 +54,35 @@ export function normalizePackForLoad(pack) {
     }
     scenes[sceneId] = hotspots === scene?.hotspots ? scene : { ...scene, hotspots };
   }
-  return changed ? { ...pack, scenes } : pack;
+  const healed = changed ? { ...pack, scenes } : pack;
+  return pruneSwitchedOffPlaces(healed);
+}
+
+// A globe place that is switched off (`enabled: false`) is invisible to
+// children, so its scene — which may still be unpainted or half-written — must
+// not stop the WHOLE globe from loading. Drop those hub pins and any scene that
+// is no longer reachable from the entrance, then validate what children can see.
+// (Without this, one unfinished switched-off place made a published world fail
+// validation and the child silently got the empty bundled shell: no pins at all.)
+export function pruneSwitchedOffPlaces(pack) {
+  if (!pack || pack.view !== "globe" || !pack.scenes || !pack.rootSceneId) return pack;
+  const hub = pack.scenes[pack.rootSceneId];
+  if (!hub || !(hub.hotspots || []).some((h) => h?.enabled === false)) return pack;
+  const keep = (hub.hotspots || []).filter((h) => h?.enabled !== false);
+  const scenes = { ...pack.scenes, [pack.rootSceneId]: { ...hub, hotspots: keep } };
+  const reachable = new Set([pack.rootSceneId]);
+  const queue = [pack.rootSceneId];
+  while (queue.length) {
+    const scene = scenes[queue.pop()];
+    for (const h of scene?.hotspots || []) {
+      if (h?.childSceneId && scenes[h.childSceneId] && !reachable.has(h.childSceneId)) {
+        reachable.add(h.childSceneId);
+        queue.push(h.childSceneId);
+      }
+    }
+  }
+  for (const id of Object.keys(scenes)) if (!reachable.has(id)) delete scenes[id];
+  return { ...pack, scenes };
 }
 
 function checkImage(img, path, errors) {

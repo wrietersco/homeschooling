@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validateTopicPack, validateCrossTopicDoorways, validatePackCrossTopicDoorways } from "./schema.js";
+import { normalizePackForLoad, validateTopicPack, validateCrossTopicDoorways, validatePackCrossTopicDoorways } from "./schema.js";
 import { wikidoTopicPacks } from "./index.js";
 import livingThings from "./topics/living-things.js";
 import { bundledWikidoWorlds } from "../../../../functions/lib/wikidoBundledWorlds.js";
@@ -223,5 +223,31 @@ describe("wikido globe schema", () => {
     const pack = globePack();
     pack.view = "hologram";
     expect(validateTopicPack(pack).some((e) => e.includes('view must be "globe"'))).toBe(true);
+  });
+});
+
+describe("published globe worlds with unfinished switched-off places", () => {
+  const art = (id) => ({ id, title: id, narration: id, image: { src: `https://example.com/${id}.jpg`, alt: id }, hotspots: [{ id: `f-${id}`, label: "Fact", blurb: "b", x: 50, y: 50, info: { title: "T", body: ["p"] } }] });
+  const spot = (id, extra = {}) => ({ id, label: id, blurb: id, lat: 30, lng: 70, level: "country", childSceneId: id, info: { title: id, body: ["p"] }, ...extra });
+  const world = () => ({
+    id: "our-earth", title: "Earth", tagline: "t", view: "globe", rootSceneId: "globe",
+    scenes: {
+      globe: { id: "globe", title: "Earth", narration: "n", image: { src: "", alt: "g" }, hotspots: [spot("pk"), spot("ru", { enabled: false })] },
+      pk: art("pk"),
+      ru: { ...art("ru"), image: { src: "", alt: "ru" } }, // switched off AND not painted yet
+    },
+  });
+  it("fails raw validation but loads once switched-off places are pruned (children see the enabled pins)", () => {
+    expect(validateTopicPack(world()).length).toBeGreaterThan(0);
+    const loaded = normalizePackForLoad(world());
+    expect(validateTopicPack(loaded)).toEqual([]);
+    expect(loaded.scenes.globe.hotspots.map((h) => h.id)).toEqual(["pk"]);
+    expect(loaded.scenes.ru).toBeUndefined();
+  });
+  it("leaves non-globe packs and fully-enabled globes untouched", () => {
+    const w = world();
+    delete w.scenes.globe.hotspots[1].enabled;
+    expect(normalizePackForLoad(w)).toBe(w);
+    expect(normalizePackForLoad(livingThings)).toBe(livingThings);
   });
 });

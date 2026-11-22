@@ -214,3 +214,26 @@ describe("WikidoGlobe — switched-off places and continents", () => {
     expect(spotLabel(w, "Asia")).toBeUndefined();
   });
 });
+
+describe("WikidoGlobe initial view (regression: production showed no pins)", () => {
+  it("shows enabled continent pins at the first zoom and hides switched-off ones", async () => {
+    const p = structuredClone(pack);
+    const h = p.scenes.globe.hotspots;
+    h.push({ id: "asia", label: "Asia", blurb: "b", lat: 34, lng: 90, level: "continent", childSceneId: "pakistan", info: { title: "Asia", body: ["p"] } });
+    h.push({ id: "russia", label: "Russia", blurb: "b", lat: 60, lng: 90, level: "continent", enabled: false, childSceneId: "pakistan", info: { title: "Russia", body: ["p"] } });
+    const w = mount(WikidoGlobe, { props: { topic: p, scene: p.scenes.globe, trail: [], topicDirectory: {} } });
+    const el = w.find(".wd-sky").element;
+    Object.defineProperties(el, { clientWidth: { value: 800, configurable: true }, clientHeight: { value: 600, configurable: true } });
+    w.vm.resize();
+    w.vm.rot = { lambda: 80, phi: 35 };
+    w.vm.setZoom(1);
+    await flushPromises();
+    expect(spotLabel(w, "Asia")).toBeTruthy();
+    expect(spotLabel(w, "Russia")).toBeUndefined();
+  });
+  it("shows enabled country pins at the first zoom when the world has no continents", async () => {
+    const w = mountGlobe();
+    await facePakistan(w);
+    expect(spotLabel(w, "Pakistan")).toBeTruthy();
+  });
+});
