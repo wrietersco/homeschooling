@@ -94,6 +94,42 @@ describe("WikidoGlobeEditor", () => {
     expect(w.find(".wd-e-readout").text()).toContain("unsaved");
   });
 
+  it("draws known-but-unadded places as faint dots and emits add-place on click", async () => {
+    const w = mount(WikidoGlobeEditor, {
+      props: {
+        spots: spots(),
+        selectedId: "",
+        ghosts: [
+          { spotId: "pakistan", name: "Pakistan", level: "country", lat: 30.4, lng: 69.3 }, // already a pin: no dot
+          { spotId: "india", name: "India", level: "country", lat: 22.4, lng: 79 },
+          { spotId: "asia", name: "Asia", level: "continent", lat: 45, lng: 90 },
+        ],
+      },
+    });
+    const el = w.find(".wd-e").element;
+    Object.defineProperties(el, { clientWidth: { value: 400, configurable: true }, clientHeight: { value: 400, configurable: true } });
+    w.vm.resize();
+    w.vm.rot = { lambda: 78, phi: 30 };
+    await flushPromises();
+    const dots = w.findAll(".wd-e-ghost");
+    expect(dots.map((d) => d.attributes("aria-label")).join(" ")).toContain("India");
+    expect(dots.map((d) => d.attributes("aria-label")).join(" ")).not.toContain("Add Pakistan");
+    await dots.find((d) => d.attributes("aria-label").includes("India")).trigger("click");
+    expect(w.emitted("add-place")[0]).toEqual(["india"]);
+  });
+
+  it("dims a switched-off pin", async () => {
+    const off = spots();
+    off[0].enabled = false;
+    const w = mount(WikidoGlobeEditor, { props: { spots: off, selectedId: "" } });
+    const el = w.find(".wd-e").element;
+    Object.defineProperties(el, { clientWidth: { value: 400, configurable: true }, clientHeight: { value: 400, configurable: true } });
+    w.vm.resize();
+    await faceCluster(w);
+    expect(pin(w, "Pakistan").classes()).toContain("off");
+    expect(pin(w, "Lahore").classes()).not.toContain("off");
+  });
+
   it("exposes a clamped programmatic zoom for tests", () => {
     const w = mountEditor();
     w.vm.setZoom(99);

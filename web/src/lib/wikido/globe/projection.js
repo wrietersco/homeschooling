@@ -10,7 +10,12 @@ export const ZOOM_MAX = 6;
 // once reveals city spots, once more reveals location spots (landmarks).
 export const LEVEL_ZOOM = { country: 1, city: 2.2, location: 3.8 };
 
-export const SPOT_LEVELS = ["country", "city", "location"];
+// Continent pins are the widest layer: a globe that has any shows them at the
+// fully zoomed-out view, and country pins then wait until this zoom to appear
+// (a globe with no continent pins is unchanged — countries show from the start).
+export const COUNTRY_ZOOM_WITH_CONTINENTS = 1.7;
+
+export const SPOT_LEVELS = ["continent", "country", "city", "location"];
 
 export function clampZoom(z) {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(z) || ZOOM_MIN));
@@ -114,30 +119,41 @@ function smoothstep(t) {
   return x * x * (3 - 2 * x);
 }
 
+// The zoom at which a level's layer begins. `continents` says the globe has
+// continent pins, which pushes the country layer out to make room for them.
+function enterZoom(level, continents) {
+  if (level === "continent") return ZOOM_MIN;
+  if (level === "country" && continents) return COUNTRY_ZOOM_WITH_CONTINENTS;
+  return LEVEL_ZOOM[level] ?? ZOOM_MIN;
+}
+
 // The zoom at which the NEXT deeper layer takes over (Infinity for the last).
-export function nextLevelZoom(level) {
+export function nextLevelZoom(level, { continents = false } = {}) {
+  if (level === "continent") return COUNTRY_ZOOM_WITH_CONTINENTS;
   if (level === "country") return LEVEL_ZOOM.city;
   if (level === "city") return LEVEL_ZOOM.location;
   return Infinity;
 }
 
 // How visible a spot level is at this zoom: 0 (hidden) … 1 (fully shown).
-export function spotOpacityAtZoom(level, zoom) {
-  const enter = LEVEL_ZOOM[level] ?? ZOOM_MIN;
-  const fadeIn = level === "country" ? 1 : smoothstep((zoom - (enter - FADE)) / FADE);
-  const exit = nextLevelZoom(level);
+// Pass { continents: true } when the globe carries continent pins.
+export function spotOpacityAtZoom(level, zoom, { continents = false } = {}) {
+  const enter = enterZoom(level, continents);
+  const fadeIn = enter <= ZOOM_MIN ? 1 : smoothstep((zoom - (enter - FADE)) / FADE);
+  const exit = nextLevelZoom(level, { continents });
   const fadeOut = exit === Infinity ? 1 : 1 - smoothstep((zoom - (exit - FADE)) / FADE);
   return Math.min(fadeIn, fadeOut);
 }
 
-export function levelVisibleAtZoom(level, zoom) {
-  return spotOpacityAtZoom(level, zoom) > 0.001;
+export function levelVisibleAtZoom(level, zoom, opts) {
+  return spotOpacityAtZoom(level, zoom, opts) > 0.001;
 }
 
 // The layer the child is currently "inside": the deepest fully-shown level.
-export function currentLevelAtZoom(zoom) {
+export function currentLevelAtZoom(zoom, { continents = false } = {}) {
   if (zoom >= LEVEL_ZOOM.location) return "location";
   if (zoom >= LEVEL_ZOOM.city) return "city";
+  if (continents && zoom < COUNTRY_ZOOM_WITH_CONTINENTS) return "continent";
   return "country";
 }
 

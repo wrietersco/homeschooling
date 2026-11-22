@@ -16,8 +16,17 @@ const isWorldDoor = (spot) => Boolean(spot?.childSceneId && spot.childTopicId);
 const opensLocalScene = (spot) => Boolean(spot?.childSceneId && !spot.childTopicId);
 
 // What tapping this spot does, in words a curator can read at a glance.
-// → { kind: "fact"|"scene"|"world"|"broken", text, targetId|null }
+// → { kind: "fact"|"scene"|"world"|"broken"|"off", text, targetId|null }
 export function spotOutcome(scenes, spot, worlds = null) {
+  // a globe place switched off: a known pin that children cannot see yet
+  if (spot?.enabled === false) {
+    const target = spot.childSceneId && !spot.childTopicId ? scenes?.[spot.childSceneId] : null;
+    return {
+      kind: "off",
+      text: target ? `Switched off — hidden from children (has “${target.title}”)` : "Switched off — no scenes yet",
+      targetId: target?.id || null,
+    };
+  }
   if (!spot?.childSceneId) return { kind: "fact", text: "Shows a fact card", targetId: null };
   if (isWorldDoor(spot)) {
     const world = worlds instanceof Map ? worlds.get(spot.childTopicId) : null;
@@ -53,7 +62,10 @@ export function sceneStatus(scenes, scene, worlds = null, globeRootId = null) {
     const unknownWorld = (scene.hotspots || []).some((h) => isWorldDoor(h) && !worlds.has(h.childTopicId));
     if (unknownWorld) return { key: "broken-link", label: "A spot opens an unknown world" };
   }
-  if (!(scene.hotspots || []).length) {
+  // on the globe hub, only ENABLED places count — switched-off places are known
+  // pins that children can't see yet
+  const liveSpots = isHub ? (scene.hotspots || []).filter((h) => h.enabled !== false) : scene.hotspots || [];
+  if (!liveSpots.length) {
     return isHub ? { key: "needs-spots", label: "No places yet" } : { key: "needs-spots", label: "No spots yet" };
   }
   if (!isHub && !hasArtwork(scene)) return { key: "needs-artwork", label: "Needs artwork" };
@@ -183,7 +195,8 @@ export function topicHealth(scenes, rootSceneId, worlds = null, globeRootId = nu
         : { sceneId: id, level: "error", text: `“${s.title}” has no spots yet.` });
     }
     if (st.key === "needs-artwork") issues.push({ sceneId: id, level: "warn", text: `“${s.title}” still needs its artwork.` });
-    const needsDetails = (s.hotspots || []).filter((h) => spotNeedsDetails(h).needs);
+    // a switched-off place keeps stand-in card text until it is switched on
+    const needsDetails = (s.hotspots || []).filter((h) => h.enabled !== false && spotNeedsDetails(h).needs);
     if (needsDetails.length) {
       issues.push({
         sceneId: id,

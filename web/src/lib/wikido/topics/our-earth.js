@@ -9,8 +9,12 @@
 //
 // The root scene is the globe HUB: it renders as the 3D Earth itself (no
 // artwork of its own) and its hotspots are the pinned places, added at runtime.
+// A place with no scenes yet is a disabled placeholder (`enabled: false`).
 // Saving an edit in the Studio creates the draft override, exactly like every
 // other bundled world.
+import { placeCatalog } from "../../../../../functions/lib/wikidoGazetteer.js";
+import { buildPlaceholderGlobeSpot } from "../../../../../functions/lib/wikidoGlobe.js";
+
 export default {
   id: "our-earth",
   title: "Our Amazing Earth",
@@ -27,7 +31,12 @@ export default {
       image: { src: "", alt: "The Earth seen from space" },
       narration:
         "This is our Earth — seven continents, almost two hundred countries, and thousands of wonderful places. Spin the globe, zoom in close, and tap a glowing spot to step inside!",
-      hotspots: [],
+      // The United Kingdom is added as a placeholder: pinned at its known
+      // coordinates but SWITCHED OFF, with no scene under it. Children don't see
+      // it until the curator adds scenes and switches it on. (Every other
+      // continent and country is known to the Studio's directory the same way —
+      // adding one is a click, never a hand-placed pin.)
+      hotspots: [buildPlaceholderGlobeSpot(placeCatalog.find((p) => p.countryId === "gb"))],
     },
   },
 };

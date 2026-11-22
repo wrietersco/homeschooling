@@ -108,6 +108,7 @@ const COUNTRY_ROWS = [
   { id: "ua", name: "Ukraine", lat: 48.4, lng: 31.2, capital: "Kyiv", capLat: 50.5, capLng: 30.5, region: "Europe" },
   { id: "by", name: "Belarus", lat: 53.5, lng: 28.0, capital: "Minsk", capLat: 53.9, capLng: 27.6, region: "Europe" },
   { id: "ru", name: "Russia", lat: 61.5, lng: 99.0, capital: "Moscow", capLat: 55.8, capLng: 37.6, region: "Europe" },
+  { id: "xk", name: "Kosovo", lat: 42.6, lng: 20.9, capital: "Pristina", capLat: 42.67, capLng: 21.17, region: "Europe" },
   // ── Africa ──
   { id: "eg", name: "Egypt", lat: 26.8, lng: 30.8, capital: "Cairo", capLat: 30.0, capLng: 31.2, region: "Africa" },
   { id: "ly", name: "Libya", lat: 27.0, lng: 17.2, capital: "Tripoli", capLat: 32.9, capLng: 13.2, region: "Africa" },
@@ -181,6 +182,12 @@ const COUNTRY_ROWS = [
   { id: "bs", name: "Bahamas", lat: 24.5, lng: -77.4, capital: "Nassau", capLat: 25.0, capLng: -77.4, region: "North America" },
   { id: "tt", name: "Trinidad and Tobago", lat: 10.5, lng: -61.3, capital: "Port of Spain", capLat: 10.65, capLng: -61.5, region: "North America" },
   { id: "bb", name: "Barbados", lat: 13.2, lng: -59.5, capital: "Bridgetown", capLat: 13.1, capLng: -59.6, region: "North America" },
+  { id: "ag", name: "Antigua and Barbuda", lat: 17.1, lng: -61.8, capital: "St. John's", capLat: 17.1, capLng: -61.85, region: "North America" },
+  { id: "dm", name: "Dominica", lat: 15.4, lng: -61.35, capital: "Roseau", capLat: 15.3, capLng: -61.4, region: "North America" },
+  { id: "gd", name: "Grenada", lat: 12.1, lng: -61.7, capital: "St. George's", capLat: 12.05, capLng: -61.75, region: "North America" },
+  { id: "lc", name: "Saint Lucia", lat: 13.9, lng: -61.0, capital: "Castries", capLat: 14.0, capLng: -61.0, region: "North America" },
+  { id: "kn", name: "Saint Kitts and Nevis", lat: 17.3, lng: -62.7, capital: "Basseterre", capLat: 17.3, capLng: -62.7, region: "North America" },
+  { id: "vc", name: "Saint Vincent and the Grenadines", lat: 13.25, lng: -61.2, capital: "Kingstown", capLat: 13.15, capLng: -61.2, region: "North America" },
   // ── South America ──
   { id: "br", name: "Brazil", lat: -10.8, lng: -52.9, capital: "Brasília", capLat: -15.8, capLng: -47.9, region: "South America" },
   { id: "ar", name: "Argentina", lat: -35.4, lng: -65.2, capital: "Buenos Aires", capLat: -34.6, capLng: -58.4, region: "South America" },
@@ -209,6 +216,20 @@ const COUNTRY_ROWS = [
   { id: "mh", name: "Marshall Islands", lat: 7.1, lng: 171.2, capital: "Majuro", capLat: 7.1, capLng: 171.4, region: "Oceania" },
   { id: "tv", name: "Tuvalu", lat: -7.5, lng: 178.0, capital: "Funafuti", capLat: -8.5, capLng: 179.2, region: "Oceania" },
   { id: "nr", name: "Nauru", lat: -0.5, lng: 166.9, capital: "Yaren", capLat: -0.5, capLng: 166.9, region: "Oceania" },
+];
+
+// The seven continents, each with the point its globe pin sits on (a spot on
+// land near the middle of the continent, so the pin never floats in the sea).
+// A continent is the widest zoom layer: its pin shows when the globe is fully
+// zoomed out and gives way to country pins as the child zooms in.
+const CONTINENT_ROWS = [
+  { id: "africa", name: "Africa", lat: 4.0, lng: 21.0 },
+  { id: "antarctica", name: "Antarctica", lat: -80.0, lng: 30.0 },
+  { id: "asia", name: "Asia", lat: 45.0, lng: 90.0 },
+  { id: "europe", name: "Europe", lat: 50.0, lng: 15.0 },
+  { id: "north-america", name: "North America", lat: 45.0, lng: -100.0 },
+  { id: "oceania", name: "Oceania", lat: -24.0, lng: 135.0 },
+  { id: "south-america", name: "South America", lat: -14.0, lng: -60.0 },
 ];
 
 // Major cities beyond the capitals: the places a child (or a superadmin) is
@@ -531,11 +552,30 @@ const COUNTRY_ALIASES = {
   siam: "th",
   ceylon: "lk",
   mesopotamia: "iq",
+  "st kitts": "kn",
+  "st kitts and nevis": "kn",
+  "st lucia": "lc",
+  "st vincent": "vc",
+  "st vincent and the grenadines": "vc",
+  antigua: "ag",
+  "the bahamas": "bs",
+};
+
+// Alternate continent names → continent id. Keys are normalized.
+const CONTINENT_ALIASES = {
+  australasia: "oceania",
+  "australia and oceania": "oceania",
+  pacific: "oceania",
+  antarctic: "antarctica",
+  "the antarctic": "antarctica",
+  "n america": "north-america",
+  "s america": "south-america",
+  "latin america": "south-america",
 };
 
 // ── lookup ────────────────────────────────────────────────────────────────────
 
-export const SPOT_LEVELS = ["country", "city", "location"];
+export const SPOT_LEVELS = ["continent", "country", "city", "location"];
 
 export function slugName(name) {
   return String(name || "")
@@ -549,6 +589,52 @@ export function slugName(name) {
 
 export const countries = COUNTRY_ROWS;
 export const countryById = new Map(COUNTRY_ROWS.map((c) => [c.id, c]));
+export const continents = CONTINENT_ROWS;
+export const continentById = new Map(CONTINENT_ROWS.map((c) => [c.id, c]));
+
+// ── the place catalog ─────────────────────────────────────────────────────────
+// EVERY continent and country the system knows, each with the exact spot its
+// pin sits on. This is what lets the studio list the whole planet without
+// anyone typing coordinates: a place is "added" simply by switching it on, and
+// it already knows where it lives. Each entry carries the spot id a hub
+// doorway for it uses (the slug of its name — the same id "Pin a place"
+// writes), so a catalog place and a pinned spot recognise each other.
+//   { spotId, kind, level, name, lat, lng, countryId?, continentId }
+export const placeCatalog = [
+  ...CONTINENT_ROWS.map((c) => ({
+    spotId: slugName(c.name),
+    kind: "continent",
+    level: "continent",
+    name: c.name,
+    lat: c.lat,
+    lng: c.lng,
+    continentId: c.id,
+  })),
+  ...COUNTRY_ROWS.map((c) => ({
+    spotId: slugName(c.name),
+    kind: "country",
+    level: "country",
+    name: c.name,
+    lat: c.lat,
+    lng: c.lng,
+    countryId: c.id,
+    continentId: slugName(c.region),
+  })),
+];
+export const catalogBySpotId = new Map(placeCatalog.map((p) => [p.spotId, p]));
+
+// The catalog place a pinned hub spot stands for, or null for a custom spot
+// (a city, a landmark, a hand-pinned place). Matches by spot id first, then by
+// the country id a "Pin a place" spot carries.
+export function catalogPlaceForSpot(spot) {
+  if (!spot) return null;
+  const byId = catalogBySpotId.get(spot.id);
+  if (byId && (!spot.level || spot.level === byId.level)) return byId;
+  if (spot.level === "country" && spot.countryId) {
+    return placeCatalog.find((p) => p.countryId === spot.countryId) || null;
+  }
+  return null;
+}
 
 // City entries: every capital (from the country rows) + the major-city list.
 export const cities = [
@@ -577,6 +663,25 @@ for (const city of cities) {
 const aliasByNorm = new Map(
   Object.entries(COUNTRY_ALIASES).map(([k, v]) => [normName(k), v]).filter(([k]) => k)
 );
+const continentByName = new Map(CONTINENT_ROWS.map((c) => [normName(c.name), c]));
+const continentAliasByNorm = new Map(
+  Object.entries(CONTINENT_ALIASES).map(([k, v]) => [normName(k), v]).filter(([k]) => k)
+);
+
+function continentMatch(id, { via = "name" } = {}) {
+  const c = continentById.get(id);
+  if (!c) return null;
+  return {
+    kind: "continent",
+    level: "continent",
+    id: c.id,
+    name: c.name,
+    lat: c.lat,
+    lng: c.lng,
+    country: null,
+    via,
+  };
+}
 
 function countryMatch(id, { via = "name" } = {}) {
   const c = countryById.get(id);
@@ -609,25 +714,35 @@ function cityMatch(city, { via = "name" } = {}) {
   };
 }
 
-// Uniqueness check for prefix searches: exactly one candidate or nothing.
-function uniquePrefix(map, norm) {
+// Uniqueness check for prefix searches: exactly one candidate (across every map
+// given) or nothing — "nort" must not guess North America when North Korea and
+// North Macedonia match too.
+function uniquePrefix(maps, norm) {
   let found = null;
-  for (const [key, value] of map.entries()) {
-    if (key.startsWith(norm)) {
-      if (found) return null;
-      found = value;
+  for (const map of Array.isArray(maps) ? maps : [maps]) {
+    for (const [key, value] of map.entries()) {
+      if (key.startsWith(norm)) {
+        if (found) return null;
+        found = value;
+      }
     }
   }
   return found;
 }
 
-// Resolve free text ("Pakistan", "lahore", "UAE", "New York") to a place the
-// globe can pin. Returns { kind: "country"|"city", level, id, name, lat, lng,
-// country, via } or null when the gazetteer doesn't know the place (the caller
-// falls back to the language model for landmarks and neighborhoods).
+// Resolve free text ("Europe", "Pakistan", "lahore", "UAE", "New York") to a
+// place the globe can pin. Returns { kind: "continent"|"country"|"city", level,
+// id, name, lat, lng, country, via } or null when the gazetteer doesn't know the
+// place (the caller falls back to the language model for landmarks and
+// neighborhoods).
 export function resolvePlaceQuery(query) {
   const norm = normName(query);
   if (!norm) return null;
+
+  const continent = continentByName.get(norm);
+  if (continent) return continentMatch(continent.id, { via: "continent" });
+  const continentAlias = continentAliasByNorm.get(norm);
+  if (continentAlias) return continentMatch(continentAlias, { via: "alias" });
 
   const aliased = aliasByNorm.get(norm);
   if (aliased) return countryMatch(aliased, { via: "alias" });
@@ -651,8 +766,11 @@ export function resolvePlaceQuery(query) {
 
   // prefix search (min 4 chars) — only when unambiguous
   if (norm.length >= 4) {
-    const c = uniquePrefix(countryByName, norm);
-    if (c) return countryMatch(c.id, { via: "prefix" });
+    const c = uniquePrefix([countryByName, continentByName], norm);
+    if (c) {
+      // only country rows carry a capital
+      return c.capital ? countryMatch(c.id, { via: "prefix" }) : continentMatch(c.id, { via: "prefix" });
+    }
     const t = uniquePrefix(cityByName, norm);
     if (t) return cityMatch(t, { via: "prefix" });
   }

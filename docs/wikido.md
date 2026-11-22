@@ -421,7 +421,38 @@ The data model stays a normal pack, with three additions:
 - The zoom is the level of detail, and the layers are **exclusive**: country
   spots show first; zoom into the city band and the country pins fade away,
   replaced by city pins; zoom again and only landmark pins remain
-  (`LEVEL_ZOOM` in `web/src/lib/wikido/globe/projection.js`).
+  (`LEVEL_ZOOM` in `web/src/lib/wikido/globe/projection.js`). A fourth,
+  widest level — `"continent"` — sits in front: when a globe has any enabled
+  continent pin, the zoomed-out view shows continents and countries wait until
+  `COUNTRY_ZOOM_WITH_CONTINENTS`; a globe without continent pins is unchanged.
+- A spot may carry **`enabled: false`**. A disabled place is a known pin that is
+  not on the children's globe: it needs no scene (`childSceneId`), is ignored by
+  the publish gate, and does not count as a place. Absent = enabled, so every
+  world saved before this flag keeps working. An *enabled* spot must open a scene.
+
+### The place catalog — the system already knows every continent and country
+
+`functions/lib/wikidoGazetteer.js` exports `placeCatalog`: the 7 continents and
+every country (≈197), each with the exact coordinates its pin sits on and a
+stable `spotId` (the slug of its name). Nobody types coordinates or drags a pin
+to add one. The Studio's globe hub shows the whole catalog:
+
+- **Faint dots** on the planet are known-but-unadded places; click one to add it.
+- **🧭 Directory** (under the globe) lists every continent and country with its
+  state — *not added* / *switched off* / *on* — with search and an
+  added/not-added filter.
+- Adding a place pins it at its catalog coordinates **switched off, with no scene**
+  (`buildPlaceholderGlobeSpot`). Later, give it scenes — type its name into
+  "Pin a place" (the generated scene is attached to the existing placeholder, which
+  stays off), or attach an existing scene in its spot row — and then tick **Show
+  this place to children**. The switch refuses to go on while the place has no scene.
+- A new country or continent only needs a row in the gazetteer
+  (`COUNTRY_ROWS` / `CONTINENT_ROWS`); it appears in every globe's directory
+  automatically, with no development per globe. Re-run
+  `web/scripts/generate-globe-borders.mjs` to draw its outline.
+
+The bundled **Our Amazing Earth** shell ships with the **United Kingdom** added
+this way (switched off, no scenes).
 
 The planet itself is drawn from **real geography**: country borders come from
 Natural Earth 110m (public domain), generated into
@@ -444,14 +475,15 @@ reorder controls and the spot ↑/↓ buttons set it, as in picture worlds.
 2. **Pin places by name** — type "Pakistan", "Lahore" or "Eiffel Tower" into the
    "Pin a place" bar (`generateWikidoGlobeScene`). The system resolves WHERE the
    place is from the bundled **gazetteer** (`functions/lib/wikidoGazetteer.js` —
-   every country with its capital plus ~270 major cities, alias-tolerant: "USA",
+   the 7 continents, every country with its capital plus ~270 major cities, alias-tolerant: "USA",
    "uk", "Türkiye" all resolve); anything the gazetteer doesn't know (landmarks,
    natural wonders) is resolved by the model with real coordinates. The agent
    then writes the scene (title, narration, art prompt, 3–5 fact hotspots) and
    pins the doorway spot on the hub at the place's coordinates with the right
    level. The scene is a normal draft scene — press **Generate artwork** and the
    same image pipeline paints it (spot placement included). A place already
-   pinned is refused, not duplicated.
+   pinned is refused, not duplicated — unless it was added earlier as a
+   scene-less placeholder, in which case the new scene fills it in place.
 3. **Paint, curate, publish** — artwork, voiceovers, spot details and the
    publish gate work as everywhere else. The hub itself is skipped by artwork
    generation (it renders code, not a picture); the Studio shows the **globe

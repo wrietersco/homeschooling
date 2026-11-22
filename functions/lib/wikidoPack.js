@@ -184,6 +184,9 @@ export function normalizeGeneratedPack(raw) {
           ...(Number.isFinite(+spot?.lng) ? { lng: Math.min(180, Math.max(-180, Math.round(+spot.lng * 10000) / 10000)) } : {}),
           ...(isValidSpotLevel(spot?.level) ? { level: spot.level } : {}),
           ...(isSlug(spot?.countryId) ? { countryId: spot.countryId } : {}),
+          // a place switched off stays on the planet's catalog but off the
+          // children's globe; only an explicit `false` is stored
+          ...(spot?.enabled === false ? { enabled: false } : {}),
           ...(spot?.childSceneId ? { childSceneId: slugify(spot.childSceneId) } : {}),
           // cross-topic doorways keep the world they point at
           ...(typeof spot?.childTopicId === "string" && spot.childTopicId ? { childTopicId: slugify(spot.childTopicId) } : {}),
@@ -842,6 +845,7 @@ export function normalizeGlobeTopic(parsed, { title, angle = "" } = {}) {
 // already resolved WHERE the place is (gazetteer or LLM); this prompt only
 // turns it into a child-friendly scene plus the doorway spot's wording.
 const LEVEL_GUIDE = {
+  continent: "a GRAND PANORAMA of the whole continent — its great landscapes, wildlife and landmark places blended in one sweeping scene",
   country: "a SWEEPING LANDSCAPE MONTAGE of the country's most iconic scenery (mountains, rivers, cities, landmarks blended in one panorama)",
   city: "a PANORAMA of the city (its famous skyline or old town, streets, landmarks)",
   location: "a CLOSE-UP of this one famous place (building, monument, natural wonder) with its surroundings",
@@ -863,7 +867,7 @@ STRICT RULES
     "title": "scene title including the place name",
     "artPrompt": "16:9 composition description: ${LEVEL_GUIDE[place.level] || LEVEL_GUIDE.location}. Spell out what sits left, centre, right and foreground. No text or letters in the picture.",
     "image": { "src": "", "alt": "one sentence describing the picture" },
-    "narration": "2-4 sentences read aloud: where this place is${place.level !== "country" ? ` (which country/continent)` : ""} and why it is exciting",
+    "narration": "2-4 sentences read aloud: where this place is${place.level !== "country" && place.level !== "continent" ? ` (which country/continent)` : ""} and why it is exciting",
     "hotspots": [
       { "id": "kebab-case-id", "label": "1-3 words", "blurb": "4-8 word teaser", "x": 50, "y": 50,
         "info": { "title": "...", "body": ["one short child-friendly paragraph", "a second if it helps"], "fact": "one surprising but TRUE fact" } }

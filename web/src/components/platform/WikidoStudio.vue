@@ -24,6 +24,7 @@ import { wikidoTopicPacks } from "@/lib/wikido";
 import { useCoverPlacement } from "@/composables/useCoverPlacement";
 import { spotOutcome, sceneStatus, deletePlan, deleteSceneFrom, topicHealth, undoBuiltScenes, spotNeedsDetails, bundledTopicSummaries } from "@/lib/wikido/studioModel";
 import WikidoGlobeEditor from "@/components/platform/WikidoGlobeEditor.vue";
+import { globeDirectory, buildPlaceholderGlobeSpot } from "../../../../functions/lib/wikidoGlobe.js";
 import { withKeys, countOutline, removeOutlineNode, runOutline, summarizeRun, retryFailedItems } from "@/lib/wikido/outlineBuild";
 import { getLlmConfig } from "@/services/admin";
 
@@ -620,7 +621,9 @@ async function pinPlace() {
     const res = await generateWikidoGlobeScene({ topicId: selectedId.value, query: q });
     placeNote.value = "";
     const where = res.place?.country?.name && res.place.country.name !== res.place.name ? ` in ${res.place.country.name}` : "";
-    message.value = `Pinned “${res.place.name}”${where} (${res.place.level}) — “${res.title}” is written and waiting for its artwork.`;
+    message.value = res.filledPlaceholder
+      ? `Added “${res.title}” to ${res.place.name} — it is still switched off. Switch it on when its scenes are ready.`
+      : `Pinned “${res.place.name}”${where} (${res.place.level}) — “${res.title}” is written and waiting for its artwork.`;
     placeQuery.value = "";
     await refresh(true);
     loadSelected();
@@ -633,8 +636,69 @@ async function pinPlace() {
   }
 }
 
-// A place pinned by hand (rare): starts at the equator; pick the scene it opens
-// and set its coordinates in the spot editor.
+// ── the places directory: every continent and country the system knows ───────
+// Nobody types coordinates for these — each catalog place already knows where
+// it lives. Adding one pins it at those coordinates SWITCHED OFF (it has no
+// scenes yet); the curator attaches scenes later and switches it on, and only
+// then does it appear on the children's globe.
+const directory = computed(() => (isGlobeForm.value && form.value ? globeDirectory(form.value) : []));
+const directoryQuery = ref("");
+const directoryFilter = ref("all"); // all | unadded | added
+const directoryRows = computed(() => {
+  const q = directoryQuery.value.trim().toLowerCase();
+  return directory.value.filter((row) => {
+    if (directoryFilter.value === "unadded" && row.state !== "unadded") return false;
+    if (directoryFilter.value === "added" && row.state === "unadded") return false;
+    return !q || row.place.name.toLowerCase().includes(q);
+  });
+});
+const directoryAdded = computed(() => directory.value.filter((r) => r.state !== "unadded").length);
+const ghostPlaces = computed(() => directory.value.filter((r) => r.state === "unadded").map((r) => r.place));
+
+// Add a catalog place to this globe (switched off) and open its editor row.
+function addCatalogPlace(spotId) {
+  const row = directory.value.find((r) => r.place.spotId === spotId);
+  if (!row) return;
+  const hub = form.value.scenes[form.value.rootSceneId];
+  if (!row.spot) hub.hotspots.push(buildPlaceholderGlobeSpot(row.place));
+  selectedSceneId.value = form.value.rootSceneId;
+  selectedSpotId.value = (row.spot || hub.hotspots[hub.hotspots.length - 1]).id;
+  message.value = row.spot ? "" : `Added ${row.place.name} — switched off until it has scenes. Save edits to keep it.`;
+}
+
+// Switch a place on or off for children. A place can only go on once it opens
+// a scene — a pin with nothing behind it would be a dead end.
+function setPlaceEnabled(spot, on) {
+  if (on && !spot.childSceneId) {
+    error.value = `“${spot.label}” has no scene yet — add one (“Pin a place” by name, or attach an existing scene) before switching it on.`;
+    return;
+  }
+  error.value = "";
+  if (on) delete spot.enabled;
+  else spot.enabled = false;
+}
+
+// The checkbox follows the data: if the switch-on was refused (no scene yet),
+// the box snaps back to off.
+function onPlaceSwitch(spot, event) {
+  setPlaceEnabled(spot, event.target.checked);
+  event.target.checked = spot.enabled !== false;
+}
+
+// Attach an EXISTING scene as the thing a place opens.
+function attachSceneToPlace(spot, sceneId) {
+  if (!sceneId) return;
+  spot.childSceneId = sceneId;
+}
+
+// The scenes a place can open: everything except the globe hub itself.
+const attachableScenes = computed(() =>
+  form.value ? orderedScenes.value.filter(({ id }) => id !== form.value.rootSceneId) : []
+);
+
+// A place pinned by hand (rare — for a landmark or town the catalog doesn't
+// list): starts at the equator; pick the scene it opens and set its
+// coordinates in the spot editor.
 function addGlobeSpot() {
   const hub = form.value.scenes[form.value.rootSceneId];
   const n = hub.hotspots.length + 1;
@@ -1775,9 +1839,10 @@ function confirmDeleteScene(withDeeper) {
         <div>
           <h3 class="pane-title">🌍 Pin a place on the globe</h3>
           <p class="muted">
-            Type any country, capital, city or famous place. The system finds its spot on the planet, writes the
-            scene, and pins the doorway — country spots show first, city spots appear as the child zooms in,
-            and landmark spots when they zoom close.
+            Type any continent, country, capital, city or famous place. The system finds its spot on the planet,
+            writes the scene, and pins the doorway — continent and country spots show first, city spots appear as
+            the child zooms in, and landmark spots when they zoom close. To add a continent or country
+            <em>without</em> a scene, use the directory under the globe — it starts switched off.
           </p>
         </div>
         <form class="layer-form" @submit.prevent="pinPlace">
@@ -1900,24 +1965,62 @@ function confirmDeleteScene(withDeeper) {
               <WikidoGlobeEditor
                 :spots="selectedScene.hotspots"
                 :selected-id="selectedSpotId"
+                :ghosts="ghostPlaces"
                 @select="selectSpot"
                 @relocate="relocateGlobeSpot"
+                @add-place="addCatalogPlace"
               />
               <div class="hub-editor-copy">
                 <p>
                   This is the <strong>globe hub</strong> — children open the world on a 3D Earth and tap the pinned
-                  places. Country spots show first; city and landmark spots appear as they zoom in.
+                  places. Continent spots show first, then countries, and city and landmark spots appear as they zoom in.
                 </p>
                 <p>
-                  Every place's coordinates are <strong>pre-saved</strong> when you pin it, so pins sit exactly
-                  right by default. <strong>Drag a pin</strong> only if you want to fine-tune its spot on the
-                  planet, then save. Borders come from Natural Earth. Click a pin to edit its card below.
+                  The system already knows where <strong>every continent and country</strong> goes: the faint dots on
+                  the planet are places you haven't added yet — click one (or use the directory below) to add it.
+                  New places start <strong>switched off</strong>; add scenes, then switch them on. Click a pin to
+                  edit its card below, or <strong>drag</strong> it to fine-tune its spot.
                 </p>
                 <p v-if="selectedScene.hotspots.length" class="muted">
-                  {{ selectedScene.hotspots.length }} place{{ selectedScene.hotspots.length === 1 ? "" : "s" }} pinned — the list below is the order children explore them in.
+                  {{ selectedScene.hotspots.length }} place{{ selectedScene.hotspots.length === 1 ? "" : "s" }} added
+                  ({{ selectedScene.hotspots.filter((h) => h.enabled !== false).length }} on) — the list below is the order children explore them in.
                 </p>
               </div>
             </div>
+
+            <!-- every continent & country, with coordinates already known -->
+            <details class="places-directory">
+              <summary>
+                🧭 Directory — all continents &amp; countries
+                <span class="muted">({{ directoryAdded }} of {{ directory.length }} added)</span>
+              </summary>
+              <div class="directory-bar">
+                <input v-model="directoryQuery" type="search" placeholder="Search, e.g. “United Kingdom”" aria-label="Search the places directory" />
+                <select v-model="directoryFilter" aria-label="Filter the places directory">
+                  <option value="all">All</option>
+                  <option value="unadded">Not added yet</option>
+                  <option value="added">Added</option>
+                </select>
+              </div>
+              <ul class="directory-list">
+                <li v-for="row in directoryRows" :key="row.place.spotId" :class="`dir-${row.state}`">
+                  <span class="dir-name">
+                    {{ row.place.name }}
+                    <span class="dir-level">{{ row.place.level }}</span>
+                  </span>
+                  <span class="dir-state">{{ row.state === "unadded" ? "not added" : row.state === "disabled" ? "switched off" : "on" }}</span>
+                  <button
+                    v-if="row.state === 'unadded'"
+                    type="button"
+                    class="btn"
+                    :aria-label="`Add ${row.place.name} to the globe`"
+                    @click="addCatalogPlace(row.place.spotId)"
+                  >＋ Add</button>
+                  <button v-else type="button" class="btn" :aria-label="`Edit ${row.place.name}`" @click="selectSpot(row.spot.id)">Edit</button>
+                </li>
+                <li v-if="!directoryRows.length" class="muted">No matching places.</li>
+              </ul>
+            </details>
           </div>
           <div v-else-if="selectedScene.id !== form.rootSceneId || !isGlobeForm" class="stage-wrap">
           <!-- the picture IS the editor: numbered pins are the spots -->
@@ -2029,7 +2132,7 @@ function confirmDeleteScene(withDeeper) {
                   <span v-if="spot.audioEngine" class="engine-badge" :class="spot.audioEngine" :title="spot.audioEngine === 'paid' ? 'Recorded with the paid premium voice' : 'Recorded with the free Kokoro voice'">{{ spot.audioEngine === "paid" ? "💎 paid" : "🎙 kokoro" }}</span>
                 </span>
                 <span class="outcome" :class="outcomeOf(spot).kind">
-                  <span aria-hidden="true">{{ outcomeOf(spot).kind === "fact" ? "💡" : outcomeOf(spot).kind === "scene" ? "🚪" : outcomeOf(spot).kind === "world" ? "🌍" : "⚠" }}</span>
+                  <span aria-hidden="true">{{ outcomeOf(spot).kind === "fact" ? "💡" : outcomeOf(spot).kind === "scene" ? "🚪" : outcomeOf(spot).kind === "world" ? "🌍" : outcomeOf(spot).kind === "off" ? "⏸" : "⚠" }}</span>
                   {{ outcomeOf(spot).text }}
                 </span>
               </button>
@@ -2066,10 +2169,26 @@ function confirmDeleteScene(withDeeper) {
                 <label><input type="radio" :name="`kind-${spot.id}`" :checked="spot.childSceneId && !spot.childTopicId" @change="setSpotKind(spot, 'scene')" /> 🚪 It opens another scene here</label>
                 <label><input type="radio" :name="`kind-${spot.id}`" :checked="spot.childSceneId && spot.childTopicId" @change="setSpotKind(spot, 'world')" /> 🌍 It opens a scene in ANOTHER world</label>
               </fieldset>
-              <p v-else class="muted door-note">🌍 A globe place always opens the scene below. Pin more places from the “Pin a place” bar at the top.</p>
+              <template v-else>
+                <label class="field place-switch">
+                  <span>
+                    <input type="checkbox" :checked="spot.enabled !== false" @change="onPlaceSwitch(spot, $event)" />
+                    Show this place to children
+                  </span>
+                  <span class="muted">{{ spot.enabled === false ? "Switched off — children can't see it. It needs a scene before it can go on." : "On — children can tap it on the globe." }}</span>
+                </label>
+                <label v-if="!spot.childSceneId" class="field">Attach an existing scene
+                  <select :value="''" @change="attachSceneToPlace(spot, $event.target.value)">
+                    <option value="">— none yet (or use “Pin a place” by name to write one) —</option>
+                    <option v-for="s in attachableScenes" :key="s.id" :value="s.id">{{ form.scenes[s.id].title }}</option>
+                  </select>
+                </label>
+                <p v-else class="muted door-note">🌍 An enabled globe place always opens the scene below.</p>
+              </template>
               <div v-if="isHubScene" class="field-row">
                 <label class="field">Zoom level (when the spot appears)
                   <select v-model="spot.level">
+                    <option value="continent">🗺️ Continent — visible when fully zoomed out</option>
                     <option value="country">🌍 Country — visible immediately</option>
                     <option value="city">🏙️ City — appears when zoomed in</option>
                     <option value="location">📍 Location — appears when zoomed close</option>
@@ -2127,7 +2246,7 @@ function confirmDeleteScene(withDeeper) {
             </div>
           </div>
           <button v-if="!isHubScene" class="btn" @click="addHotspot(selectedScene)">＋ Add a spot to this picture</button>
-          <button v-else class="btn" @click="addGlobeSpot">＋ Pin a place by hand</button>
+          <button v-else class="btn" @click="addGlobeSpot">＋ Add a custom place by hand (landmark, town…)</button>
 
           <!-- grow -->
           <section v-if="!isHubScene" class="grow card">
@@ -2481,6 +2600,21 @@ function confirmDeleteScene(withDeeper) {
 .hub-editor-zone { border: 1.5px solid var(--border); border-radius: 14px; padding: 0.75rem; background: #F8F7FC; }
 .hub-editor-grid { display: grid; grid-template-columns: minmax(280px, 440px) 1fr; gap: 1rem; align-items: start; }
 @media (max-width: 900px) { .hub-editor-grid { grid-template-columns: 1fr; } }
+
+/* the directory of every continent & country */
+.places-directory { margin-top: 0.75rem; border-top: 1.5px dashed var(--border); padding-top: 0.6rem; }
+.places-directory summary { cursor: pointer; font-weight: 800; }
+.directory-bar { display: flex; gap: 0.5rem; margin: 0.6rem 0; }
+.directory-bar input { flex: 1; min-width: 0; }
+.directory-list { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto; border: 1.5px solid var(--border); border-radius: 10px; background: #fff; }
+.directory-list li { display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border); }
+.directory-list li:last-child { border-bottom: 0; }
+.dir-name { flex: 1; min-width: 0; font-weight: 700; }
+.dir-level { margin-left: 0.4rem; font-size: 0.7rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: #7C3AED; }
+.dir-state { font-size: 0.75rem; font-weight: 700; color: #6B7280; }
+.directory-list li.dir-enabled .dir-state { color: #047857; }
+.directory-list li.dir-disabled .dir-state { color: #B45309; }
+.place-switch { flex-direction: column; align-items: flex-start; gap: 0.15rem; }
 .hub-editor-copy { display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.88rem; color: var(--text2); }
 .hub-editor-copy p { margin: 0; }
 .create-globe { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; font-weight: 700; color: var(--text2); white-space: nowrap; }

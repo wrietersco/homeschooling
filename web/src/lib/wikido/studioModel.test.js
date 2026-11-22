@@ -215,3 +215,25 @@ describe("bundledTopicSummaries", () => {
     expect(bundledTopicSummaries([])).toEqual([]);
   });
 });
+
+describe("globe places switched off", () => {
+  const off = { id: "united-kingdom", label: "United Kingdom", blurb: "b", lat: 54, lng: -3, level: "country", enabled: false, info: { title: "United Kingdom", body: ["Coming soon."] } };
+  const hubOf = (hotspots) => ({ globe: { id: "globe", title: "Earth", narration: "n", hotspots } });
+
+  it("describes a switched-off place plainly, with or without a scene", () => {
+    expect(spotOutcome({}, off)).toMatchObject({ kind: "off", text: "Switched off — no scenes yet", targetId: null });
+    const scenes = { uk: { id: "uk", title: "The UK" } };
+    expect(spotOutcome(scenes, { ...off, childSceneId: "uk" })).toMatchObject({ kind: "off", targetId: "uk" });
+  });
+
+  it("a hub with only switched-off places still counts as having no places yet", () => {
+    expect(sceneStatus(hubOf([off]), hubOf([off]).globe, null, "globe")).toMatchObject({ key: "needs-spots", label: "No places yet" });
+    const live = { ...off, enabled: undefined, childSceneId: "uk" };
+    expect(sceneStatus({ ...hubOf([live]), uk: { id: "uk", title: "UK", hotspots: [] } }, hubOf([live]).globe, null, "globe").key).toBe("ready");
+  });
+
+  it("does not nag about stand-in card text on a switched-off place", () => {
+    const issues = topicHealth(hubOf([off]), "globe", null, "globe");
+    expect(issues.some((i) => /placeholder details/.test(i.text))).toBe(false);
+  });
+});

@@ -175,3 +175,42 @@ describe("WikidoGlobe", () => {
     expect(w.vm.zoom).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("WikidoGlobe — switched-off places and continents", () => {
+  const spotsWith = (extra) => ({
+    ...pack,
+    scenes: { ...pack.scenes, globe: { ...hub, hotspots: [...hub.hotspots, ...extra] } },
+  });
+  const mountWith = (extra) => {
+    const topic = spotsWith(extra);
+    const w = mount(WikidoGlobe, { props: { topic, scene: topic.scenes.globe, trail: [], topicDirectory: {} } });
+    const el = w.find(".wd-sky").element;
+    Object.defineProperties(el, { clientWidth: { value: 800, configurable: true }, clientHeight: { value: 600, configurable: true } });
+    w.vm.resize();
+    return w;
+  };
+  const off = { id: "india", label: "India", blurb: "b", lat: 22.4, lng: 79, level: "country", enabled: false, info: { title: "India", body: ["Coming soon."] } };
+  const asia = { id: "asia", label: "Asia", blurb: "The biggest continent", lat: 45, lng: 90, level: "continent", childSceneId: "pakistan", info: { title: "Asia", body: ["The biggest continent."] } };
+
+  it("never shows a switched-off place to children", async () => {
+    const w = mountWith([off]);
+    await facePakistan(w);
+    expect(spotLabel(w, "Pakistan")).toBeTruthy();
+    expect(spotLabel(w, "India")).toBeUndefined();
+    // and it is not counted among the places to discover
+    expect(w.find(".wd-progress").text()).toContain("/3");
+  });
+
+  it("with a continent pin, countries wait for the first zoom-in", async () => {
+    const w = mountWith([asia]);
+    w.vm.rot = { lambda: 85, phi: 35 };
+    w.vm.setZoom(1);
+    await flushPromises();
+    expect(spotLabel(w, "Asia")).toBeTruthy();
+    expect(spotLabel(w, "Pakistan")).toBeUndefined();
+    w.vm.setZoom(2);
+    await flushPromises();
+    expect(spotLabel(w, "Pakistan")).toBeTruthy();
+    expect(spotLabel(w, "Asia")).toBeUndefined();
+  });
+});

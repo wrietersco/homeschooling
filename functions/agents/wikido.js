@@ -53,7 +53,7 @@ import {
   normalizePlaceResolution,
   buildGlobeHubSpot,
 } from "../lib/wikidoPack.js";
-import { resolvePlaceQuery, countryById } from "../lib/wikidoGazetteer.js";
+import { resolvePlaceQuery, countryById, slugName } from "../lib/wikidoGazetteer.js";
 import { isGlobePack, isGlobeHub } from "../lib/wikidoGlobe.js";
 import { getKokoroEngine } from "../lib/wikidoKokoro.js";
 
@@ -300,8 +300,11 @@ export const generateWikidoGlobeScene = onCall(
 
     // 2) already pinned? One place, one spot.
     const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const already = (hub.hotspots || []).find((h) => norm(h.label) === norm(place.name));
-    if (already) {
+    const already = (hub.hotspots || []).find((h) => norm(h.label) === norm(place.name) || h.id === slugName(place.name));
+    // A place added earlier WITHOUT scenes (a disabled placeholder) is not "already
+    // pinned" — the scene being written now becomes its first one.
+    const placeholder = already && !already.childSceneId ? already : null;
+    if (already && !placeholder) {
       throw new HttpsError("failed-precondition", `“${place.name}” is already pinned on this globe (“${already.label}”).`);
     }
 
@@ -339,18 +342,31 @@ export const generateWikidoGlobeScene = onCall(
 
     // 4) pin the doorway on the globe hub (unique spot id, creation order =
     //    the sequence children explore in)
-    const spot = buildGlobeHubSpot({
+    let spot = buildGlobeHubSpot({
       place,
       label: parsed.hotspot?.label || place.name,
       blurb: parsed.hotspot?.blurb || "",
       childSceneId: sceneId,
       info: { title: child.title, body: [child.narration] },
     });
-    let m = 2;
-    const takenSpotIds = new Set((hub.hotspots || []).map((h) => h.id));
-    while (takenSpotIds.has(spot.id)) spot.id = `${spot.id}-${m++}`;
-
-    const hotspots = [...(hub.hotspots || []), spot];
+    let hotspots;
+    if (placeholder) {
+      // fill the placeholder in place: it keeps its id, coordinates, level and
+      // position in the explore order — and its on/off switch, which stays the
+      // curator's call
+      spot = withoutUndefined({
+        ...placeholder,
+        blurb: spot.blurb,
+        childSceneId: sceneId,
+        info: spot.info,
+      });
+      hotspots = (hub.hotspots || []).map((h) => (h.id === placeholder.id ? spot : h));
+    } else {
+      let m = 2;
+      const takenSpotIds = new Set((hub.hotspots || []).map((h) => h.id));
+      while (takenSpotIds.has(spot.id)) spot.id = `${spot.id}-${m++}`;
+      hotspots = [...(hub.hotspots || []), spot];
+    }
     const scenes = { ...pack.scenes, [sceneId]: child, [pack.rootSceneId]: { ...hub, hotspots } };
     await docRef.update(withoutUndefined({
       scenes,
@@ -361,6 +377,7 @@ export const generateWikidoGlobeScene = onCall(
       sceneId,
       title: child.title,
       spot,
+      filledPlaceholder: Boolean(placeholder),
       place: { name: place.name, level: place.level, lat: place.lat, lng: place.lng, via: place.via, country: place.country },
     };
   }

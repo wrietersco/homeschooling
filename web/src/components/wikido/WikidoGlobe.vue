@@ -21,6 +21,7 @@ import {
   projectSpot, spotOpacityAtZoom,
 } from "@/lib/wikido/globe/projection";
 import { drawGlobe } from "@/lib/wikido/globe/render";
+import { isSpotEnabled } from "../../../../functions/lib/wikidoGlobe.js";
 
 const props = defineProps({
   topic: { type: Object, required: true },
@@ -55,9 +56,14 @@ defineExpose({ setZoom, zoom, rot, resize });
 // ── spots: every hub doorway with a place on the planet ───────────────────────
 // Layers are exclusive: as the child zooms deeper, the parent layer's pins
 // fade away and only the current layer shows (countries → cities → landmarks).
+// A disabled place (every continent/country the studio knows starts disabled,
+// until its scenes exist) is not on the children's globe at all.
 const spots = computed(() =>
-  (props.scene.hotspots || []).filter((s) => Number.isFinite(+s.lat) && Number.isFinite(+s.lng))
+  (props.scene.hotspots || []).filter((s) => isSpotEnabled(s) && Number.isFinite(+s.lat) && Number.isFinite(+s.lng))
 );
+// With any continent pin on the globe, country pins wait for the first zoom-in
+// so the zoomed-out view is not crowded (see COUNTRY_ZOOM_WITH_CONTINENTS).
+const hasContinents = computed(() => spots.value.some((s) => s.level === "continent"));
 
 const placed = computed(() => {
   const { w, h } = size.value;
@@ -68,7 +74,7 @@ const placed = computed(() => {
   return spots.value
     .map((spot) => {
       const p = projectSpot(+spot.lat, +spot.lng, rot.value, { cx, cy, r });
-      const opacity = spotOpacityAtZoom(spot.level, zoom.value);
+      const opacity = spotOpacityAtZoom(spot.level, zoom.value, { continents: hasContinents.value });
       return { spot, ...p, opacity, shown: p.visible && opacity > 0.02 };
     })
     .filter((p) => p.shown)
@@ -161,7 +167,7 @@ function draw() {
   const cy = h / 2;
   const r = globeRadius();
   const rings = placed.value
-    .filter((p) => p.spot.level !== "country")
+    .filter((p) => p.spot.level !== "country" && p.spot.level !== "continent")
     .map((p) => ({ x: p.x, y: p.y, radius: 11 * Math.sqrt(zoom.value), opacity: p.opacity }));
   drawGlobe(g, { w, h, rot: rot.value, r }, { borders: borders.value, rings, dpr: window.devicePixelRatio || 1 });
 }
@@ -328,7 +334,8 @@ onBeforeUnmount(() => {
 // zoom hint: invite the next layer of discovery (the current layer's pins
 // hide as the child crosses into the deeper one)
 const zoomHint = computed(() => {
-  const level = currentLevelAtZoom(zoom.value);
+  const level = currentLevelAtZoom(zoom.value, { continents: hasContinents.value });
+  if (level === "continent") return "Zoom in to explore the countries inside";
   if (level === "country") return "Zoom in to explore the cities inside";
   if (level === "city") return "Keep zooming to find famous places";
   return "";

@@ -14,8 +14,11 @@ import { drawGlobe } from "@/lib/wikido/globe/render";
 const props = defineProps({
   spots: { type: Array, default: () => [] }, // hub hotspots (lat/lng doorways)
   selectedId: { type: String, default: "" },
+  // catalog places the system knows but this globe has not added yet — drawn as
+  // faint dots at their known coordinates; clicking one adds it (switched off)
+  ghosts: { type: Array, default: () => [] },
 });
-const emit = defineEmits(["select", "relocate"]);
+const emit = defineEmits(["select", "relocate", "add-place"]);
 
 const rot = ref(clampRotation({ lambda: 70, phi: 22 }));
 const zoom = ref(ZOOM_MIN);
@@ -67,6 +70,19 @@ const placed = computed(() => {
 
 const levelClass = (level) => `lvl-${level || "city"}`;
 
+// the not-yet-added catalog places on the visible hemisphere (far first)
+const ghostsPlaced = computed(() => {
+  const { w, h } = size.value;
+  if (!w || !h) return [];
+  const { cx, cy, r } = geometry();
+  const taken = new Set(props.spots.map((s) => s.id));
+  return props.ghosts
+    .filter((place) => !taken.has(place.spotId))
+    .map((place) => ({ place, ...projectSpot(+place.lat, +place.lng, rot.value, { cx, cy, r }) }))
+    .filter((p) => p.visible)
+    .sort((a, b) => a.depth - b.depth);
+});
+
 // ── drawing ───────────────────────────────────────────────────────────────────
 function draw() {
   const g = ctx;
@@ -74,7 +90,7 @@ function draw() {
   if (!g || !w || !h) return;
   const { cx, cy, r } = geometry();
   const rings = placed.value
-    .filter((p) => p.spot.level !== "country")
+    .filter((p) => p.spot.level !== "country" && p.spot.level !== "continent")
     .map((p) => ({ x: p.x, y: p.y, radius: 11 * Math.sqrt(zoom.value), opacity: 1 }));
   drawGlobe(g, { w, h, rot: rot.value, r }, { borders: borders.value, rings, dpr: window.devicePixelRatio || 1 });
 }
@@ -252,16 +268,30 @@ onBeforeUnmount(() => {
   <div ref="wrapEl" class="wd-e" :class="{ 'has-open': Boolean(selectedId) }">
     <canvas ref="canvasEl" class="wd-e-planet" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp" @wheel="onWheel" @click.capture="onClickCapture"></canvas>
 
+    <!-- every continent/country the system knows but this globe hasn't added:
+         a faint dot already sitting at its real coordinates. Click to add it. -->
+    <button
+      v-for="g in ghostsPlaced"
+      :key="`ghost-${g.place.spotId}`"
+      type="button"
+      class="wd-e-ghost"
+      :class="levelClass(g.place.level)"
+      :style="{ left: `${g.x}px`, top: `${g.y}px`, zIndex: 2 + Math.round(g.depth * 10) }"
+      :aria-label="`Add ${g.place.name} to the globe (switched off until it has scenes)`"
+      :title="`${g.place.name} — ${formatLatLng(+g.place.lat, +g.place.lng)}. Click to add it (switched off).`"
+      @click.stop="emit('add-place', g.place.spotId)"
+    ></button>
+
     <!-- pinned places; drag one to relocate, click to open its editor row -->
     <button
       v-for="(p, i) in placed"
       :key="p.spot.id"
       type="button"
       class="wd-e-pin"
-      :class="[levelClass(p.spot.level), { selected: p.spot.id === selectedId }]"
+      :class="[levelClass(p.spot.level), { selected: p.spot.id === selectedId, off: p.spot.enabled === false }]"
       :style="{ left: `${p.x}px`, top: `${p.y}px`, zIndex: 5 + Math.round(p.depth * 20) }"
-      :aria-label="`Spot ${numbering.get(p.spot.id)}: ${p.spot.label} — drag to relocate`"
-      :title="`${p.spot.label} — ${formatLatLng(+p.spot.lat, +p.spot.lng)} (${p.spot.level}). Drag to relocate.`"
+      :aria-label="`Spot ${numbering.get(p.spot.id)}: ${p.spot.label}${p.spot.enabled === false ? ' (switched off)' : ''} — drag to relocate`"
+      :title="`${p.spot.label} — ${formatLatLng(+p.spot.lat, +p.spot.lng)} (${p.spot.level}${p.spot.enabled === false ? ', switched off' : ''}). Drag to relocate.`"
       @pointerdown="startPinDrag($event, p.spot)"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
@@ -304,6 +334,23 @@ onBeforeUnmount(() => {
 .wd-e-pin:active { cursor: grabbing; }
 .wd-e-pin.lvl-city { background: #0D9488; }
 .wd-e-pin.lvl-location { background: #EA580C; }
+.wd-e-pin.lvl-continent { background: #BE185D; }
+/* a place that is known but switched off: hollow and dim, never on the kids' globe */
+.wd-e-pin.off { background: rgba(30, 18, 52, .75); border-style: dashed; opacity: 0.8; }
+
+.wd-e-ghost {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, .55);
+  background: rgba(255, 255, 255, .14);
+  cursor: pointer;
+}
+.wd-e-ghost.lvl-continent { width: 15px; height: 15px; border-color: rgba(244, 114, 182, .9); background: rgba(190, 24, 93, .25); }
+.wd-e-ghost:hover { background: rgba(253, 230, 138, .75); border-color: #FDE68A; }
 .wd-e-pin.selected { box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.45), 0 2px 8px rgba(0, 0, 0, 0.4); transform: translate(-50%, -50%) scale(1.15); }
 
 .wd-e-tools { position: absolute; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 0.35rem; }

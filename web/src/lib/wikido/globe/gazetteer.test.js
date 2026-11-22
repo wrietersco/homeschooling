@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   countries, cities, resolvePlaceQuery, slugName, SPOT_LEVELS, isLatLng, isLng,
+  placeCatalog, catalogPlaceForSpot,
 } from "../../../../../functions/lib/wikidoGazetteer.js";
 
 // The gazetteer is the globe's database — the superadmin's typed place names
@@ -72,6 +73,53 @@ describe("wikido gazetteer", () => {
   it("slugifies display names for spot ids", () => {
     expect(slugName("Badshahi Mosque")).toBe("badshahi-mosque");
     expect(slugName("Nuku'alofa")).toBe("nukualofa");
-    expect(SPOT_LEVELS).toEqual(["country", "city", "location"]);
+    expect(SPOT_LEVELS).toEqual(["continent", "country", "city", "location"]);
+  });
+});
+
+// The catalog is what lets the studio list the whole planet with no one typing
+// coordinates: every continent and country, each with its pin position known.
+describe("wikido place catalog", () => {
+  it("lists the seven continents and every country, each with valid coordinates", () => {
+    const continentPlaces = placeCatalog.filter((p) => p.level === "continent");
+    expect(continentPlaces.map((p) => p.name).sort()).toEqual(
+      ["Africa", "Antarctica", "Asia", "Europe", "North America", "Oceania", "South America"]
+    );
+    expect(placeCatalog.filter((p) => p.level === "country")).toHaveLength(countries.length);
+    const ids = new Set();
+    for (const p of placeCatalog) {
+      expect(isLatLng(p.lat), p.name).toBe(true);
+      expect(isLng(p.lng), p.name).toBe(true);
+      expect(p.spotId, p.name).toBeTruthy();
+      expect(ids.has(p.spotId), `duplicate spot id ${p.spotId}`).toBe(false);
+      ids.add(p.spotId);
+    }
+  });
+
+  it("knows the United Kingdom and the Caribbean/Kosovo additions", () => {
+    const uk = placeCatalog.find((p) => p.countryId === "gb");
+    expect(uk).toMatchObject({ name: "United Kingdom", level: "country", spotId: "united-kingdom", continentId: "europe" });
+    for (const id of ["ag", "dm", "gd", "lc", "kn", "vc", "xk"]) {
+      expect(placeCatalog.some((p) => p.countryId === id), id).toBe(true);
+    }
+  });
+
+  it("recognises a hub spot as its catalog place by id or country code", () => {
+    expect(catalogPlaceForSpot({ id: "pakistan", level: "country" })?.countryId).toBe("pk");
+    expect(catalogPlaceForSpot({ id: "my-pin", level: "country", countryId: "fr" })?.countryId).toBe("fr");
+    expect(catalogPlaceForSpot({ id: "lahore", level: "city" })).toBeNull();
+    expect(catalogPlaceForSpot(null)).toBeNull();
+  });
+
+  it("resolves continents and never guesses between continents and countries", () => {
+    expect(resolvePlaceQuery("Europe")).toMatchObject({ kind: "continent", level: "continent", id: "europe", country: null });
+    expect(resolvePlaceQuery("north america")).toMatchObject({ kind: "continent", id: "north-america" });
+    expect(resolvePlaceQuery("Australasia")).toMatchObject({ kind: "continent", id: "oceania" });
+    expect(resolvePlaceQuery("antarc")).toMatchObject({ kind: "continent", id: "antarctica" });
+    // "nort" matches North America AND North Korea/Macedonia — ambiguous, so null
+    expect(resolvePlaceQuery("nort")).toBeNull();
+    // a country still resolves as a country
+    expect(resolvePlaceQuery("South Africa")).toMatchObject({ kind: "country", id: "za" });
+    expect(resolvePlaceQuery("St Lucia")).toMatchObject({ id: "lc" });
   });
 });

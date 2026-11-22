@@ -4,6 +4,7 @@ import {
   projectSpot, screenToLatLng, horizonBlend, levelVisibleAtZoom, spotOpacityAtZoom,
   currentLevelAtZoom,
   nextLevelZoom,
+  COUNTRY_ZOOM_WITH_CONTINENTS,
   formatLatLng,
 } from "./projection";
 
@@ -131,6 +132,27 @@ describe("globe projection", () => {
     expect(nextLevelZoom("country")).toBe(2.2);
     expect(nextLevelZoom("city")).toBe(3.8);
     expect(nextLevelZoom("location")).toBe(Infinity);
+  });
+
+  it("adds a continent layer in front of countries — only when continent pins exist", () => {
+    const withC = { continents: true };
+    // zoomed out with continents: continents show, countries wait
+    expect(levelVisibleAtZoom("continent", ZOOM_MIN, withC)).toBe(true);
+    expect(levelVisibleAtZoom("country", ZOOM_MIN, withC)).toBe(false);
+    // continents hand over to countries (gentle cross-fade, no pop)
+    expect(spotOpacityAtZoom("continent", 1.5, withC)).toBeGreaterThan(0);
+    expect(spotOpacityAtZoom("continent", 1.5, withC)).toBeLessThan(1);
+    expect(spotOpacityAtZoom("continent", COUNTRY_ZOOM_WITH_CONTINENTS, withC)).toBeCloseTo(0, 12);
+    expect(spotOpacityAtZoom("country", COUNTRY_ZOOM_WITH_CONTINENTS, withC)).toBeCloseTo(1, 12);
+    // …and countries still give way to cities exactly as before
+    expect(levelVisibleAtZoom("country", 3, withC)).toBe(false);
+    expect(levelVisibleAtZoom("city", 3, withC)).toBe(true);
+    // a globe WITHOUT continent pins is unchanged: countries show from the start
+    expect(spotOpacityAtZoom("country", ZOOM_MIN)).toBeCloseTo(1, 12);
+    expect(currentLevelAtZoom(ZOOM_MIN, withC)).toBe("continent");
+    expect(currentLevelAtZoom(2, withC)).toBe("country");
+    expect(currentLevelAtZoom(ZOOM_MIN)).toBe("country");
+    expect(nextLevelZoom("continent")).toBe(COUNTRY_ZOOM_WITH_CONTINENTS);
   });
 
   it("formats coordinates for the studio readout", () => {

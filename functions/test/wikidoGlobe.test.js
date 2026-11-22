@@ -11,6 +11,8 @@ import {
   SPOT_LEVELS,
   isLatLng,
   isLng,
+  placeCatalog,
+  continents,
 } from "../lib/wikidoGazetteer.js";
 import {
   normalizeGeneratedPack,
@@ -22,7 +24,16 @@ import {
   buildGlobeScenePrompt,
   buildPlaceResolutionPrompt,
 } from "../lib/wikidoPack.js";
-import { isGlobePack, isGlobeHub, globeSpots } from "../lib/wikidoGlobe.js";
+import {
+  isGlobePack,
+  isGlobeHub,
+  globeSpots,
+  isSpotEnabled,
+  enabledGlobeSpots,
+  globeIsEmpty,
+  buildPlaceholderGlobeSpot,
+  globeDirectory,
+} from "../lib/wikidoGlobe.js";
 
 const hubSpot = (over = {}) => ({
   id: "pakistan",
@@ -108,7 +119,7 @@ test("resolves aliases and tolerates case, accents and articles", () => {
   assert.equal(resolvePlaceQuery("the Netherlands").id, "nl");
   assert.equal(resolvePlaceQuery("Nuku'alofa").name, "Nuku'alofa");
   assert.equal(slugName("Badshahi Mosque"), "badshahi-mosque");
-  assert.deepEqual(SPOT_LEVELS, ["country", "city", "location"]);
+  assert.deepEqual(SPOT_LEVELS, ["continent", "country", "city", "location"]);
 });
 
 test("returns null for non-places and never guesses ambiguous prefixes", () => {
@@ -288,4 +299,69 @@ test("the globe scene prompt carries the place, coordinates and leaf rule", () =
   assert.match(prompt, /never set childSceneId/s);
   assert.match(prompt, /Pakistan/); // existing places are listed as taken
   assert.match(buildPlaceResolutionPrompt({ query: "Eiffel Tower" }), /Eiffel Tower/);
+});
+
+// ── the place catalog: every continent & country, switched off by default ────
+test("the catalog knows every continent and country with its pin position", () => {
+  assert.equal(continents.length, 7);
+  assert.equal(placeCatalog.length, continents.length + countries.length);
+  const uk = placeCatalog.find((p) => p.countryId === "gb");
+  assert.equal(uk.name, "United Kingdom");
+  assert.equal(uk.spotId, "united-kingdom");
+  assert.ok(isLatLng(uk.lat) && isLng(uk.lng));
+  assert.equal(resolvePlaceQuery("Europe").level, "continent");
+});
+
+test("a placeholder spot is a disabled pin with no scene, and still validates", () => {
+  const uk = placeCatalog.find((p) => p.countryId === "gb");
+  const spot = buildPlaceholderGlobeSpot(uk);
+  assert.equal(spot.enabled, false);
+  assert.equal(spot.childSceneId, undefined);
+  assert.equal(spot.level, "country");
+  assert.equal(spot.countryId, "gb");
+  const pack = globePack();
+  pack.scenes.globe.hotspots = [spot];
+  assert.deepEqual(validateTopicPack(pack, { allowMissingArtwork: true }).filter((e) => !e.includes("pakistan")), []);
+  // …and it survives the save normalizer still switched off
+  const saved = normalizeForSave(pack, "test-atlas");
+  assert.equal(saved.pack.scenes.globe.hotspots[0].enabled, false);
+  assert.equal(saved.pack.scenes.globe.hotspots[0].lat, uk.lat);
+});
+
+test("an ENABLED globe spot must open a scene; enabled:false lifts that rule", () => {
+  const bare = hubSpot({ childSceneId: undefined });
+  delete bare.childSceneId;
+  const on = globePack();
+  on.scenes.globe.hotspots = [bare];
+  assert.ok(validateTopicPack(on, { allowMissingArtwork: true }).some((e) => e.includes("must open a scene")));
+  const off = globePack();
+  off.scenes.globe.hotspots = [{ ...bare, enabled: false }];
+  assert.ok(!validateTopicPack(off, { allowMissingArtwork: true }).some((e) => e.includes("must open a scene")));
+  const bad = globePack();
+  bad.scenes.globe.hotspots = [{ ...hubSpot(), enabled: "no" }];
+  assert.ok(validateTopicPack(bad, { allowMissingArtwork: true }).some((e) => e.includes("enabled")));
+});
+
+test("legacy spots (no enabled field) count as enabled; disabled ones leave the globe empty", () => {
+  assert.equal(isSpotEnabled(hubSpot()), true);
+  assert.equal(isSpotEnabled({ ...hubSpot(), enabled: false }), false);
+  const pack = globePack();
+  assert.equal(enabledGlobeSpots(pack).length, 1);
+  assert.equal(globeIsEmpty(pack), false);
+  pack.scenes.globe.hotspots = [{ ...hubSpot(), enabled: false }];
+  assert.equal(globeSpots(pack).length, 1);
+  assert.equal(globeIsEmpty(pack), true);
+});
+
+test("the directory pairs every catalog place with its spot and state", () => {
+  const pack = globePack(); // Pakistan pinned and on (legacy, no enabled field)
+  const uk = placeCatalog.find((p) => p.countryId === "gb");
+  pack.scenes.globe.hotspots.push(buildPlaceholderGlobeSpot(uk));
+  const dir = globeDirectory(pack);
+  assert.equal(dir.length, placeCatalog.length);
+  const stateOf = (countryId) => dir.find((r) => r.place.countryId === countryId).state;
+  assert.equal(stateOf("pk"), "enabled");
+  assert.equal(stateOf("gb"), "disabled");
+  assert.equal(stateOf("fr"), "unadded");
+  assert.ok(dir.find((r) => r.place.countryId === "gb").spot);
 });

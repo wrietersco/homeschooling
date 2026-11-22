@@ -475,6 +475,61 @@ describe("WikidoStudio — globe worlds", () => {
     expect(savedSpot.lng).toBe(spot.lng);
     expect(savedSpot.lat).toBe(spot.lat);
   });
+
+  it("knows every continent & country: add one from the directory — no coordinates typed, switched off", async () => {
+    fetchAllWikidoTopicsAdmin.mockResolvedValueOnce([globeTopicDoc()]);
+    const w = await mountStudio();
+    const hubSpots = () => w.vm.form.scenes.globe.hotspots;
+
+    // the directory lists the whole planet; only Pakistan is added (Lahore is a city, a custom pin outside the directory)
+    const rows = w.findAll(".directory-list li");
+    expect(rows.length).toBeGreaterThanOrEqual(200);
+    expect(w.find(".places-directory summary").text()).toContain("1 of");
+    const ukRow = rows.find((r) => r.text().includes("United Kingdom"));
+    expect(ukRow.text()).toContain("not added");
+
+    // one click adds it at the gazetteer's coordinates, disabled, with no scene
+    await ukRow.find("button").trigger("click");
+    await flushPromises();
+    const uk = hubSpots().find((h) => h.id === "united-kingdom");
+    expect(uk).toMatchObject({ level: "country", countryId: "gb", enabled: false });
+    expect(uk.lat).toBeCloseTo(54.4, 1);
+    expect(uk.lng).toBeCloseTo(-2.9, 1);
+    expect(uk.childSceneId).toBeUndefined();
+    expect(w.find(".spot.selected").text()).toContain("United Kingdom");
+    expect(w.find(".spot.selected").text()).toContain("Switched off");
+
+    // it cannot be switched on while it has no scene…
+    const box = w.find(".spot.selected .place-switch input[type=checkbox]");
+    await box.setValue(true);
+    await flushPromises();
+    expect(uk.enabled).toBe(false);
+    expect(w.text()).toContain("has no scene yet");
+
+    // …but once a scene is attached, the switch works and the flag is dropped (absent = on)
+    await w.find(".spot.selected select option[value=lahore]").setSelected();
+    await flushPromises();
+    expect(uk.childSceneId).toBe("lahore");
+    await w.find(".spot.selected .place-switch input[type=checkbox]").setValue(true);
+    await flushPromises();
+    expect(uk.enabled).toBeUndefined();
+  });
+
+  it("saves a disabled placeholder as enabled:false with no scene", async () => {
+    fetchAllWikidoTopicsAdmin.mockResolvedValueOnce([globeTopicDoc()]);
+    const w = await mountStudio();
+    const ukRow = w.findAll(".directory-list li").find((r) => r.text().includes("United Kingdom"));
+    await ukRow.find("button").trigger("click");
+    await flushPromises();
+    saveWikidoTopic.mockResolvedValue({ saved: true, discoveryCount: 3, repairs: [] });
+    fetchAllWikidoTopicsAdmin.mockResolvedValueOnce([globeTopicDoc()]);
+    const saveBtn = w.findAll(".toolbar-actions .btn").find((b) => b.text().includes("Save edits"));
+    await saveBtn.trigger("click");
+    await flushPromises();
+    const saved = saveWikidoTopic.mock.calls.at(-1)[0].pack.scenes.globe.hotspots.find((h) => h.id === "united-kingdom");
+    expect(saved.enabled).toBe(false);
+    expect(saved.childSceneId).toBeUndefined();
+  });
 });
 
 describe("WikidoStudio — bundled worlds in the studio", () => {

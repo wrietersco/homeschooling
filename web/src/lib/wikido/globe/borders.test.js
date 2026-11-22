@@ -42,7 +42,9 @@ describe("globe country borders", () => {
     const missing = countries.filter((c) => !keyed.has(c.id)).map((c) => c.id);
     // everything else than this allowlist of microstates / tiny islands must
     // have outlines — a big country without borders is a codegen regression
-    const tiny = new Set(["ad", "cv", "st", "mc", "sm", "va", "li", "mt", "sg", "bh", "mv", "bb", "sc", "km", "mu", "tv", "nr", "pw", "mh", "ki", "to", "ws", "fm"]);
+    // (ag/dm/gd/lc/kn/vc are Caribbean island nations too small for 110m; xk is
+    // Kosovo, drawn inside the "_other" land until Natural Earth names it)
+    const tiny = new Set(["ad", "cv", "st", "mc", "sm", "va", "li", "mt", "sg", "bh", "mv", "bb", "sc", "km", "mu", "tv", "nr", "pw", "mh", "ki", "to", "ws", "fm", "ag", "dm", "gd", "lc", "kn", "vc", "xk"]);
     expect(missing.filter((id) => !tiny.has(id))).toEqual([]);
   });
 });
