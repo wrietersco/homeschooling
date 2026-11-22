@@ -28,8 +28,6 @@ import {
   buildSpotDetailsPrompt,
   buildSpotPlacementPrompt,
   normalizeSpotPlacements,
-  normalizePainterSpots,
-  mergeSpotPlacements,
   applySpotPlacements,
   normalizeSpotDetails,
   normalizeGeneratedPack,
@@ -53,6 +51,7 @@ import {
   normalizePlaceResolution,
   buildGlobeHubSpot,
 } from "../lib/wikidoPack.js";
+import { needsVisualSuggestion, buildVisualSuggestionPrompt, normalizeVisualSuggestions } from "../lib/wikidoSpotArt.js";
 import { resolvePlaceQuery, countryById, slugName } from "../lib/wikidoGazetteer.js";
 import { isGlobePack, isGlobeHub } from "../lib/wikidoGlobe.js";
 import { getKokoroEngine } from "../lib/wikidoKokoro.js";
@@ -576,15 +575,19 @@ async function generateSceneImageFor(pack, topicId, sceneId) {
   const scene = pack.scenes[sceneId];
   const parent = parentSceneOf(pack.scenes, sceneId);
   const parentArt = String(parent?.image?.src || "");
+  // Every spot is depicted where its pin sits: first make sure each has a
+  // concrete visual subject (abstract labels like "India" → a landmark; stored
+  // on the spot so it is reused and editable), then compose the prompt.
+  const visuals = await ensureSpotVisuals(scene);
+  const hotspots = (scene.hotspots || []).map((h) => (visuals[h.id] ? { ...h, visual: visuals[h.id] } : h));
   // The realism directive rides last: even packs authored before the
   // encyclopedia-realism rule (or edited by hand) render true to life.
-  // The scene's spots ride with it: the painter must paint what every spot
-  // describes, and report exactly where each landed (see below).
   const prompt = composeSceneArtPrompt({
     artStyle: pack.artStyle,
     artPrompt: scene.artPrompt || scene.image?.alt || scene.title,
     coherence: parentArt.startsWith("http") ? coherencePrompt(parent?.title) : "",
-    spots: scene.hotspots,
+    spots: hotspots,
+    scenes: pack.scenes,
   });
 
   let reference = null;
@@ -602,26 +605,13 @@ async function generateSceneImageFor(pack, topicId, sceneId) {
     }
   }
 
-  const { data, mime, text } = await callImageModelWide({ prompt, apiKey: process.env.GEMINI_API_KEY, reference });
+  const { data, mime } = await callImageModelWide({ prompt, apiKey: process.env.GEMINI_API_KEY, reference });
   const url = await uploadSceneImage(topicId, sceneId, data, mime);
   const alt = scene.image?.alt || scene.title;
 
-  // ── agent-placed spot coordinates ─────────────────────────────────────────
-  // The painter reports, as JSON text next to the picture, the precise
-  // percentages where it painted every spot — those coordinates move the pins.
-  // The vision pass re-reads the finished picture only to fill spots the
-  // painter didn't report; the curator fine-tunes by dragging afterwards.
-  let placements = normalizePainterSpots(text, scene.hotspots).placements;
-  if (placements.length < (scene.hotspots || []).length) {
-    const { placements: rest } = await placeSceneSpots(scene, {
-      mime,
-      data: data.toString("base64"),
-      alt,
-    });
-    placements = mergeSpotPlacements(placements, rest);
-  }
-
-  const hotspots = applySpotPlacements(scene.hotspots, placements);
+  // Spots stay exactly where the curator put them — the prompt aimed the
+  // artwork at those positions. ✦ Auto-adjust is the curator's optional
+  // follow-up; pins are never moved silently.
   await topicsCol().doc(topicId).set(
     {
       scenes: { [sceneId]: { ...scene, image: { src: url, alt }, hotspots } },
@@ -629,7 +619,27 @@ async function generateSceneImageFor(pack, topicId, sceneId) {
     },
     { merge: true }
   );
-  return { url, placements };
+  return { url, placements: [], visuals };
+}
+
+// One text-model call fills the visual subject of every spot that has none and
+// no deterministic symbol. Fail-soft: on any error the label itself is used.
+async function ensureSpotVisuals(scene) {
+  const spots = (scene.hotspots || []).filter(needsVisualSuggestion);
+  if (!spots.length) return {};
+  try {
+    const { llm, genConfig } = await resolveLlm(getFirestore(), "wikido", { gemini: process.env.GEMINI_API_KEY });
+    if (!llm) return {};
+    const res = await llm.generate({
+      system: buildVisualSuggestionPrompt({ sceneTitle: scene.title, spots }),
+      contents: [{ role: "user", parts: [{ text: "Decide the visuals now. Output the JSON object only." }] }],
+      config: { ...genConfig, temperature: genConfig?.temperature ?? 0.3, maxOutputTokens: Math.max(genConfig?.maxOutputTokens || 0, 2048) },
+    });
+    return normalizeVisualSuggestions(parseLlmJson(res.text), spots);
+  } catch (e) {
+    console.warn(`[wikido] spot visuals failed for ${scene.id}:`, e?.message || e);
+    return {};
+  }
 }
 
 // ── agent-placed spot coordinates (shared vision pass) ───────────────────────

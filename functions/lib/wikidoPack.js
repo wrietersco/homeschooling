@@ -5,6 +5,7 @@
 import { validateSceneHierarchy, isCrossTopicDoorway } from "./wikidoHierarchy.js";
 import { isGlobeHub, validateSpotGeo, validateGlobeHubSpot } from "./wikidoGlobe.js";
 import { isValidSpotLevel, slugName } from "./wikidoGazetteer.js";
+import { buildSpotArtDirection } from "./wikidoSpotArt.js";
 export { validateDeclaredHierarchy } from "./wikidoHierarchy.js";
 
 export function slugify(text) {
@@ -188,6 +189,8 @@ export function normalizeGeneratedPack(raw) {
           // children's globe; only an explicit `false` is stored
           ...(spot?.enabled === false ? { enabled: false } : {}),
           ...(spot?.childSceneId ? { childSceneId: slugify(spot.childSceneId) } : {}),
+          // what the artwork depicts for this spot (see wikidoSpotArt.js)
+          ...(typeof spot?.visual === "string" && spot.visual.trim() ? { visual: spot.visual.trim().slice(0, 140) } : {}),
           // cross-topic doorways keep the world they point at
           ...(typeof spot?.childTopicId === "string" && spot.childTopicId ? { childTopicId: slugify(spot.childTopicId) } : {}),
           // recorded voiceover references survive normalization too
@@ -243,41 +246,15 @@ export const WIKIDO_REALISM_DIRECTIVE =
   "no surreal distortion, no smudged painterly washes. " +
   "The composition stays clear and easy for a child to read, but every object remains recognizably real.";
 
-// The spot-awareness section of a scene-art prompt: the painter is told which
-// objects the scene's spots describe (so they are actually painted) and must
-// return, as JSON text next to the picture, the exact percentages where each
-// landed — those coordinates move the pins. Live-verified phrasing: the image
-// model reliably emits the JSON when told to output it FIRST and paint SECOND
-// (a "report after painting" ask comes back with the picture alone). Empty
-// when the scene has no spots.
-export function buildSpotArtDirection(spots = []) {
-  const list = (spots || []).filter((h) => h && String(h.label || "").trim());
-  if (!list.length) return "";
-  const items = list
-    .map((h) => {
-      const what = String(h.blurb || h.info?.title || "").trim();
-      const pin =
-        Number.isFinite(+h.x) && Number.isFinite(+h.y)
-          ? ` The spot's pin currently sits at about ${Math.round(+h.x)}%, ${Math.round(+h.y)}% (across, down) — paint it near that area when the composition allows.`
-          : "";
-      return `- "${h.label}" (id: ${h.id || "unknown"})${what ? ` — ${what}.` : "."}${pin}`;
-    })
-    .join("\n");
-  return (
-    "SPOTS ON THIS PICTURE — you will do TWO things in order. FIRST, output ONE line of JSON text and nothing else in it: " +
-    'the exact place you painted each spot, one entry per spot id listed below — ' +
-    '{"placements": [{"id": "<spot id>", "x": <percent across, 0-100, one decimal>, "y": <percent down, 0-100, one decimal>}]} ' +
-    "(x=0 is the left edge, x=100 the right edge, y=0 the top, y=100 the bottom). THEN paint the picture. " +
-    "Every spot below names a real object or area that MUST be clearly visible and recognizable in it — a spot that points at nothing is broken:\n" +
-    items
-  );
-}
+// The spot-awareness section of a scene-art prompt lives in wikidoSpotArt.js
+// (shared with the Studio preview): every spot is depicted where its pin sits.
+export { buildSpotArtDirection };
 
 // Single composer for every scene-art prompt: pack style, scene composition,
 // spot awareness, parent coherence, then the realism directive last so it
 // always wins.
-export function composeSceneArtPrompt({ artStyle = "", artPrompt = "", coherence = "", spots = [] } = {}) {
-  return [artStyle, artPrompt, buildSpotArtDirection(spots), coherence, WIKIDO_REALISM_DIRECTIVE]
+export function composeSceneArtPrompt({ artStyle = "", artPrompt = "", coherence = "", spots = [], scenes = {} } = {}) {
+  return [artStyle, artPrompt, buildSpotArtDirection(spots, { scenes }), coherence, WIKIDO_REALISM_DIRECTIVE]
     .map((part) => String(part || "").trim())
     .filter(Boolean)
     .join(" ");

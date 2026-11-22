@@ -107,7 +107,7 @@ for (const pack of packs) {
       console.log(`• ${scene.id}: no artPrompt — skipped (write one in the pack first)`);
       continue;
     }
-    const prompt = composeSceneArtPrompt({ artStyle: pack.artStyle || "", artPrompt: scene.artPrompt });
+    const prompt = composeSceneArtPrompt({ artStyle: pack.artStyle || "", artPrompt: scene.artPrompt, spots: scene.hotspots, scenes: pack.scenes });
     console.log(`• ${scene.id}`);
     if (dryRun) {
       console.log(`  [dry-run] ${prompt}\n`);

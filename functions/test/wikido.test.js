@@ -648,27 +648,21 @@ test("applySpotPlacements moves only the placed spots and never mutates the inpu
 });
 
 // ── spot-aware artwork generation ─────────────────────────────────────────────
-test("buildSpotArtDirection paints every spot and demands its coordinates back", () => {
-  // a scene without spots adds nothing to the art prompt
+test("buildSpotArtDirection depicts every spot at its position, with no JSON contract", () => {
   assert.equal(buildSpotArtDirection([]), "");
   assert.equal(buildSpotArtDirection(undefined), "");
-
   const direction = buildSpotArtDirection([
     { id: "moon", label: "The Moon", blurb: "Our closest neighbour", x: 21.4, y: 33 },
-    { id: "scope", label: "Telescope", info: { title: "The Telescope" }, x: 80, y: 70 },
+    { id: "scope", label: "Telescope", info: { title: "The Telescope", body: ["Lenses gather light."] }, x: 80, y: 70 },
   ]);
-  assert.ok(direction.includes("SPOTS ON THIS PICTURE"));
-  assert.ok(direction.includes('"The Moon"'));
-  assert.ok(direction.includes("id: moon"));
+  assert.ok(direction.includes("SUBJECTS AND WHERE THEY GO"));
+  assert.ok(direction.includes("The Moon"));
   assert.ok(direction.includes("Our closest neighbour"));
-  assert.ok(direction.includes('"Telescope"'));            // info.title used when no blurb
-  assert.ok(direction.includes("clearly visible"));
-  assert.ok(direction.includes("21%, 33%"));               // current pin as a soft hint
-  // the JSON contract the painter must answer with — JSON first, picture second
-  assert.ok(direction.includes("TWO things in order"));
-  assert.ok(direction.includes('"placements"'));
-  assert.ok(direction.includes('"x": <percent across, 0-100, one decimal>'));
-  assert.ok(direction.includes("one entry per spot id"));
+  assert.ok(direction.includes("Lenses gather light."));
+  assert.ok(direction.includes("left, mid-ground"));
+  assert.ok(direction.includes("right, foreground"));
+  assert.ok(direction.includes("Do not draw any text"));
+  assert.ok(!direction.includes('"placements"'));
 });
 
 test("composeSceneArtPrompt embeds the spot direction but keeps the realism directive last", () => {
@@ -681,8 +675,8 @@ test("composeSceneArtPrompt embeds the spot direction but keeps the realism dire
   });
   assert.ok(p.startsWith("Warm storybook style."));
   const at = (s) => p.indexOf(s);
-  assert.ok(at("A valley at golden hour.") < at("SPOTS ON THIS PICTURE"));
-  assert.ok(at("SPOTS ON THIS PICTURE") < at("EXACT same illustration style")); // coherence after spots
+  assert.ok(at("A valley at golden hour.") < at("SUBJECTS AND WHERE THEY GO"));
+  assert.ok(at("SUBJECTS AND WHERE THEY GO") < at("EXACT same illustration style")); // coherence after spots
   assert.ok(p.endsWith(WIKIDO_REALISM_DIRECTIVE));          // realism always last
   // no spots → exactly the old prompt
   assert.equal(
