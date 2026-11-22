@@ -2753,14 +2753,14 @@ function confirmDeleteScene(withDeeper) {
 /* the categorical engine picker: free Kokoro vs the paid platform voice */
 .vo-engine { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding: 0.35rem 0 0; }
 .vo-option {
-  display: flex; align-items: baseline; gap: 0.35rem;
+  display: flex; flex-wrap: wrap; align-items: baseline; max-width: 100%; box-sizing: border-box; gap: 0.35rem;
   border: 1.5px solid var(--border); border-radius: 10px; padding: 0.3rem 0.65rem;
   cursor: pointer; background: #fff;
 }
 .vo-option.picked { border-color: var(--primary); background: var(--primary-soft); }
 .vo-option input { accent-color: var(--primary); margin: 0; }
 .vo-name { font-size: 0.8rem; font-weight: 700; color: var(--text); white-space: nowrap; }
-.vo-meta { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+.vo-meta { font-size: 0.72rem; color: var(--muted); }
 .vo-engine .btn { margin-left: auto; }
 .vo-job {
   display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;

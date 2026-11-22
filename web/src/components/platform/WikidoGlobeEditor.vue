@@ -9,7 +9,8 @@ import {
   ZOOM_MAX, ZOOM_MIN, clampRotation, clampZoom, decimalsForZoom, dragRates, focusZoomForLevel, formatLatLng,
   formatSpan, projectSpot, screenToLatLng, spanKmAtZoom, zoomFactor,
 } from "@/lib/wikido/globe/projection";
-import { drawGlobe } from "@/lib/wikido/globe/render";
+import { DEEP_RADIUS, drawGlobe } from "@/lib/wikido/globe/render";
+import OsmAttribution from "@/components/wikido/OsmAttribution.vue";
 
 const props = defineProps({
   spots: { type: Array, default: () => [] }, // hub hotspots (lat/lng doorways)
@@ -102,11 +103,13 @@ const ghostsPlaced = computed(() => {
 });
 
 // ── drawing ───────────────────────────────────────────────────────────────────
+const tilesShown = ref(false);
 function draw() {
   const g = ctx;
   const { w, h } = size.value;
   if (!g || !w || !h) return;
   const { cx, cy, r } = geometry();
+  tilesShown.value = r > DEEP_RADIUS;
   const rings = placed.value
     .filter((p) => p.spot.level !== "country" && p.spot.level !== "continent")
     .map((p) => ({ x: p.x, y: p.y, radius: Math.min(11 * Math.sqrt(zoom.value), 28), opacity: 1 }));
@@ -320,6 +323,7 @@ onBeforeUnmount(() => {
 <template>
   <div ref="wrapEl" class="wd-e" :class="{ 'has-open': Boolean(selectedId) }">
     <canvas ref="canvasEl" class="wd-e-planet" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp" @wheel="onWheel" @click.capture="onClickCapture"></canvas>
+    <OsmAttribution :show="tilesShown" />
 
     <!-- every continent/country the system knows but this globe hasn't added:
          a faint dot already sitting at its real coordinates. Click to add it. -->

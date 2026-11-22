@@ -20,7 +20,8 @@ import {
   ZOOM_MAX, ZOOM_MIN, clampRotation, clampZoom, currentLevelAtZoom, dragRates,
   projectSpot, spotOpacityAtZoom, zoomFactor,
 } from "@/lib/wikido/globe/projection";
-import { drawGlobe } from "@/lib/wikido/globe/render";
+import { DEEP_RADIUS, drawGlobe } from "@/lib/wikido/globe/render";
+import OsmAttribution from "./OsmAttribution.vue";
 import { isSpotEnabled } from "../../../../functions/lib/wikidoGlobe.js";
 
 const props = defineProps({
@@ -160,6 +161,7 @@ function resize() {
 
 
 
+const tilesShown = ref(false);
 function draw() {
   const g = ctx;
   const { w, h } = size.value;
@@ -168,6 +170,7 @@ function draw() {
   const cx = w / 2;
   const cy = h / 2;
   const r = globeRadius();
+  tilesShown.value = r > DEEP_RADIUS;
   const rings = placed.value
     .filter((p) => p.spot.level !== "country" && p.spot.level !== "continent")
     .map((p) => ({ x: p.x, y: p.y, radius: Math.min(11 * Math.sqrt(zoom.value), 28), opacity: p.opacity }));
@@ -374,6 +377,7 @@ async function toggleFullscreen() {
         class="wd-planet"
         @wheel="onWheel"
       ></canvas>
+      <OsmAttribution :show="tilesShown" below />
 
       <!-- the place spots, glued to the spinning planet -->
       <div class="wd-spots">

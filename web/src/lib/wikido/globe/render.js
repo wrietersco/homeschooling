@@ -6,12 +6,13 @@
 import { latLngToVec3, projectVec, horizonBlend, screenToLatLng, DEG } from "./projection";
 import { LANDMASSES } from "./land";
 import {
-  TILE_ATTRIBUTION, TILE_PX, getTile, latToTileY, lngToTileX, tileLat, tileLng, tileZoomFor,
+  TILE_PX, getTile, latToTileY, lngToTileX, tileLat, tileLng, tileZoomFor,
 } from "./tiles";
 
 // Past this globe radius (px) canvas coordinates get too large to trust: the
 // planet disc, gradients and country polygons are then drawn clipped to the
 // viewport ("deep" mode), and street-level map tiles fade in over the land.
+// (the "© OpenStreetMap contributors" credit is an HTML link overlay — OsmAttribution.vue)
 export const DEEP_RADIUS = 6000;
 
 // Normalized blend of two unit vectors (exact enough for tiny segments).
@@ -251,13 +252,6 @@ function drawDeep(g, view, opts, dpr) {
   if (opts.tiles !== false) {
     const alpha = 1;
     drawTiles(g, { ...view, dpr }, alpha, opts.onTile);
-    g.font = "600 11px system-ui, sans-serif";
-    g.textBaseline = "top";
-    const tw = g.measureText(TILE_ATTRIBUTION).width;
-    g.fillStyle = "rgba(255,255,255,0.78)";
-    g.fillRect(6, 6, tw + 10, 17);
-    g.fillStyle = "#334";
-    g.fillText(TILE_ATTRIBUTION, 11, 9);
   }
 
   // pin marker rings keep a fixed, legible size at depth
