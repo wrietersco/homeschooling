@@ -52,7 +52,8 @@ export function preloadImage(src, timeout = 1500) {
   return new Promise((resolve) => {
     const img = new Image();
     img.decoding = "async";
-    const t = setTimeout(() => resolve(false), timeout);
+    img.crossOrigin = "anonymous"; // same CORS mode as the WebGL texture load, so it warms the same cache entry
+    const t =setTimeout(() => resolve(false), timeout);
     img.onload = () => { clearTimeout(t); loaded.set(src, true); resolve(true); };
     img.onerror = () => { clearTimeout(t); resolve(false); };
     img.src = src;

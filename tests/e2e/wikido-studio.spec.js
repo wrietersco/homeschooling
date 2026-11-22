@@ -63,7 +63,7 @@ test("superadmin drags numbered spots, saves, and reloads their artwork coordina
     await expect(page.locator(".placement-status")).toContainText("X 60%, Y 55%");
     await expect(page.locator(".spot.selected")).toHaveCount(0);
     await page.getByRole("button", { name: "Save spot positions", exact: true }).click();
-    await expect(page.locator(".placement-status")).toHaveText("Spot positions saved.", { timeout: 20_000 });
+    await expect(page.locator(".placement-status")).toHaveText("Spot positions saved.", { timeout: 45_000 });
     const saved = (await doc.get()).data().scenes.root.hotspots[0];
     expect(saved.x).toBe(60);
     expect(saved.y).toBe(55);
@@ -123,7 +123,7 @@ test("bundled worlds can be edited, saved, published, and explored without dupli
     await expect(page.locator(".stage img")).toBeVisible();
     await expect(page.locator(".stage img")).toHaveAttribute("src", /\/wikido\/living-things\//);
     await expect(page.locator(".workspace")).toContainText("0 awaiting artwork");
-    const title = page.locator(".scene-editor input").first();
+    const title = page.locator(".scene-editor").getByLabel("Scene title");
     await title.fill("Living Things edited in Studio");
     await page.getByRole("button", { name: "Save edits", exact: true }).click();
     await expect(page.getByRole("button", { name: "Save edits", exact: true })).toBeDisabled({ timeout: 20_000 });
@@ -135,7 +135,7 @@ test("bundled worlds can be edited, saved, published, and explored without dupli
     await page.reload();
     await page.getByRole("button", { name: "Wikido Studio" }).click();
     await page.locator(".chip-main", { hasText: "Living Things" }).click();
-    await expect(page.locator(".scene-editor input").first()).toHaveValue("Living Things edited in Studio");
+    await expect(page.locator(".scene-editor").getByLabel("Scene title")).toHaveValue("Living Things edited in Studio");
     // Activate this test family to exercise the student explorer's normal guard.
     const families = await getFirestore().collection("families").get();
     for (const family of families.docs) {

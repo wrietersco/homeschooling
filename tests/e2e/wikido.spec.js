@@ -215,13 +215,25 @@ test("child explores Living Things down to the Human Body", async ({ page }) => 
   await expect(page.locator(".wd-shelf-title")).toBeVisible();
 });
 
-test("discovery progress survives a reload", async ({ page }) => {
+test("discovery progress survives a reload (and the reload stays in the world, on the open card)", async ({ page }) => {
   await registerAndOnboard(page);
   await page.goto("/wikido");
   await page.locator(".wd-topic", { hasText: "Living Things" }).click();
   await page.getByRole("button", { name: /Signs of Life/ }).click();
   await expect(page.locator(".wd-info")).toBeVisible();
+  await expect(page).toHaveURL(/\/wikido\/living-things\?card=signs-of-life$/);
+
+  // a reload lands in the same place — the world, with the same card open …
   await page.reload();
+  await expect(page).toHaveURL(/\/wikido\/living-things\?card=signs-of-life$/);
+  await expect(page.locator(".wd-info")).toBeVisible();
+  // … and what was discovered is still counted
+  await expect(page.locator(".wd-progress")).toContainText("1/");
+  await expect(page.locator(".wd-hot.seen")).toHaveCount(1);
+
+  // leave the world and come back to it from the shelf: still remembered
+  await page.locator(".wd-home").click();
+  await expect(page).toHaveURL(/\/wikido$/);
   await page.locator(".wd-topic", { hasText: "Living Things" }).click();
   await expect(page.locator(".wd-progress")).toContainText("1/");
   await expect(page.locator(".wd-hot.seen")).toHaveCount(1);

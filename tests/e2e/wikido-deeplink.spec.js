@@ -59,6 +59,12 @@ test("every navigation updates the URL and Back/Forward walk the scene history",
   await expect(page.locator(".wd-info")).toBeVisible();
   await page.goForward();
   await expect(page.locator(".wd-crumb.current")).toHaveText("Kinds of Living Things");
+  // the doorway's card from the world above is gone with the step forward — wait
+  // for its slide-out to finish, or it can still sit over the spot about to be tapped
+  await expect(page.locator(".wd-info")).toHaveCount(0);
+  // and let the new picture finish loading: its spots are placed from the image's size,
+  // so a tap before then lands where the spot WAS, not where it ends up
+  await expect(page.locator(".wd-layer img.ready")).toBeVisible();
 
   // opening and closing a card are history steps too: Back closes the card
   await page.getByRole("button", { name: /Sorting All of Life/ }).click();
