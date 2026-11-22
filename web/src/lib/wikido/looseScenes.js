@@ -3,6 +3,7 @@
 // clutter a world and used to blank a whole globe. Pure helpers: find them, fix
 // them (attach under a picture, or delete) and explain them in plain language.
 import { normalizePackForLoad, validateTopicPack } from "./schema.js";
+import { sceneChildIds, isPerspectiveScene, isLensReady, perspectiveById } from "../../../../functions/lib/wikidoPerspectives.js";
 
 const opensLocal = (h) => Boolean(h?.childSceneId && !h.childTopicId);
 export const MAX_SPOTS_PER_SCENE = 8;
@@ -14,7 +15,7 @@ export function reachableSceneIds(scenes, rootId) {
     const id = stack.pop();
     if (seen.has(id) || !scenes?.[id]) continue;
     seen.add(id);
-    for (const h of scenes[id].hotspots || []) if (opensLocal(h)) stack.push(h.childSceneId);
+    for (const c of sceneChildIds(scenes[id])) stack.push(c); // doorways + perspective pictures
   }
   return seen;
 }
@@ -28,9 +29,7 @@ export function loosePlan(scenes, rootId) {
   const loose = new Set(ids);
   const opened = new Set();
   for (const id of ids) {
-    for (const h of scenes[id].hotspots || []) {
-      if (opensLocal(h) && loose.has(h.childSceneId) && h.childSceneId !== id) opened.add(h.childSceneId);
-    }
+    for (const c of sceneChildIds(scenes[id])) if (loose.has(c) && c !== id) opened.add(c);
   }
   const heads = ids.filter((id) => !opened.has(id));
   const taken = new Set();
@@ -43,7 +42,7 @@ export function loosePlan(scenes, rootId) {
       if (taken.has(id) || !loose.has(id)) continue;
       taken.add(id);
       out.push(id);
-      for (const h of scenes[id].hotspots || []) if (opensLocal(h)) stack.push(h.childSceneId);
+      for (const c of sceneChildIds(scenes[id])) stack.push(c);
     }
     return out;
   };
@@ -69,6 +68,10 @@ export function removeScenes(scenes, removeIds) {
         return rest;
       }),
     };
+    // a removed perspective picture leaves its base scene's lens list too
+    if (Array.isArray(s.perspectives) && s.perspectives.some((e) => doomed.has(e?.sceneId))) {
+      next[id].perspectives = s.perspectives.filter((e) => !doomed.has(e?.sceneId));
+    }
   }
   return next;
 }
@@ -134,6 +137,14 @@ export function publishChecks(pack) {
     notes.push({
       key: "loose",
       text: `${n} loose ${n === 1 ? "scene" : "scenes"} — no picture leads to ${n === 1 ? "it" : "them"}, so children can't see ${n === 1 ? "it" : "them"}. Attach or delete ${n === 1 ? "it" : "them"} in “Loose scenes”.`,
+    });
+  }
+  const unready = Object.values(pack.scenes).filter((s) => isPerspectiveScene(s) && !isLensReady(s));
+  if (unready.length) {
+    const names = unready.slice(0, 3).map((s) => `${pack.scenes[s.perspectiveOf]?.title || s.perspectiveOf} · ${perspectiveById(s.lens)?.name || s.lens}`);
+    notes.push({
+      key: "lenses",
+      text: `${unready.length} ${unready.length === 1 ? "perspective is" : "perspectives are"} not finished (${names.join(", ")}${unready.length > 3 ? "…" : ""}) — ${unready.length === 1 ? "it needs" : "they need"} a picture and spots before children see ${unready.length === 1 ? "it" : "them"}.`,
     });
   }
   if (pack.view === "globe") {

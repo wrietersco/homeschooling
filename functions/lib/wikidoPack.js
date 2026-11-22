@@ -3,6 +3,7 @@
 // These are PURE functions so they unit-test without network or Admin SDK.
 
 import { validateSceneHierarchy, isCrossTopicDoorway } from "./wikidoHierarchy.js";
+import { validatePerspectives } from "./wikidoPerspectives.js";
 import { isGlobeHub, validateSpotGeo, validateGlobeHubSpot } from "./wikidoGlobe.js";
 import { isValidSpotLevel, slugName } from "./wikidoGazetteer.js";
 import { buildSpotArtDirection } from "./wikidoSpotArt.js";
@@ -117,6 +118,7 @@ export function validateTopicPack(pack, { allowMissingArtwork = false } = {}) {
       }
     }
   }
+  errors.push(...validatePerspectives(scenes, pack.rootSceneId, { hubId: pack.view === "globe" ? pack.rootSceneId : null }));
   errors.push(...validateSceneHierarchy(scenes, pack.rootSceneId, pack.id));
   return errors;
 }
@@ -153,6 +155,16 @@ export function normalizeGeneratedPack(raw) {
       if (typeof scene?.artPrompt === "string") out.artPrompt = scene.artPrompt.trim();
       // recorded voiceovers (studio audio) must survive normalization
       if (typeof scene?.audio === "string" && scene.audio) out.audio = scene.audio;
+      // perspectives (see wikidoPerspectives.js): a base scene's lens list and a
+      // lens scene's back-link survive every save
+      if (Array.isArray(scene?.perspectives)) {
+        out.perspectives = scene.perspectives
+          .filter((e) => e && typeof e.id === "string" && typeof e.sceneId === "string")
+          .map((e) => ({ id: e.id, sceneId: slugify(e.sceneId) }));
+      }
+      if (typeof scene?.perspectiveOf === "string" && scene.perspectiveOf) out.perspectiveOf = slugify(scene.perspectiveOf);
+      if (typeof scene?.lens === "string" && scene.lens) out.lens = scene.lens;
+      if (typeof scene?.kind === "string" && scene.kind) out.kind = scene.kind;
 
       const hotspotsIn = Array.isArray(scene?.hotspots) ? scene.hotspots : [];
       const seenIds = new Set();

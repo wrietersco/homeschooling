@@ -1,3 +1,4 @@
+import { lensEntries } from "../../../../functions/lib/wikidoPerspectives.js";
 // Pure view-model helpers for the Wikido Studio. No Vue, no Firebase — so the
 // plain-language wording the studio shows (what a spot does, what deleting a
 // scene removes, which scenes need attention) is unit-tested.
@@ -82,6 +83,7 @@ export function descendantSceneIds(scenes, sceneId) {
     if (candidates.has(id) || !scenes?.[id]) return;
     candidates.add(id);
     for (const h of scenes[id].hotspots || []) if (opensLocalScene(h)) walk(h.childSceneId);
+    for (const e of lensEntries(scenes[id], scenes)) walk(e.sceneId); // perspectives belong to their scene
   };
   walk(sceneId);
   if (!candidates.has(sceneId)) return [];
@@ -125,7 +127,8 @@ export function deletePlan(scenes, sceneId) {
 // into fact spots — never left dangling (a dangling childSceneId fails
 // validation and would break the child's screen).
 export function deleteSceneFrom(scenes, sceneId, { withDeeper = false } = {}) {
-  const doomed = new Set(withDeeper ? descendantSceneIds(scenes, sceneId) : [sceneId]);
+  // a scene's perspective pictures always go with it — they mean nothing alone
+  const doomed = new Set(withDeeper ? descendantSceneIds(scenes, sceneId) : [sceneId, ...lensEntries(scenes?.[sceneId], scenes).map((e) => e.sceneId)]);
   const next = {};
   for (const [sid, s] of Object.entries(scenes || {})) {
     if (doomed.has(sid)) continue;
@@ -137,6 +140,9 @@ export function deleteSceneFrom(scenes, sceneId, { withDeeper = false } = {}) {
         return rest;
       }),
     };
+    if (Array.isArray(s.perspectives) && s.perspectives.some((e) => doomed.has(e?.sceneId))) {
+      next[sid].perspectives = s.perspectives.filter((e) => !doomed.has(e?.sceneId));
+    }
   }
   if (!withDeeper) {
     const parentId = deletePlan(scenes, sceneId).openedBy[0]?.sceneId;
@@ -167,6 +173,7 @@ export function topicHealth(scenes, rootSceneId, worlds = null, globeRootId = nu
     if (reachable.has(id) || !scenes?.[id]) return;
     reachable.add(id);
     for (const h of scenes[id].hotspots || []) if (opensLocalScene(h)) walk(h.childSceneId);
+    for (const e of lensEntries(scenes[id], scenes)) walk(e.sceneId);
   };
   walk(rootSceneId);
 

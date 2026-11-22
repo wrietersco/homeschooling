@@ -1,3 +1,5 @@
+import { sceneChildIds, isPerspectiveScene } from "./wikidoPerspectives.js";
+
 // ── Cross-topic doorways ──────────────────────────────────────────────────────
 // A hotspot normally opens a scene in its OWN pack (childSceneId alone). When it
 // also names childTopicId — a DIFFERENT pack — it becomes a cross-topic doorway:
@@ -80,9 +82,8 @@ export function validateSceneHierarchy(scenes, rootSceneId, packId = null) {
     if (visited.has(id) || !scenes[id]) return;
     visited.add(id);
     active.add(id);
-    for (const spot of Array.isArray(scenes[id]?.hotspots) ? scenes[id].hotspots : []) {
-      if (local(spot)) walk(spot.childSceneId);
-    }
+    // doorways AND perspective pictures (a lens is reached from its base scene)
+    for (const childId of sceneChildIds(scenes[id], packId)) walk(childId);
     active.delete(id);
   }
   walk(rootSceneId);
@@ -106,6 +107,7 @@ export function validateDeclaredHierarchy(pack, hierarchy) {
     const id = node.sceneId;
     if (!pack.scenes?.[id]) { errors.push(`hierarchy references missing scene "${id}"`); return; }
     if (seen.has(id)) { errors.push(`hierarchy repeats scene "${id}"`); return; }
+    for (const e of pack.scenes[id].perspectives || []) if (e?.sceneId) seen.add(e.sceneId); // lenses ride with their scene
     seen.add(id);
     if (parentId === null && id !== pack.rootSceneId) errors.push("hierarchy root must match rootSceneId");
     if (parentId !== null) {
@@ -121,6 +123,6 @@ export function validateDeclaredHierarchy(pack, hierarchy) {
     for (const child of node.children) walk(child, id);
   }
   walk(hierarchy);
-  for (const id of Object.keys(pack.scenes || {})) if (!seen.has(id)) errors.push(`hierarchy omits scene "${id}"`);
+  for (const id of Object.keys(pack.scenes || {})) if (!seen.has(id) && !isPerspectiveScene(pack.scenes[id])) errors.push(`hierarchy omits scene "${id}"`);
   return errors;
 }

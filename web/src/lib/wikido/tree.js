@@ -10,6 +10,8 @@
 // childSceneId belongs to another pack's namespace, so they are not edges of
 // this pack's tree and every walk here skips them.
 
+import { lensEntries } from "../../../../functions/lib/wikidoPerspectives.js";
+
 function opensLocal(spot) {
   return Boolean(spot?.childSceneId && !spot.childTopicId);
 }
@@ -26,6 +28,16 @@ export function buildSceneTree(scenes, rootId) {
       out.push({ id, depth, parentId });
       for (const h of scenes[id].hotspots || []) {
         if (opensLocal(h)) walk(h.childSceneId, depth + 1, id);
+      }
+      // perspective pictures are not rows of their own (the studio shows them
+      // on their scene's perspective strip); scenes THEY open hang under the
+      // base scene, after its own doorways
+      for (const e of lensEntries(scenes[id], scenes)) {
+        if (seen.has(e.sceneId)) continue;
+        seen.add(e.sceneId);
+        for (const h of scenes[e.sceneId].hotspots || []) {
+          if (opensLocal(h)) walk(h.childSceneId, depth + 1, id);
+        }
       }
   }
   walk(rootId, 0, null);
@@ -100,6 +112,7 @@ export function subtreeSceneIds(scenes, sceneId) {
     if (out.has(id) || !scenes?.[id]) return;
     out.add(id);
     for (const h of scenes[id].hotspots || []) if (h.childSceneId && !h.childTopicId) walk(h.childSceneId);
+    for (const e of lensEntries(scenes[id], scenes)) walk(e.sceneId); // a scene moves with its perspectives
   };
   walk(sceneId);
   return [...out];

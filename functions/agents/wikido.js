@@ -51,6 +51,7 @@ import {
   normalizePlaceResolution,
   buildGlobeHubSpot,
 } from "../lib/wikidoPack.js";
+import { dropUnreadyLenses } from "../lib/wikidoPerspectives.js";
 import { needsVisualSuggestion, buildVisualSuggestionPrompt, normalizeVisualSuggestions } from "../lib/wikidoSpotArt.js";
 import { resolvePlaceQuery, countryById, slugName } from "../lib/wikidoGazetteer.js";
 import { isGlobePack, isGlobeHub } from "../lib/wikidoGlobe.js";
@@ -889,7 +890,9 @@ export const setWikidoTopicStatus = onCall(async (request) => {
     nextDoc.tagline = normalized.tagline || nextDoc.tagline;
     nextDoc.emoji = normalized.emoji || nextDoc.emoji;
     nextDoc.artStyle = normalized.artStyle || nextDoc.artStyle;
-    const strictErrors = validateTopicPack(nextDoc);
+    // a perspective still being made (no picture / no spots yet) never blocks
+    // publishing — children simply don't see that lens until it is ready
+    const strictErrors = validateTopicPack(dropUnreadyLenses(nextDoc));
     if (strictErrors.length) {
       throw new HttpsError("failed-precondition", `Cannot publish yet: ${strictErrors.slice(0, 5).join(" · ")}`);
     }

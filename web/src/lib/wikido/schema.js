@@ -10,6 +10,7 @@ import {
   validateCrossTopicDoorways, validatePackCrossTopicDoorways,
 } from "../../../../functions/lib/wikidoHierarchy.js";
 import { isGlobeHub, validateSpotGeo, validateGlobeHubSpot } from "../../../../functions/lib/wikidoGlobe.js";
+import { sceneChildIds, validatePerspectives, dropUnreadyLenses } from "../../../../functions/lib/wikidoPerspectives.js";
 
 export { validateCrossTopicDoorways, validatePackCrossTopicDoorways };
 
@@ -65,8 +66,11 @@ export function normalizePackForLoad(pack) {
 // leftovers of an abandoned pin, a deleted doorway) must never stop the WHOLE
 // globe from loading — before this, one such scene made validation fail and the
 // child silently got the empty bundled shell: no pins at all.
-export function pruneSwitchedOffPlaces(pack) {
-  if (!pack || !pack.scenes || !pack.rootSceneId) return pack;
+export function pruneSwitchedOffPlaces(input) {
+  if (!input || !input.scenes || !input.rootSceneId) return input;
+  // a perspective still being made (no picture / no spots) is not offered to
+  // children; its scene and whatever only it leads to go with it
+  const pack = dropUnreadyLenses(input);
   const hub = pack.scenes[pack.rootSceneId];
   if (!hub) return pack;
   // switched-off places only exist on a globe's hub; every world drops loose scenes
@@ -76,14 +80,15 @@ export function pruneSwitchedOffPlaces(pack) {
   const queue = [pack.rootSceneId];
   while (queue.length) {
     const scene = scenes[queue.pop()];
-    for (const h of scene?.hotspots || []) {
-      if (h?.childSceneId && scenes[h.childSceneId] && !reachable.has(h.childSceneId)) {
-        reachable.add(h.childSceneId);
-        queue.push(h.childSceneId);
+    // doorways and perspective pictures alike
+    for (const childId of sceneChildIds(scene, pack.id)) {
+      if (scenes[childId] && !reachable.has(childId)) {
+        reachable.add(childId);
+        queue.push(childId);
       }
     }
   }
-  let dropped = keep.length !== (hub.hotspots || []).length;
+  let dropped = pack !== input || keep.length !== (hub.hotspots || []).length;
   for (const id of Object.keys(scenes)) if (!reachable.has(id)) { delete scenes[id]; dropped = true; }
   return dropped ? { ...pack, scenes } : pack;
 }
@@ -200,6 +205,7 @@ export function validateTopicPack(pack) {
       }
     }
   }
+  errors.push(...validatePerspectives(scenes, pack.rootSceneId, { hubId: pack.view === "globe" ? pack.rootSceneId : null }));
   errors.push(...validateSceneHierarchy(scenes, pack.rootSceneId, pack.id));
   return errors;
 }
