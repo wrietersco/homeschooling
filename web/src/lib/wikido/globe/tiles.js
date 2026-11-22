@@ -47,7 +47,7 @@ export function tileUrl(z, x, y) {
 // the viewer has already moved away from. Requests wait in a queue; only tiles
 // still wanted (asked for within the last STALE_MS) are actually downloaded.
 const MAX_INFLIGHT = 4;
-const STALE_MS = 2500;
+const STALE_MS = 700;
 const queue = []; // entries waiting to start
 let inflight = 0;
 
