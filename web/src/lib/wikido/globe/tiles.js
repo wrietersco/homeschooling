@@ -43,26 +43,60 @@ export function tileUrl(z, x, y) {
   return TILE_URL.replace("{z}", z).replace("{x}", x).replace("{y}", y);
 }
 
-// The loaded tile image, or null (and a load is started; onLoad fires when it lands).
+// OSM tile usage policy: keep concurrent downloads small and never fetch tiles
+// the viewer has already moved away from. Requests wait in a queue; only tiles
+// still wanted (asked for within the last STALE_MS) are actually downloaded.
+const MAX_INFLIGHT = 4;
+const STALE_MS = 2500;
+const queue = []; // entries waiting to start
+let inflight = 0;
+
+function pump() {
+  const now = Date.now();
+  while (inflight < MAX_INFLIGHT && queue.length) {
+    const entry = queue.pop(); // newest request first: what the view needs now
+    if (now - entry.wanted > STALE_MS) {
+      entry.cancelled = true; // drop; it will be re-queued if it is needed again
+      entry.queued = false;
+      cache.delete(entry.key);
+      entry.onLoad?.(); // repaint: if the view still needs it, it is re-queued fresh
+      continue;
+    }
+    entry.queued = false;
+    inflight += 1;
+    const done = () => {
+      inflight -= 1;
+      pump();
+    };
+    const img = entry.img;
+    img.onload = () => {
+      entry.ok = true;
+      entry.onLoad?.();
+      done();
+    };
+    img.onerror = () => {
+      entry.failed = true; // stays cached: an offline map must not re-request every frame
+      done();
+    };
+    img.decoding = "async";
+    img.src = entry.url;
+  }
+}
+
+// The loaded tile image, or null (and a load is queued; onLoad fires when it lands).
 export function getTile(z, x, y, onLoad) {
   if (typeof Image === "undefined") return null;
   const key = `${z}/${x}/${y}`;
   let entry = cache.get(key);
   if (!entry) {
-    const img = new Image();
-    entry = { img, ok: false };
-    img.onload = () => {
-      entry.ok = true;
-      onLoad?.();
-    };
-    img.onerror = () => {
-      entry.failed = true; // stays cached: an offline map must not re-request every frame
-    };
-    img.decoding = "async";
-    img.src = tileUrl(z, x, y);
+    entry = { key, img: new Image(), ok: false, queued: true, wanted: Date.now(), onLoad, url: tileUrl(z, x, y) };
     cache.set(key, entry);
+    queue.push(entry);
     if (cache.size > MAX_CACHED) cache.delete(cache.keys().next().value);
+    pump();
   } else {
+    entry.wanted = Date.now();
+    if (onLoad) entry.onLoad = onLoad;
     // refresh recency
     cache.delete(key);
     cache.set(key, entry);

@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { latToTileY, lngToTileX, tileLat, tileLng, tileZoomFor } from "./tiles";
+import { describe, it, expect, vi } from "vitest";
+import { latToTileY, lngToTileX, tileLat, tileLng, tileZoomFor, getTile } from "./tiles";
 
 describe("map tiles", () => {
   it("round-trips lat/lng through tile coordinates", () => {
@@ -12,5 +12,12 @@ describe("map tiles", () => {
   it("chooses finer tiles as pixels-per-degree grows", () => {
     expect(tileZoomFor(10)).toBeLessThan(tileZoomFor(1e5));
     expect(tileZoomFor(1e12)).toBe(19);
+  });
+  it("never downloads more than a handful of tiles at once (OSM policy)", () => {
+    const started = [];
+    vi.stubGlobal("Image", class { set src(v) { started.push(v); } });
+    for (let x = 0; x < 20; x += 1) getTile(18, x, 5);
+    expect(started.length).toBeLessThanOrEqual(4);
+    vi.unstubAllGlobals();
   });
 });
