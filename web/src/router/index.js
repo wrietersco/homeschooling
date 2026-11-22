@@ -129,7 +129,7 @@ const routes = [
     path: "/platform/:section?/:topicId?/:sceneId?",
     name: "platform",
     component: () => import("@/views/PlatformView.vue"),
-    meta: { requiresAuth: true, role: "superadmin" },
+    meta: { requiresAuth: true, role: "superadmin", wide: true },
   },
   // Family invite acceptance — public so uninvited users see a sign-in prompt.
   {
