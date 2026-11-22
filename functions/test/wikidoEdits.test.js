@@ -53,3 +53,16 @@ test("deleted scene links become facts, while a cloud override resolves once", (
   assert.deepEqual(pack.scenes["types-of-animals"].hotspots[0].info, spot.info);
   assert.equal(pack.scenes["human-beings"].hotspots.find(h => h.id === "door-to-ancient-worlds").childTopicId, "ancient-worlds");
 });
+
+test("perspective pictures are not 'disconnected': a save keeps them and what they open", async () => {
+  const { repairWikidoEdits } = await import("../lib/wikidoEdits.js");
+  const sc = (id, extra = {}) => ({ id, title: id, hotspots: [], ...extra });
+  const pack = { id: "w", rootSceneId: "asia", scenes: {
+    asia: sc("asia", { perspectives: [{ id: "history", sceneId: "asia-history" }, { id: "food", sceneId: "gone" }] }),
+    "asia-history": sc("asia-history", { perspectiveOf: "asia", lens: "history", hotspots: [{ id: "s", label: "S", childSceneId: "fort" }] }),
+    fort: sc("fort"), stray: sc("stray"),
+  } };
+  const out = repairWikidoEdits(pack);
+  assert.deepEqual(Object.keys(out.pack.scenes).sort(), ["asia", "asia-history", "fort"]);
+  assert.deepEqual(out.pack.scenes.asia.perspectives, [{ id: "history", sceneId: "asia-history" }]);
+});

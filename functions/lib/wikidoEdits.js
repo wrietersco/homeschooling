@@ -1,3 +1,5 @@
+import { sceneChildIds } from "./wikidoPerspectives.js";
+
 // Repair editor leftovers before saving, without inventing a parent relationship.
 export function repairWikidoEdits(input, worlds = []) {
   const pack = structuredClone(input);
@@ -22,15 +24,23 @@ export function repairWikidoEdits(input, worlds = []) {
   function walk(id) {
     if (reachable.has(id) || !pack.scenes[id]) return;
     reachable.add(id);
-    for (const spot of pack.scenes[id].hotspots || []) {
-      if (spot.childSceneId && !spot.childTopicId) walk(spot.childSceneId);
-    }
+    // doorways AND perspective pictures: a lens is reached from its base scene
+    for (const childId of sceneChildIds(pack.scenes[id], pack.id)) walk(childId);
   }
   walk(pack.rootSceneId);
   for (const id of Object.keys(pack.scenes)) {
     if (!reachable.has(id)) {
       repairs.push(`Removed disconnected scene “${pack.scenes[id].title || id}”.`);
       delete pack.scenes[id];
+    }
+  }
+  // a perspective list never points at a scene that is gone
+  for (const scene of Object.values(pack.scenes)) {
+    if (!Array.isArray(scene.perspectives)) continue;
+    const keep = scene.perspectives.filter((e) => pack.scenes[e?.sceneId]);
+    if (keep.length !== scene.perspectives.length) {
+      scene.perspectives = keep;
+      repairs.push(`Removed a perspective whose picture was deleted from “${scene.title}”.`);
     }
   }
   return { pack, repairs };
