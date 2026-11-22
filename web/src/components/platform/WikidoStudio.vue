@@ -7,7 +7,7 @@
 // with the platform image model into Storage; spoken audio falls back to the
 // runtime TTS chain (the developer's Kokoro script can attach recordings later,
 // exactly as for hand-authored packs).
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   generateWikidoTopic, addWikidoChildScene, suggestWikidoScenes, planWikidoOutline, generateWikidoSceneImage, generateWikidoImages,
   adjustWikidoSpots, adjustWikidoAllSpots,
@@ -19,6 +19,7 @@ import {
   startVoiceoverBridge, bridgeLauncherStatus,
   reorderWikidoTopics, sortStudioTopics,
 } from "@/services/wikidoAdmin";
+import { STATUS_FILTERS, ancestorIds, childCounts, keyAction, loadCollapsed, parentIds, saveCollapsed, visibleRows } from "@/lib/wikido/treeView";
 import { buildSceneTree, moveSceneSibling, subtreeSceneIds, canMoveScene, moveSceneTo, moveSceneByDrop, resolveDrop, findParentSceneId } from "@/lib/wikido/tree";
 import { wikidoTopicPacks } from "@/lib/wikido";
 import { useCoverPlacement } from "@/composables/useCoverPlacement";
@@ -842,6 +843,118 @@ const orderedScenes = computed(() => (form.value?.scenes ? buildSceneTree(form.v
 function selectScene(id) {
   selectedSceneId.value = id;
   layerParentId.value = id;
+}
+
+// ── map of scenes: collapse, search, filters, keyboard ────────────────────────
+const collapsed = ref(new Set());   // scene ids whose children are hidden (remembered per world)
+const treeQuery = ref("");
+const treeStatuses = ref(new Set()); // status filter chips (empty = show all)
+const treeCounts = computed(() => childCounts(orderedScenes.value));
+const treeView = computed(() =>
+  form.value
+    ? visibleRows({
+        rows: orderedScenes.value,
+        collapsed: collapsed.value,
+        query: treeQuery.value,
+        statuses: treeStatuses.value,
+        scenes: form.value.scenes,
+        statusOf: (id) => sceneStatusOf(id).key,
+      })
+    : { rows: [], matchIds: null, matchCount: 0, filtering: false }
+);
+const treeStatusCounts = computed(() => {
+  const out = {};
+  for (const r of orderedScenes.value) {
+    const k = sceneStatusOf(r.id).key === "broken-link" ? "needs-spots" : sceneStatusOf(r.id).key;
+    out[k] = (out[k] || 0) + 1;
+  }
+  return out;
+});
+
+function setCollapsed(next) {
+  collapsed.value = next;
+  saveCollapsed(selectedId.value, next);
+}
+function toggleCollapse(id) {
+  const next = new Set(collapsed.value);
+  if (!next.delete(id)) next.add(id);
+  setCollapsed(next);
+}
+function expandAll() { setCollapsed(new Set()); }
+function collapseAll() {
+  // keep the entrance open so the first level always shows
+  setCollapsed(new Set(parentIds(orderedScenes.value).filter((id) => id !== form.value?.rootSceneId)));
+}
+function toggleTreeStatus(key) {
+  const next = new Set(treeStatuses.value);
+  if (!next.delete(key)) next.add(key);
+  treeStatuses.value = next;
+}
+function clearTreeFilters() {
+  treeQuery.value = "";
+  treeStatuses.value = new Set();
+}
+// split a title around the search text so matches can be highlighted
+function titleParts(title) {
+  const q = treeQuery.value.trim();
+  const text = String(title || "");
+  if (!q) return [{ t: text, hit: false }];
+  const out = [];
+  const lower = text.toLowerCase();
+  const needle = q.toLowerCase();
+  let i = 0;
+  while (i < text.length) {
+    const at = lower.indexOf(needle, i);
+    if (at < 0) { out.push({ t: text.slice(i), hit: false }); break; }
+    if (at > i) out.push({ t: text.slice(i, at), hit: false });
+    out.push({ t: text.slice(at, at + needle.length), hit: true });
+    i = at + needle.length;
+  }
+  return out;
+}
+// open every ancestor of a scene so it is visible in the map
+function revealScene(id) {
+  const hidden = ancestorIds(orderedScenes.value, id).filter((a) => collapsed.value.has(a));
+  if (!hidden.length) return;
+  const next = new Set(collapsed.value);
+  hidden.forEach((a) => next.delete(a));
+  setCollapsed(next);
+}
+function scrollSceneIntoView(id = selectedSceneId.value) {
+  nextTick(() => document.querySelector(`[data-scene-row="${CSS.escape(id)}"]`)?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }));
+}
+function jumpToSelected() {
+  clearTreeFilters();
+  revealScene(selectedSceneId.value);
+  scrollSceneIntoView();
+}
+watch(selectedSceneId, (id) => {
+  if (!id || !form.value) return;
+  revealScene(id);
+  scrollSceneIntoView(id);
+});
+// each world remembers its own collapsed scenes
+watch(selectedId, (id) => {
+  collapsed.value = id ? loadCollapsed(id) : new Set();
+  clearTreeFilters();
+}, { immediate: true });
+
+function onTreeKey(e) {
+  if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target?.tagName || "")) return;
+  const id = e.target?.closest?.("[data-scene-row]")?.dataset.sceneRow || selectedSceneId.value;
+  const act = keyAction({
+    key: e.key, id, visible: treeView.value.rows, collapsed: collapsed.value,
+    hasChildren: (treeCounts.value.direct.get(id) || 0) > 0 && !treeView.value.filtering,
+  });
+  if (!act) return;
+  e.preventDefault();
+  if (act.collapse || act.expand) {
+    toggleCollapse(act.collapse || act.expand);
+  } else if (act.select) {
+    selectScene(act.select);
+    nextTick(() => document.querySelector(`[data-scene-row="${CSS.escape(act.select)}"] .scene-main`)?.focus());
+  }
 }
 
 // ── tree power features ───────────────────────────────────────────────────────
@@ -1981,15 +2094,45 @@ function confirmDeleteScene(withDeeper) {
 
       <div class="ws-grid">
         <!-- map of scenes -->
-        <nav class="scene-tree" aria-label="Map of scenes">
+        <nav class="scene-tree" aria-label="Map of scenes" @keydown="onTreeKey">
           <h3 class="pane-title">Map of scenes</h3>
           <p class="tree-hint">Hold ⠿ and drag a scene anywhere: drop between rows to reorder, or onto a scene to make it the parent — everything under the dragged scene moves along.</p>
+
+          <div class="tree-tools">
+            <div class="tree-tools-row">
+              <button type="button" class="mini" title="Open every scene's branch" @click="expandAll">Expand all</button>
+              <button type="button" class="mini" title="Fold every branch away, leaving the first level" @click="collapseAll">Collapse all</button>
+              <button type="button" class="mini" title="Scroll to the scene you are editing" @click="jumpToSelected">Jump to selected</button>
+            </div>
+            <div class="tree-search">
+              <input v-model="treeQuery" type="search" placeholder="Search scenes…" aria-label="Search scenes" @keydown.esc.stop="treeQuery = ''" />
+              <button v-if="treeQuery" type="button" class="tree-act" aria-label="Clear search" title="Clear search" @click="treeQuery = ''">✕</button>
+            </div>
+            <div class="tree-chips" role="group" aria-label="Filter by status">
+              <button
+                v-for="f in STATUS_FILTERS"
+                :key="f.key"
+                type="button"
+                class="tree-chip"
+                :class="{ on: treeStatuses.has(f.key) }"
+                :aria-pressed="treeStatuses.has(f.key)"
+                @click="toggleTreeStatus(f.key)"
+              ><span class="status-dot" :class="f.dot"></span>{{ f.label }} <small>{{ treeStatusCounts[f.key] || 0 }}</small></button>
+            </div>
+            <p v-if="treeView.filtering" class="tree-count" role="status">
+              {{ treeView.matchCount }} of {{ orderedScenes.length }} {{ treeView.matchCount === 1 ? "scene matches" : "scenes match" }}
+              <button type="button" class="link-btn" @click="clearTreeFilters">Clear ✕</button>
+            </p>
+          </div>
+          <p v-if="treeView.filtering && !treeView.matchCount" class="muted">No scene matches. Try fewer letters, or clear the filters.</p>
+
           <div
-            v-for="{ id, depth, parentId } in orderedScenes"
+            v-for="{ id, depth, parentId } in treeView.rows"
             :key="id"
             class="scene-row"
+            :data-scene-row="id"
             :class="[
-              { active: id === selectedSceneId, nested: depth > 0, dragging: dragSceneId === id },
+              { active: id === selectedSceneId, nested: depth > 0, dragging: dragSceneId === id, context: treeView.matchIds && !treeView.matchIds.has(id), hit: treeView.matchIds && treeView.matchIds.has(id) },
               dropHint && dropHint.rowId === id ? `drop-${dropHint.mode}` : '',
             ]"
             :style="{ marginLeft: `${depth * 0.9}rem` }"
@@ -2010,11 +2153,19 @@ function confirmDeleteScene(withDeeper) {
                 <img v-if="hasArt(form.scenes[id])" :src="form.scenes[id].image.src" alt="" />
                 <span v-else class="thumb-empty">🖼</span>
               </span>
-              <span class="scene-name">{{ form.scenes[id].title }}</span>
+              <span class="scene-name"><template v-for="(part, pi) in titleParts(form.scenes[id].title)" :key="pi"><mark v-if="part.hit">{{ part.t }}</mark><template v-else>{{ part.t }}</template></template></span>
               <span class="status-dot" :class="sceneStatusOf(id).key" :title="sceneStatusOf(id).label" :aria-label="sceneStatusOf(id).label"></span>
             </button>
             <small class="muted scene-parent">{{ parentId ? `Under ${form.scenes[parentId].title}` : id === form.rootSceneId ? 'Topic entrance' : 'Unlinked scene — choose a parent' }}</small>
             <span class="scene-sub">
+              <button
+                v-if="!treeView.filtering && treeCounts.direct.get(id) > 0"
+                type="button"
+                class="twisty"
+                :aria-expanded="!collapsed.has(id)"
+                :aria-label="collapsed.has(id) ? `Show the ${treeCounts.total.get(id)} scenes inside ${form.scenes[id].title}` : `Hide the scenes inside ${form.scenes[id].title}`"
+                @click.stop="toggleCollapse(id)"
+              >{{ collapsed.has(id) ? "▸" : "▾" }} {{ collapsed.has(id) ? `${treeCounts.total.get(id)} hidden` : `${treeCounts.direct.get(id)} inside` }}</button>
               {{ form.scenes[id].hotspots.length }} {{ form.scenes[id].hotspots.length === 1 ? "spot" : "spots" }}
               <template v-if="id === form.rootSceneId"> · entrance</template>
             </span>
@@ -2612,6 +2763,23 @@ function confirmDeleteScene(withDeeper) {
 .scene-row.drop-before { box-shadow: inset 0 3px 0 var(--primary); }
 .scene-row.drop-after { box-shadow: inset 0 -3px 0 var(--primary); }
 .scene-sub { font-size: 0.72rem; color: var(--muted); padding-left: 0.1rem; }
+.tree-tools { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.2rem; }
+.tree-tools-row { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.tree-search { display: flex; align-items: center; gap: 0.2rem; }
+.tree-search input { flex: 1; min-width: 0; padding: 0.4rem 0.6rem; border: 1.5px solid var(--border); border-radius: 10px; font-family: inherit; font-size: 0.85rem; }
+.tree-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.tree-chip { display: inline-flex; align-items: center; gap: 0.3rem; border: 1.5px solid var(--border); background: #fff; border-radius: 999px; padding: 0.15rem 0.55rem; font-size: 0.72rem; font-weight: 700; cursor: pointer; font-family: inherit; color: var(--text2); }
+.tree-chip small { color: var(--muted); font-weight: 700; }
+.tree-chip:hover { border-color: var(--primary); }
+.tree-chip.on { border-color: var(--primary); background: var(--primary-soft); color: var(--primary); }
+.tree-count { margin: 0; font-size: 0.78rem; font-weight: 700; color: var(--text2); display: flex; gap: 0.5rem; align-items: center; }
+.scene-row.context { opacity: 0.6; }
+.scene-row.hit:not(.active) { border-color: #F59E0B; }
+.scene-name mark { background: #FDE68A; color: inherit; border-radius: 3px; padding: 0 1px; }
+.scene-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+.twisty { border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 0 0.5rem; font-size: 0.72rem; font-weight: 800; cursor: pointer; font-family: inherit; color: var(--primary); }
+.twisty:hover { background: var(--primary-soft); }
+
 .scene-parent { font-size: 0.72rem; padding-left: 0.1rem; }
 .scene-actions { display: flex; flex-wrap: wrap; gap: 0.3rem; padding-top: 0.25rem; }
 .mini { border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 0.2rem 0.5rem; font-size: 0.72rem; font-weight: 700; cursor: pointer; font-family: inherit; color: var(--text2); }
