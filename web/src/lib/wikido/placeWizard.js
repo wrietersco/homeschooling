@@ -119,6 +119,7 @@ export { placeCatalog };
 export function friendlyError(e, fallback = "Something went wrong. Please try again.") {
   const raw = String(e?.message || e || "").replace(/^(internal|invalid-argument|failed-precondition|not-found|permission-denied|unauthenticated): /, "").trim();
   if (!raw) return fallback;
+  if (/image\.src is required|artwork/i.test(raw) && /publish/i.test(raw)) return "Families can only see a world once every scene has artwork. Paint the missing artwork (use “Paint its artwork” on each place, or “Generate artwork” on the page), then publish.";
   if (/already pinned/i.test(raw)) return "That place is already on your globe — pick it from the list instead of adding it again.";
   if (/GEMINI_API_KEY|API key/i.test(raw)) return "The writing assistant is not set up yet (its key is missing). Ask the platform owner to add it, or choose “Add without a scene for now”.";
   if (/could not be pinned/i.test(raw)) return `${raw} Try the full name, or check the country you chose.`;

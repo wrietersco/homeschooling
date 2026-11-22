@@ -30,7 +30,8 @@ const props = defineProps({
   saveNow: { type: Function, required: true },      // () → Promise<boolean>
   paintArt: { type: Function, required: true },     // (sceneId) → Promise<string|null error>
   recordVoice: { type: Function, required: true },  // (spotId) → Promise<string|null error>
-  publish: { type: Function, required: true },      // () → Promise
+  publish: { type: Function, required: true },      // () → Promise<string|null error>
+  discardSpot: { type: Function, default: () => {} }, // (spotId) — drop a pin this wizard added but never used
   isDirty: { type: Boolean, default: false },
 });
 const emit = defineEmits(["close"]);
@@ -42,6 +43,7 @@ const search = ref("");        // search box on the "which one" step
 const typedName = ref("");     // city / landmark name
 const chosen = ref(null);      // { name, lat?, lng?, level, spotId?, countryId?, catalogSpotId? }
 const spotId = ref("");        // the hub spot this place is (once it exists)
+const createdSpotId = ref(""); // a scene-less pin THIS wizard run added (so changing your mind can remove it)
 const stepIdx = ref(0);
 const phase = ref("steps");    // steps | done
 const located = ref(true);     // do we know where it is yet? (flips true once its scene is written)
@@ -83,7 +85,9 @@ onMounted(async () => {
       kind.value = row.place.level;
       chosen.value = { ...row.place, catalogSpotId: row.place.spotId };
       located.value = true;
+      const existed = Boolean(hub.value?.hotspots?.some((h) => h.id === row.place.spotId));
       spotId.value = await props.ensureSpot(placeFromChoice());
+      if (!existed) createdSpotId.value = spotId.value;
       stepIdx.value = steps.value.indexOf("spot");
     }
   }
@@ -139,7 +143,8 @@ function placeFromChoice() {
     lat: c.lat,
     lng: c.lng,
     level: c.level,
-    ...(c.level === "country" && c.countryId ? { countryId: c.countryId } : {}),
+    // cities and landmarks live inside a country: keep that link on the pin
+    ...((c.countryId || (!isCatalogKind.value && countryId.value)) ? { countryId: c.countryId || countryId.value } : {}),
   };
 }
 
@@ -158,7 +163,17 @@ async function leavePick() {
   }
   located.value = Number.isFinite(+chosen.value.lat) && Number.isFinite(+chosen.value.lng);
   plan.value = located.value;
-  if (located.value) spotId.value = await props.ensureSpot(placeFromChoice());
+  if (located.value) {
+    const want = placeFromChoice().spotId;
+    // changed their mind after going back: drop the unused pin from the first pick
+    if (createdSpotId.value && createdSpotId.value !== want) {
+      props.discardSpot(createdSpotId.value);
+      createdSpotId.value = "";
+    }
+    const existed = Boolean(hub.value?.hotspots?.some((h) => h.id === want));
+    spotId.value = await props.ensureSpot(placeFromChoice());
+    if (!existed) createdSpotId.value = spotId.value;
+  }
   return true;
 }
 
@@ -223,7 +238,7 @@ async function skipScene() {
       return;
     }
     sceneState.value = "skipped";
-    stepIdx.value = steps.value.indexOf("on");
+    phase.value = "done"; // nothing to switch on without a scene: go straight to the summary
   } finally {
     busy.value = false;
   }
@@ -284,6 +299,7 @@ function back() {
   err.value = "";
   stepIdx.value -= 1;
   if (stepId.value === "scene" && sceneState.value === "done") stepIdx.value -= 1;
+  if (sceneState.value === "skipped") sceneState.value = "idle"; // let them write it after all
 }
 
 // from the finish screen back into one step
@@ -302,6 +318,7 @@ function addAnother() {
   search.value = "";
   countryId.value = "";
   spotId.value = "";
+  createdSpotId.value = "";
   sceneState.value = "idle";
   located.value = true;
   plan.value = true;
@@ -329,7 +346,7 @@ async function runExtra(which, fn, doneNote) {
 }
 const paint = () => runExtra("art", () => props.paintArt(liveSpot.value.childSceneId), "Artwork painted.");
 const record = () => runExtra("voice", () => props.recordVoice(spotId.value), "Voice recorded.");
-const publishNow = () => runExtra("publish", async () => { await props.publish(); return ""; }, "Published — families can now explore this world.");
+const publishNow = () => runExtra("publish", () => props.publish(), "Published — families can now explore this world.");
 
 const todo = computed(() => (check.value ? leftToDo(check.value) : []));
 const stepCount = computed(() => steps.value.length);
@@ -574,7 +591,7 @@ watch(stepId, () => nextTick(() => dialogEl.value?.querySelector(".wz-body")?.sc
 .wz-body > section { display: flex; flex-direction: column; gap: 0.7rem; }
 .wz-help { margin: 0; font-size: 0.95rem; color: var(--text2); }
 .wz-muted { margin: 0; font-size: 0.85rem; color: var(--muted); }
-.wz-foot { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; padding: 0.9rem 1.4rem 1.1rem; border-top: 1px solid var(--border); }
+.wz-foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.75rem; padding: 0.9rem 1.4rem 1.1rem; border-top: 1px solid var(--border); }
 .wz-next { display: flex; align-items: center; gap: 0.75rem; justify-content: flex-end; flex: 1; }
 .wz-reason { color: var(--muted); font-size: 0.78rem; text-align: right; }
 

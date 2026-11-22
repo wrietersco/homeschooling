@@ -130,9 +130,8 @@ describe("AddPlaceWizard", () => {
     await click("Looks right");
     await click("Add without a scene for now");
     expect(calls.saved).toBe(1);
-    expect(body()).toContain("Turn it on for children");
-    expect(document.body.querySelector(".wz-switch input").disabled).toBe(true);
-    await click("Finish");
+    // nothing to switch on without a scene: straight to the summary
+    expect(body()).toContain("All done");
     expect(body()).toContain("no scene yet");
     expect(pack.scenes.hub.hotspots[0].enabled).toBe(false);
     wrapper.unmount();
@@ -161,6 +160,49 @@ describe("AddPlaceWizard", () => {
     await flushPromises();
     expect(body()).toContain("Make its scene");
     expect(body()).toContain("Step 4 of 5");
+    wrapper.unmount();
+  });
+
+  it("drops the unused pin when the curator goes back and picks another place", async () => {
+    const { wrapper, pack } = setup([], {}, { discardSpot: (id) => { const h = pack.scenes.hub.hotspots; const i = h.findIndex((x) => x.id === id); if (i >= 0) h.splice(i, 1); } });
+    await click("Continent");
+    await click("Next");
+    await click("Asia");
+    await click("Next");
+    expect(pack.scenes.hub.hotspots.map((h) => h.id)).toEqual(["asia"]);
+    await click("Back");
+    await click("Africa");
+    await click("Next");
+    expect(pack.scenes.hub.hotspots.map((h) => h.id)).toEqual(["africa"]);
+    wrapper.unmount();
+  });
+
+  it("keeps a city linked to the country it was chosen in", async () => {
+    const { wrapper, pack } = setup();
+    await click("City");
+    await click("Next");
+    const sel = document.body.querySelector(".wz select");
+    sel.value = "eg";
+    sel.dispatchEvent(new Event("change"));
+    await flushPromises();
+    await click("Cairo");
+    await click("Next");
+    const cairo = pack.scenes.hub.hotspots.find((h) => h.label === "Cairo");
+    expect(cairo.countryId).toBe("eg");
+    wrapper.unmount();
+  });
+
+  it("does not claim success when publishing fails", async () => {
+    const { wrapper } = setup([], {}, { topicStatus: "draft", publish: vi.fn(async () => "Some voiceovers failed.") });
+    await click("Continent");
+    await click("Next");
+    await click("Asia");
+    await click("Next");
+    await click("Looks right");
+    await click("Add without a scene for now");
+    await click("Publish to families");
+    expect(body()).toContain("Some voiceovers failed.");
+    expect(body()).not.toContain("Published — families");
     wrapper.unmount();
   });
 });

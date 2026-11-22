@@ -26,7 +26,7 @@ import { spotOutcome, sceneStatus, deletePlan, deleteSceneFrom, topicHealth, und
 import WikidoGlobeEditor from "@/components/platform/WikidoGlobeEditor.vue";
 import WikidoAddPlaceWizard from "@/components/platform/WikidoAddPlaceWizard.vue";
 import WikidoPlaceChecklist from "@/components/platform/WikidoPlaceChecklist.vue";
-import { placeChecklist } from "@/lib/wikido/placeWizard";
+import { placeChecklist, friendlyError } from "@/lib/wikido/placeWizard";
 import { globeDirectory, buildPlaceholderGlobeSpot } from "../../../../functions/lib/wikidoGlobe.js";
 import { withKeys, countOutline, removeOutlineNode, runOutline, summarizeRun, retryFailedItems } from "@/lib/wikido/outlineBuild";
 import { getLlmConfig } from "@/services/admin";
@@ -667,6 +667,24 @@ async function wizardMakeScene(query) {
   await refresh(true);
   loadSelected();
   return res;
+}
+
+// Remove a scene-less pin the wizard added and the curator then went back on.
+function wizardDiscardSpot(spotId) {
+  const hub = form.value?.scenes?.[form.value.rootSceneId];
+  const i = hub?.hotspots?.findIndex((h) => h.id === spotId && !h.childSceneId) ?? -1;
+  if (i >= 0) hub.hotspots.splice(i, 1);
+}
+
+// Publish for the wizard: returns a sentence when it did not actually go live,
+// so the wizard never says "Published" after a failed save / voiceover step.
+async function wizardPublish() {
+  error.value = "";
+  await togglePublish();
+  if (selectedDoc.value?.status === "published") return null;
+  const problem = friendlyError(error.value, "It could not be published. Close this and press “Publish to families” on the page.");
+  error.value = "";
+  return problem;
 }
 
 function wizardSetEnabled(spotId, on) {
@@ -1773,7 +1791,8 @@ function confirmDeleteScene(withDeeper) {
       :save-now="save"
       :paint-art="wizardPaint"
       :record-voice="wizardRecordVoice"
-      :publish="togglePublish"
+      :publish="wizardPublish"
+      :discard-spot="wizardDiscardSpot"
       @close="wizardStart = null"
     />
 

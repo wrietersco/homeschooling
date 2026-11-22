@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  stepOrder, placeChecklist, leftToDo, catalogChoices, cityChoices, locatePlace, sceneQuery, levelForKind, kindForLevel,
+  friendlyError, stepOrder, placeChecklist, leftToDo, catalogChoices, cityChoices, locatePlace, sceneQuery, levelForKind, kindForLevel,
 } from "./placeWizard";
 import { globeDirectory } from "../../../../functions/lib/wikidoGlobe.js";
 
@@ -71,5 +71,9 @@ describe("placeWizard", () => {
     expect(sceneQuery({ kind: "country", name: "Pakistan" })).toBe("Pakistan");
     expect(sceneQuery({ kind: "landmark", name: "Eiffel Tower", countryName: "France", located: false })).toBe("Eiffel Tower, France");
     expect(sceneQuery({ kind: "city", name: "Lahore", countryName: "Pakistan", located: true })).toBe("Lahore");
+  });
+
+  it("explains a publish blocked by missing artwork", () => {
+    expect(friendlyError(new Error("Cannot publish yet: scenes.pakistan: image.src is required"))).toMatch(/every scene has artwork/);
   });
 });
