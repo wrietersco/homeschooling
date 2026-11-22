@@ -66,13 +66,13 @@ async function pingModel({ capability, provider, model, voiceName, sampleText, t
   return { latencyMs: Math.round(now() - t0), output: (res.text || "").slice(0, 300) };
 }
 
-export const getModelCatalog = onCall(async (request) => {
+export const getModelCatalog = onCall({ secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"] }, async (request) => {
   requireSuperAdmin(request);
   // The rates the Costs dashboard actually uses (code defaults ⊕ any override the
   // superadmin saved), so the pricing tab can flag a rate that differs from Google's.
   let metered = DEFAULT_PRICING;
   try { metered = await loadPricing(getFirestore()); } catch { /* defaults */ }
-  return { catalog: MODEL_CATALOG, livePricing: LIVE_PRICING_META, pricingMeta: PRICING_META, meteredPricing: metered, defaultPricing: DEFAULT_PRICING, agentCapabilities: Object.fromEntries(AGENT_KEYS.map((k) => [k, capabilityForAgent(k)])) };
+  return { catalog: MODEL_CATALOG, livePricing: LIVE_PRICING_META, pricingMeta: PRICING_META, meteredPricing: metered, defaultPricing: DEFAULT_PRICING, providerKeys: { gemini: !!process.env.GEMINI_API_KEY, openai: !!process.env.OPENAI_API_KEY, anthropic: !!process.env.ANTHROPIC_API_KEY }, /* booleans only, never values */ agentCapabilities: Object.fromEntries(AGENT_KEYS.map((k) => [k, capabilityForAgent(k)])) };
 });
 
 // Preview a specific (possibly UNSAVED) model/voice choice for an agent.
