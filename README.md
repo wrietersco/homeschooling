@@ -40,6 +40,22 @@ firebase deploy --only hosting,firestore:rules,firestore:indexes
 firebase deploy --only functions                # requires Blaze plan
 ```
 
+### Hosting deploy from a clean worktree
+`web/.env.production` (the real `VITE_FIREBASE_*` web config) is **untracked**, so a fresh
+worktree does not have it. Copy it in before building, or the site ships a dummy key and
+everyone is signed out with `auth/api-key-not-valid`:
+```bash
+git worktree add ../hs-deploy origin/main
+cp web/.env.production ../hs-deploy/web/
+npm --prefix ../hs-deploy/web ci && npm --prefix ../hs-deploy/web run build
+(cd ../hs-deploy && firebase deploy --only hosting)
+git worktree remove --force ../hs-deploy
+```
+`npm run build` is guarded: `vite build` aborts if any `VITE_FIREBASE_*` value is missing,
+empty or a placeholder (key must start with `AIza`, project must be `homeschooling-b3e57`;
+exempt when `VITE_USE_EMULATORS=true`), and `scripts/check-dist-firebase.mjs` then checks
+that `dist` contains the configured key (prints PASS/FAIL only, never the key).
+
 ## Schedule design
 8 sequential one-hour blocks, 08:30–16:30, Mon–Fri. Block 4 (11:30) is always the
 **Muwajahah** interdependent co-op engine with a **Shared Success lock**: neither boy
