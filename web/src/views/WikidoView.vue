@@ -26,9 +26,9 @@ import WikidoTopicCard from "@/components/wikido/WikidoTopicCard.vue";
 import { isGlobeHub } from "../../../functions/lib/wikidoGlobe.js";
 import WikidoGate from "@/components/wikido/WikidoGate.vue";
 import WikidoMusic from "@/components/wikido/WikidoMusic.vue";
-import WikidoLensBar from "@/components/wikido/WikidoLensBar.vue";
+import WikidoPerspectiveHall from "@/components/wikido/WikidoPerspectiveHall.vue";
 import { sceneLenses, baseSceneId, MAIN_LENS } from "../../../functions/lib/wikidoPerspectives.js";
-import { playLensTurn, preloadImage, warmLensTurn } from "@/lib/wikido/lensTransition";
+import { preloadImage } from "@/lib/wikido/lensTransition";
 
 // The URL is the single source of truth for WHERE the child is (world, scene,
 // open card, globe camera, narration panel): every navigation pushes a route,
@@ -313,36 +313,27 @@ function onCamera(camera) {
 const lensList = computed(() => (topic.value && scene.value && !onGlobe.value ? sceneLenses(topic.value.scenes, scene.value.id) : []));
 const activeLens = computed(() => (scene.value?.perspectiveOf ? scene.value.lens : MAIN_LENS));
 const stageEl = ref(null);
-const turning = ref(false);
-watch(() => lensList.value.length > 1, (has) => { if (has) warmLensTurn(); }, { immediate: true });
-function warmLens(id) {
-  const l = lensList.value.find((x) => x.id === id);
-  if (l) preloadImage(l.scene?.image?.src);
+// The Perspective Hall: a ring of hologram panels the child spins, taps to hear,
+// and ENTERs (see components/wikido/WikidoPerspectiveHall.vue)
+const hallOpen = ref(false);
+const activeLensInfo = computed(() => lensList.value.find((l) => l.id === activeLens.value) || lensList.value[0] || null);
+function openHall() {
+  if (lensList.value.length < 2) return;
+  stop();
+  for (const l of lensList.value.slice(0, 8)) preloadImage(l.scene?.image?.src); // first panels paint from cache
+  hallOpen.value = true;
 }
-async function pickLens(id) {
-  if (turning.value || id === activeLens.value || !topic.value) return;
-  const list = lensList.value;
-  const from = list.find((l) => l.id === activeLens.value);
-  const to = list.find((l) => l.id === id);
-  if (!to) return;
-  turning.value = true;
-  try {
-    await preloadImage(to.scene?.image?.src, 1200); // turn onto a picture that is there
-    const turn = await playLensTurn({
-      container: stageEl.value,
-      fromSrc: from?.scene?.image?.src,
-      toSrc: to.scene?.image?.src,
-      direction: list.indexOf(to) >= list.indexOf(from) ? 1 : -1,
-    });
-    await turn.covered;
-    stop();
-    // a perspective is a way of looking, not a new place: replace, never push
-    router.replace(locationFor({ topicId: topic.value.id, sceneId: to.sceneId, intro: loc.value.intro }));
-    await turn.done;
-  } finally {
-    turning.value = false;
-  }
+function enterLens(id) {
+  hallOpen.value = false;
+  const to = lensList.value.find((l) => l.id === id);
+  if (!to || !topic.value || id === activeLens.value) return;
+  stop();
+  // a perspective is a way of looking, not a new place: replace, never push
+  router.replace(locationFor({ topicId: topic.value.id, sceneId: to.sceneId, intro: loc.value.intro }));
 }
+// leaving the scene (or the list changing under it) closes the hall
+watch(() => lensList.value.length < 2, (none) => { if (none) hallOpen.value = false; });
+watch(() => scene.value?.id, () => { hallOpen.value = false; });
 
 onBeforeUnmount(() => {
   stop();
@@ -429,13 +420,26 @@ onBeforeUnmount(() => {
     >
       <template #tools><WikidoMusic /></template>
     </WikidoScene>
-    <WikidoLensBar
-      v-if="scene && !onGlobe && lensList.length > 1"
+    <button
+      v-if="scene && !onGlobe && lensList.length > 1 && !hallOpen"
+      type="button"
+      class="wd-hallbtn"
+      :aria-label="`Perspectives: ${lensList.length} ways to look at this place. Now: ${activeLensInfo?.lens?.name || 'Overview'}`"
+      @click="openHall"
+    >
+      <span class="wd-hallbtn-gem" aria-hidden="true">{{ activeLensInfo?.lens?.emoji || '🔭' }}</span>
+      <span class="wd-hallbtn-txt">
+        <span class="wd-hallbtn-cap">Perspectives · {{ lensList.length }}</span>
+        <span class="wd-hallbtn-name">{{ activeLensInfo?.lens?.name || 'Overview' }}</span>
+      </span>
+      <span class="material-symbols-rounded" aria-hidden="true">view_in_ar</span>
+    </button>
+    <WikidoPerspectiveHall
+      v-if="hallOpen && lensList.length > 1"
       :lenses="lensList"
       :active="activeLens"
-      :busy="turning"
-      @pick="pickLens"
-      @warm="warmLens"
+      @enter="enterLens"
+      @close="hallOpen = false"
     />
 
     <Transition name="wd-toast">
@@ -554,4 +558,21 @@ onBeforeUnmount(() => {
   .wd-shelf-sub { font-size: 0.92rem; }
   .wd-shelf-grid { grid-template-columns: 1fr; gap: 1rem; }
 }
+
+/* the perspectives button: opens the hologram hall */
+.wd-hallbtn {
+  position: absolute; right: 20px; bottom: 20px; z-index: 26; display: flex; align-items: center; gap: .6rem;
+  min-height: 60px; padding: .45rem .9rem .45rem .5rem; border-radius: 18px; cursor: pointer; font-family: inherit; color: #e0f2fe;
+  border: 2px solid rgba(125, 211, 252, .7); background: linear-gradient(160deg, rgba(8, 20, 56, .88), rgba(16, 38, 90, .78));
+  box-shadow: 0 0 22px rgba(56, 189, 248, .45), inset 0 0 14px rgba(56, 189, 248, .15); backdrop-filter: blur(6px);
+  animation: wd-hallbtn-pulse 2.6s ease-in-out infinite; touch-action: manipulation;
+}
+.wd-hallbtn:hover, .wd-hallbtn:focus-visible { filter: brightness(1.15); outline: none; }
+.wd-hallbtn-gem { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; background: rgba(56, 189, 248, .22); font-size: 1.5rem; }
+.wd-hallbtn-txt { display: flex; flex-direction: column; text-align: left; line-height: 1.15; }
+.wd-hallbtn-cap { font-size: .68rem; letter-spacing: .14em; text-transform: uppercase; color: #7dd3fc; font-weight: 800; }
+.wd-hallbtn-name { font-size: 1rem; font-weight: 800; }
+@keyframes wd-hallbtn-pulse { 50% { box-shadow: 0 0 34px rgba(56, 189, 248, .8), inset 0 0 16px rgba(56, 189, 248, .25); } }
+@media (max-width: 939px) { .wd-hallbtn { right: 12px; bottom: 74px; } }
+@media (prefers-reduced-motion: reduce) { .wd-hallbtn { animation: none; } }
 </style>

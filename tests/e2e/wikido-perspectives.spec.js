@@ -67,30 +67,51 @@ async function signInSuperadmin(page, id) {
   return user;
 }
 
-test("child switches perspectives: lens buttons, turn animation, URL, lens spots, doorway trail", async ({ page }) => {
+test("child opens the Perspective Hall: spin, hear, ENTER, back to the list, URL, doorway trail", async ({ page }) => {
   test.setTimeout(120_000);
   const id = `lens-child-${Date.now()}`;
   const doc = getFirestore().collection("wikidoTopics").doc(id);
   await doc.set(world(id));
   await routeArt(page);
   const user = await signInSuperadmin(page, id);
+  const hallName = page.locator(".hall-name");
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto(`/wikido/${id}`);
-    const lenses = page.locator(".wd-lenses .wd-lens");
-    await expect(lenses).toHaveCount(3);
-    await expect(lenses.nth(0)).toHaveAttribute("aria-checked", "true");
+    const trigger = page.locator(".wd-hallbtn");
+    await expect(trigger).toContainText("Perspectives · 3");
     await expect(page.locator(".wd-crumb.current")).toHaveText("Pakistan");
     await page.screenshot({ path: `${SHOTS}/child-overview.png` });
 
-    await lenses.nth(1).click();
-    await expect(page.locator(".wd-lens-turn")).toHaveCount(1); // the prism turn is playing
-    await page.waitForTimeout(250);
-    await page.screenshot({ path: `${SHOTS}/child-turning.png` });
+    // open the hall: the ring starts on the current perspective
+    await trigger.click();
+    await expect(page.locator(".hall")).toBeVisible();
+    await expect(hallName).toContainText("Overview");
+    await page.waitForTimeout(1200);
+    await page.screenshot({ path: `${SHOTS}/hall-open.png` });
+
+    // spin the ring to History; the caption follows
+    await page.keyboard.press("ArrowRight");
+    await expect(hallName).toContainText("History", { timeout: 8_000 });
+    await page.screenshot({ path: `${SHOTS}/hall-history.png` });
+
+    // first "tap" on the front panel: it is read aloud and ENTER appears
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".hall-enter")).toBeVisible();
+    await page.screenshot({ path: `${SHOTS}/hall-armed.png` });
+    // spinning away drops the ENTER; coming back needs a fresh tap
+    await page.keyboard.press("ArrowRight");
+    await expect(page.locator(".hall-enter")).toHaveCount(0);
+    await page.keyboard.press("ArrowLeft");
+    await expect(hallName).toContainText("History", { timeout: 8_000 });
+    await page.keyboard.press("Enter");
+    await page.locator(".hall-enter").click();
+
+    // ENTER steps into the perspective
+    await expect(page.locator(".hall")).toHaveCount(0);
     await expect(page).toHaveURL(new RegExp(`/wikido/${id}\\?lens=history$`));
-    await expect(page.locator(".wd-lens-turn")).toHaveCount(0, { timeout: 5_000 });
     await expect(page.locator(".wd-crumb.current")).toHaveText("Pakistan — History");
-    await expect(lenses.nth(1)).toHaveAttribute("aria-checked", "true");
+    await expect(page.locator(".wd-hallbtn")).toContainText("History");
     await expect(page.getByRole("button", { name: /Mughal Empire/ }).first()).toBeVisible();
     await page.screenshot({ path: `${SHOTS}/child-history.png` });
 
@@ -102,27 +123,40 @@ test("child switches perspectives: lens buttons, turn animation, URL, lens spots
     await page.goto(`/wikido/${id}/lahore-fort`);
     await expect(page.locator(".wd-crumb.current")).toHaveText("Lahore Fort");
     await expect(page.locator(".wd-crumb").first()).toHaveText("Pakistan — History");
-    await expect(page.locator(".wd-lenses")).toHaveCount(0); // a scene without lenses shows no bar
+    await expect(page.locator(".wd-hallbtn")).toHaveCount(0); // a scene without perspectives has no hall
     await page.locator(".wd-crumb").first().click();
     await expect(page).toHaveURL(new RegExp(`/wikido/${id}\\?lens=history$`));
 
-    // reduced motion: a plain cross-fade, same result
+    // back to the list of all perspectives, Esc closes the hall without moving
+    await page.locator(".wd-hallbtn").click();
+    await expect(page.locator(".hall")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".hall")).toHaveCount(0);
+    await expect(page).toHaveURL(new RegExp(`\\?lens=history$`));
+
+    // reduced motion: the ring just snaps, same result
     await page.emulateMedia({ reducedMotion: "reduce" });
-    await page.locator(".wd-lens", { hasText: "Food" }).click();
+    await page.locator(".wd-hallbtn").click();
+    await page.keyboard.press("ArrowRight");
+    await expect(hallName).toContainText("Food", { timeout: 8_000 });
+    await page.keyboard.press("Enter");
+    await page.locator(".hall-enter").click();
     await expect(page).toHaveURL(new RegExp(`\\?lens=food$`));
     await expect(page.locator(".wd-crumb.current")).toHaveText("Pakistan — Food");
 
-    // phone: the lens row sits under the top bar
+    // phone: the button and the hall fit, ENTER is reachable
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    await expect(page.locator(".wd-lens-turn")).toHaveCount(0, { timeout: 5_000 });
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.locator(".wd-lenses .wd-lens")).toHaveCount(3);
-    // the lens row never covers the top bar
-    const bar = await page.locator(".wd-top").boundingBox();
-    const row = await page.locator(".wd-lenses-row").boundingBox();
-    expect(row.y).toBeGreaterThanOrEqual(bar.y + bar.height - 1);
-    await expect.poll(() => page.locator(".wd-art img").evaluate((img) => img.complete && img.naturalWidth > 0 && getComputedStyle(img).opacity === "1"), { timeout: 5_000 }).toBe(true);
-    await page.screenshot({ path: `${SHOTS}/child-phone.png` });
+    await expect(page.locator(".wd-hallbtn")).toBeVisible();
+    await page.locator(".wd-hallbtn").click();
+    await expect(page.locator(".hall")).toBeVisible();
+    await page.keyboard.press("Enter");
+    const enter = page.locator(".hall-enter");
+    await expect(enter).toBeVisible();
+    const box = await enter.boundingBox();
+    expect(box.y + box.height).toBeLessThanOrEqual(844);
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    await page.screenshot({ path: `${SHOTS}/hall-phone.png` });
   } finally {
     await doc.delete();
     await getAuth().deleteUser(user.uid);
