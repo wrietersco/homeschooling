@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ringOffset, visiblePanels, panelPose, settleIndex, stepsTo, wrapIndex, panelCaption, VISIBLE } from "./hallLayout";
+import { ringOffset, visiblePanels, panelPose, settleIndex, stepsTo, wrapIndex, panelCaption, corsImageUrl, VISIBLE } from "./hallLayout";
 
 describe("hall layout", () => {
   it("wraps offsets round the ring", () => {
@@ -52,5 +52,22 @@ describe("hall layout", () => {
     const c = panelCaption({ lens: { name: "History", emoji: "📜", color: "#a16207" }, scene: { hotspots: [1, 2, 3] } });
     expect(c).toMatchObject({ title: "History", emoji: "📜", color: "#a16207", spots: 3, sub: "3 things to discover" });
     expect(panelCaption(null).title).toBe("Overview");
+  });
+});
+
+describe("corsImageUrl", () => {
+  it("gives the CORS texture load its own cache entry", () => {
+    const u = "https://firebasestorage.googleapis.com/v0/b/b/o/a.jpg?alt=media&token=t";
+    expect(corsImageUrl(u)).toBe(`${u}&wdcors=1`);
+    expect(corsImageUrl("https://x/a.jpg")).toBe("https://x/a.jpg?wdcors=1");
+    expect(corsImageUrl("https://x/a.jpg#f")).toBe("https://x/a.jpg?wdcors=1#f");
+  });
+  it("is idempotent and leaves local/data/empty sources alone", () => {
+    const once = corsImageUrl("https://x/a.jpg");
+    expect(corsImageUrl(once)).toBe(once);
+    expect(corsImageUrl("/img/a.jpg")).toBe("/img/a.jpg");
+    expect(corsImageUrl("data:image/png;base64,AAA")).toBe("data:image/png;base64,AAA");
+    expect(corsImageUrl("")).toBe("");
+    expect(corsImageUrl(undefined)).toBe("");
   });
 });

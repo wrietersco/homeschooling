@@ -74,3 +74,18 @@ export function panelCaption(lens) {
     spots,
   };
 }
+
+// The URL a WebGL texture should load a picture from. The scene itself shows the
+// same picture in a plain <img> (no CORS), and browsers keep that response in the
+// HTTP cache WITHOUT the Access-Control-Allow-Origin header; a later CORS load of
+// the identical URL is then served from that entry and fails, so the panel would
+// stay a placeholder. A harmless extra query parameter gives the CORS load its own
+// cache entry (storage download URLs ignore unknown parameters).
+export function corsImageUrl(src) {
+  const s = String(src || "");
+  if (!/^https?:\/\//i.test(s) || /[?&]wdcors=1(&|$)/.test(s)) return s;
+  const hash = s.indexOf("#");
+  const base = hash >= 0 ? s.slice(0, hash) : s;
+  const tail = hash >= 0 ? s.slice(hash) : "";
+  return `${base}${base.includes("?") ? "&" : "?"}wdcors=1${tail}`;
+}

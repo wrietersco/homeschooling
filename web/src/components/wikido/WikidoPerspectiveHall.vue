@@ -29,6 +29,7 @@ const stageEl = ref(null);
 const focus = ref(Math.max(0, props.lenses.findIndex((l) => l.id === props.active)));
 const armed = ref(-1); // the panel whose narration is playing / whose ENTER is showing
 const mode = ref("loading"); // loading | 3d | cards
+const leaving = ref(""); // "" | "enter" | "close": the hall animates out before it hands over
 let hall = null;
 let alive = true;
 
@@ -96,16 +97,25 @@ function arm(i) {
   else speak(text, "en", { id, contentKind: "story" });
 }
 
-function enter() {
+// ENTER: the camera dives into the panel while the interface melts away, then hand over
+async function enter() {
   const l = current.value;
-  if (!l) return;
+  if (!l || leaving.value) return;
   stop();
+  if (mode.value === "3d" && !reduced()) {
+    leaving.value = "enter";
+    await hall?.flyInto();
+    if (!alive) return;
+  }
   emit("enter", l.id);
 }
 
 function close() {
+  if (leaving.value) return;
   stop();
-  emit("close");
+  if (reduced()) { emit("close"); return; }
+  leaving.value = "close";
+  setTimeout(() => { if (alive) emit("close"); }, 260);
 }
 
 function tapCard(i) {
@@ -133,6 +143,7 @@ watch(focus, (i) => {
   nextTick(() => rowEl.value?.querySelector(`[data-i="${i}"]`)?.scrollIntoView?.({ inline: "center", block: "nearest", behavior: reduced() ? "auto" : "smooth" }));
 });
 watch(items, (next) => hall?.setItems(next));
+watch(armed, (i) => hall?.setArmed(i));
 
 onMounted(() => {
   window.addEventListener("keydown", onKey);
@@ -152,7 +163,7 @@ const narrating = computed(() => String(speakingId.value || "").startsWith("hall
 </script>
 
 <template>
-  <div class="hall" role="dialog" aria-modal="true" aria-label="Choose a way to look at this place">
+  <div class="hall" :class="leaving && 'leaving-' + leaving" role="dialog" aria-modal="true" aria-label="Choose a way to look at this place">
     <div class="hall-sky" aria-hidden="true"></div>
     <header class="hall-top">
       <p class="hall-kicker">PERSPECTIVES</p>
@@ -243,6 +254,11 @@ const narrating = computed(() => String(speakingId.value || "").startsWith("hall
   border: 1.5px solid rgba(125, 211, 252, .55); background: rgba(8, 20, 52, .7); color: #e0f2fe; cursor: pointer;
   box-shadow: 0 0 16px rgba(56, 189, 248, .35);
 }
+.leaving-close { animation: hall-out .26s ease both; }
+@keyframes hall-out { to { opacity: 0; transform: scale(1.05); } }
+.leaving-enter .hall-top, .leaving-enter .hall-bottom, .leaving-enter .hall-arrow { opacity: 0; transition: opacity .25s ease; }
+.leaving-enter { animation: hall-dive .8s ease-in both; }
+@keyframes hall-dive { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
 .hall-x:hover, .hall-x:focus-visible { background: rgba(56, 189, 248, .25); outline: none; }
 .hall-stage { position: absolute; inset: 0; z-index: 1; }
 .hall-wait { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; margin: 0; font-weight: 700; color: #7dd3fc; }
@@ -297,6 +313,15 @@ const narrating = computed(() => String(speakingId.value || "").startsWith("hall
   box-shadow: 0 0 24px rgba(56, 189, 248, .6), inset 0 0 14px rgba(125, 211, 252, .35); text-shadow: 0 0 12px #38bdf8;
   animation: hall-pulse 1.8s ease-in-out infinite;
 }
+.hall-enter { position: relative; overflow: hidden; }
+.hall-enter::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-120%);
+  background: linear-gradient(100deg, transparent 30%, rgba(224, 242, 254, .55) 50%, transparent 70%);
+  animation: hall-shine 2.4s ease-in-out infinite;
+}
+@keyframes hall-shine { 55%, 100% { transform: translateX(120%); } }
+.hall-armed { animation: hall-rise .35s cubic-bezier(.2, .9, .3, 1.2) both; }
+@keyframes hall-rise { from { opacity: 0; transform: translateY(18px) scale(.96); } to { opacity: 1; transform: none; } }
 .hall-enter:hover, .hall-enter:focus-visible { filter: brightness(1.2); outline: none; }
 @keyframes hall-pulse { 50% { box-shadow: 0 0 38px rgba(56, 189, 248, .95), inset 0 0 18px rgba(125, 211, 252, .5); } }
 
@@ -313,7 +338,7 @@ const narrating = computed(() => String(speakingId.value || "").startsWith("hall
   .hall-name { font-size: 1.25rem; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .hall, .hall-enter, .hall-wave.on i { animation: none; }
+  .hall, .hall-enter, .hall-enter::after, .hall-armed, .hall-wave.on i { animation: none; }
   .hall-card { transition: none; }
 }
 </style>

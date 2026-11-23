@@ -1,3 +1,4 @@
+import { corsImageUrl } from "./hallLayout.js";
 // The "lens turn": when a child switches a scene's perspective, the picture
 // turns like a prism — the old artwork on the face we look at, the new one on
 // the next face — with a slight pull-back for depth, then hands the screen
@@ -56,7 +57,7 @@ export function preloadImage(src, timeout = 1500) {
     const t =setTimeout(() => resolve(false), timeout);
     img.onload = () => { clearTimeout(t); loaded.set(src, true); resolve(true); };
     img.onerror = () => { clearTimeout(t); resolve(false); };
-    img.src = src;
+    img.src = corsImageUrl(src);
   });
 }
 

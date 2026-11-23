@@ -77,6 +77,8 @@ test("child opens the Perspective Hall: spin, hear, ENTER, back to the list, URL
   const hallName = page.locator(".hall-name");
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 2, mobile: false });
     await page.goto(`/wikido/${id}`);
     const trigger = page.locator(".wd-hallbtn");
     await expect(trigger).toContainText("Perspectives · 3");
@@ -87,8 +89,12 @@ test("child opens the Perspective Hall: spin, hear, ENTER, back to the list, URL
     await trigger.click();
     await expect(page.locator(".hall")).toBeVisible();
     await expect(hallName).toContainText("Overview");
-    await page.waitForTimeout(1200);
+    await page.waitForTimeout(350);
+    await page.screenshot({ path: `${SHOTS}/hall-intro.png` }); // mid-entrance: panels flying into the ring
+    await page.waitForTimeout(1600);
     await page.screenshot({ path: `${SHOTS}/hall-open.png` });
+
+    await page.screenshot({ path: `${SHOTS}/hall-open-2x.png` }); // retina: rendered at the device pixel ratio
 
     // spin the ring to History; the caption follows
     await page.keyboard.press("ArrowRight");
@@ -106,6 +112,8 @@ test("child opens the Perspective Hall: spin, hear, ENTER, back to the list, URL
     await expect(hallName).toContainText("History", { timeout: 8_000 });
     await page.keyboard.press("Enter");
     await page.locator(".hall-enter").click();
+    await page.waitForTimeout(350);
+    await page.screenshot({ path: `${SHOTS}/hall-dive.png` }); // camera diving into the panel
 
     // ENTER steps into the perspective
     await expect(page.locator(".hall")).toHaveCount(0);
@@ -147,7 +155,10 @@ test("child opens the Perspective Hall: spin, hear, ENTER, back to the list, URL
     // phone: the button and the hall fit, ENTER is reachable
     await page.emulateMedia({ reducedMotion: "no-preference" });
     await page.setViewportSize({ width: 390, height: 844 });
+    const cdp2 = await page.context().newCDPSession(page);
+    await cdp2.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
     await expect(page.locator(".wd-hallbtn")).toBeVisible();
+    await page.screenshot({ path: `${SHOTS}/child-phone.png` });
     await page.locator(".wd-hallbtn").click();
     await expect(page.locator(".hall")).toBeVisible();
     await page.keyboard.press("Enter");
@@ -155,6 +166,7 @@ test("child opens the Perspective Hall: spin, hear, ENTER, back to the list, URL
     await expect(enter).toBeVisible();
     const box = await enter.boundingBox();
     expect(box.y + box.height).toBeLessThanOrEqual(844);
+    await page.waitForTimeout(1800);
     expect(box.x).toBeGreaterThanOrEqual(0);
     await page.screenshot({ path: `${SHOTS}/hall-phone.png` });
   } finally {
