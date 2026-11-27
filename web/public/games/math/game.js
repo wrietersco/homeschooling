@@ -133,6 +133,7 @@ function applyView() {
   svg.classList.toggle('deep', view.k > 5);
   scheduleRetick();
   overlayDirty = true;
+  urlSync();
 }
 applyView();
 
@@ -368,6 +369,7 @@ function layout() {
       cy += bandH + VGAP;
     });
   })(root, -span(root)/2, 0);
+  urlSync();
 }
 function eachSub(s, fn) { fn(s); s.rows.forEach(r => r.forEach(k => eachSub(k, fn))); }
 function moveTo(s, X, Y, animate) {
@@ -401,8 +403,8 @@ function tweenView(target, dur = 700) {
     applyView();
   }, () => viewTw = null, easeInOutCubic);
 }
-function fitView(animate = true, dur = 750) {
-  if (!scales.length) return;
+function fitTarget() {
+  if (!scales.length) return null;
   let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
   scales.forEach(s => {
     // bound the FINAL positions (slot + drag offsets) so mid-animation states don't skew the fit
@@ -419,9 +421,13 @@ function fitView(animate = true, dur = 750) {
   const availH = m ? innerHeight - 250 : innerHeight - 280;
   const k = clamp(Math.min(availW / bw, availH / bh), .22, 2.2);
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const target = {
+  return {
     tx: (m || bookHid ? innerWidth / 2 : availW / 2 + 24) - cx * k,
     ty: (m ? 108 + availH / 2 : 90 + (innerHeight - 170) / 2) - cy * k, k };
+}
+function fitView(animate = true, dur = 750) {
+  const target = fitTarget();
+  if (!target) return;
   if (animate) tweenView(target, dur); else { view = target; applyView(); }
 }
 
@@ -430,7 +436,7 @@ const ptrs = new Map();
 let panInfo = null, pinch = null, moved = false, downId = null, pieceDrag = null;
 let pressTimer = null, pressPt = null, splitPreview = null, confirmLoop = false;
 svg.addEventListener('pointerdown', e => {
-  $('#book').classList.remove('open'); // tapping the canvas closes the mobile book
+  closeBookSheet(); // tapping the canvas closes the mobile book
   if (pieceDrag) return;               // one piece at a time
   try { svg.setPointerCapture(e.pointerId); } catch (_) {}
   // self-heal stale pointers whose pointerup was lost: a lone finger idle for
@@ -575,8 +581,10 @@ function openPad(opts) {
   drawVal();
   $('#modal').hidden = false;
   blip();
+  if (!opts.noPush && opts.ui) uiOpen(opts.ui);
 }
-function closePad() { padCtx = null; $('#modal').hidden = true; }
+function closePadVisual() { padCtx = null; $('#modal').hidden = true; }
+function closePad() { const had = !!padCtx; closePadVisual(); if (had) uiClose(['size', 'cut']); }
 function drawVal() { $('#mValue').textContent = padCtx.val || '—'; }
 function padKey(k) {
   if (!padCtx) return;
@@ -617,15 +625,16 @@ $('#mClose').addEventListener('click', closePad);
 $('#modal').addEventListener('pointerdown', e => { if (e.target.id === 'modal') closePad(); });
 
 /* ---------- tool 1: Scale Setter ---------- */
-$('#tRuler').addEventListener('click', () => {
+function openSizePad(noPush) {
   const s = sel();
   if (!s) { toast('Tap a ruler first! 👆'); sad(); return; }
   openPad({
-    title: 'How long should this ruler be?',
+    title: 'How long should this ruler be?', ui: 'size', noPush,
     unit: 'cm', min: 1, max: 500, dec: 1, start: Math.round(s.len * 10) / 10,
     ok: v => setSize(s, v),
   });
-});
+}
+$('#tRuler').addEventListener('click', () => openSizePad());
 function setSize(s, v) {
   const from = s.len, isRoot = s.parentId == null;
   tween(650, e => {
@@ -637,7 +646,7 @@ function setSize(s, v) {
   }, () => {
     s.len = v;
     if (isRoot) CM = ROOTW / v;
-    rerender(false); layout(); reposition(true); fitView();
+    rerender(false); layout(); reposition(true); fitView(); urlSync();
   }, easeOutCubic);
   popS(); layout(); reposition(false);
   setHint(v < 3 ? `${fmt(v)} cm! A tiny ruler — count its millimetres! 🔬`
@@ -649,17 +658,18 @@ function rerender(fast) {
 }
 
 /* ---------- tool 2: Partition Maker ---------- */
-$('#tCut').addEventListener('click', () => {
+function openCutPad(noPush) {
   const s = sel();
   if (!s) { toast('Tap a ruler first! 👆'); sad(); return; }
   if (s.len < 0.2 + 1e-9) { toast('This piece is too tiny to cut! 🐜'); sad(); return; }
   const maxN = clamp(Math.floor(round2(s.len) * 10), 2, 12); // every piece stays ≥ 1 mm
   openPad({
-    title: 'Cut into how many parts?',
+    title: 'Cut into how many parts?', ui: 'cut', noPush,
     unit: 'parts', min: 2, max: maxN, dec: 1,   // 5, 5.1, 5.5 … are all welcome
     ok: n => startPreview(s, n),
   });
-});
+}
+$('#tCut').addEventListener('click', () => openCutPad());
 
 function startPreview(s, n) {
   hidePieceBar();
@@ -726,6 +736,7 @@ function confirmCut() {
     const k = makeScale(q, COLORS[colorIdx++ % COLORS.length]);
     k.parentId = s.id; row.push(k); newIds.push(k.id);
   }
+  row.n = n;
   if (partLen >= 0.1) {
     const k = makeScale(partLen, COLORS[colorIdx++ % COLORS.length], { partial: true });
     k.parentId = s.id; row.push(k); newIds.push(k.id);
@@ -813,6 +824,7 @@ function confirmSplit() {
     const k = makeScale(i ? b : a, COLORS[colorIdx++ % COLORS.length]);
     k.parentId = s.id; row.push(k);
   }
+  row.split = true;
   // rows stay sorted biggest-first; inside the row, the left piece stays left
   let at = s.rows.findIndex(existing => existing[0].len < a - 1e-9);
   if (at === -1) at = s.rows.length;
@@ -887,6 +899,7 @@ function endPieceDrag() {
   });
   tone(860, 520, .06, 'square', .12);
   showPieceBar();
+  urlSync();
 }
 $('#pHome').addEventListener('click', () => { const s = sel(); s && homePiece(s); });
 $('#pTrash').addEventListener('click', () => { const s = sel(); s && removePiece(s); });
@@ -899,7 +912,7 @@ function homePiece(s) {
     n.tw = tween(420, e => { n.x = fx + ddx * e; n.y = fy + ddy * e; place(n); },
       () => { n.x = fx + ddx; n.y = fy + ddy; place(n); });
   });
-  popS(); showPieceBar();
+  popS(); showPieceBar(); urlSync();
   setHint('Back in line with its scale! 📏');
 }
 function clearOverlayOf(n) {
@@ -923,23 +936,30 @@ function removePiece(s) {
   tone(500, 140, .25, 'sawtooth', .09);
   setHint('Piece removed! 🧹');
   setTimeout(() => fitView(true, 600), 460);
+  urlSync();
 }
 
 /* ---------- math book sheet (mobile) ---------- */
 // Mobile: slide-up sheet. Desktop: the side book can be hidden to give the canvas the whole screen.
-function bookOff(off) {
+function bookOff(off, fromPop) {
   document.body.classList.toggle('bookOff', off);
   setTimeout(syncZoomBtns, 600);
   try { localStorage.setItem('mathBookOff', off ? '1' : ''); } catch (_) {}
   if (!isMobile()) fitView(true, 500);
+  if (!fromPop) { if (off) uiOpen('book-off'); else uiClose(['book-off']); }
+}
+function openBookSheet() { $('#book').classList.add('open'); uiOpen('book'); }
+function closeBookSheet() {
+  if (!$('#book').classList.contains('open')) return;
+  $('#book').classList.remove('open'); uiClose(['book']);
 }
 $('#bookBtn').addEventListener('click', () => {
-  if (isMobile()) $('#book').classList.toggle('open');
+  if (isMobile()) { if ($('#book').classList.contains('open')) closeBookSheet(); else openBookSheet(); }
   else bookOff(!document.body.classList.contains('bookOff'));
   blip();
 });
 $('#bookClose').addEventListener('click', () => {
-  if (isMobile()) $('#book').classList.remove('open'); else bookOff(true);
+  if (isMobile()) closeBookSheet(); else bookOff(true);
 });
 try { if (!isMobile() && localStorage.getItem('mathBookOff')) document.body.classList.add('bookOff'); } catch (_) {}
 
@@ -1258,7 +1278,8 @@ $('#tReset').addEventListener('click', e => {
 });
 function doReset() {
   cancelPreview(); closePad(); hidePieceBar();
-  $('#book').classList.remove('open');
+  closeBookSheet();
+  resetting = true;
   const old = scales;
   scales = []; byId = new Map(); selId = null; colorIdx = 0; preview = null;
   $('#cards').innerHTML = '';
@@ -1269,15 +1290,15 @@ function doReset() {
       () => { s.g.remove(); clearOverlayOf(s); }), i * 40);
   });
   chime();
-  setTimeout(() => { initWorld(true); fitView(true); }, old.length * 40 + 380);
+  setTimeout(() => { initWorld(true); fitView(true); resetting = false; urlSync(); }, old.length * 40 + 380);
   setHint('Fresh start! ✨');
 }
 
 /* ---------- world init & intro ---------- */
-function initWorld(drop) {
-  CM = 6; // 100 cm ruler → the classic 6 px/cm canvas
-  const root = makeScale(100, MAIN_COLOR);
-  root.x = -100 * CM / 2; root.y = 0;
+function initWorld(drop, len = 100) {
+  CM = len === 100 ? 6 : ROOTW / Math.max(len, .25); // 100 cm ruler → the classic 6 px/cm canvas
+  const root = makeScale(len, MAIN_COLOR);
+  root.x = -len * CM / 2; root.y = 0;
   layout(); reposition(false);
   selId = root.id;
   place(root);
@@ -1286,13 +1307,20 @@ function initWorld(drop) {
     tween(820, e => { root.y = -340 + 340 * e; place(root); }, null, easeOutBounce);
     tween(500, e => { root.pop = e; place(root); }, null, easeOutBack);
   }
+  return root;
 }
-let started = false;
+let started = false;      // the world exists
+const introEl = $('#intro');
+const introShown = () => !introEl.classList.contains('hide');
+function showIntro() { playing = false; introEl.classList.remove('hide'); }
+function hideIntro() { playing = true; introEl.classList.add('hide'); }
 $('#btnStart').addEventListener('click', () => {
-  if (started) return; // guard against double-click spawning two rulers
-  started = true;
+  if (!introShown()) return; // guard against double-click spawning two rulers
   ensureAC();
-  $('#intro').classList.add('hide');
+  hideIntro();
+  history.pushState({ play: 1 }, '', buildUrl(''));   // Back returns to the intro
+  if (started) return;       // coming back from the intro: the board is still there
+  started = true;
   initWorld(true);
   fitView(false); // size the ruler to the screen (crucial on phones)
   chime();
@@ -1300,9 +1328,210 @@ $('#btnStart').addEventListener('click', () => {
   setHint('Tap ✂️ to split equally — or HOLD a ruler to cut it anywhere!');
 });
 
+/* ---------- deep links: every screen & board state has its own URL ----------
+   ?play=1            the game (no play param = intro)
+   &t=100{c3:…}       the ruler tree: len{row;row} · row = c<parts>:piece,piece | s:piece,piece
+                      piece = len[p|r]{rows}[@dx~dy]   (p = part, r = left over, dx in cm)
+   &v=cx,cy,zoom      pan/zoom (omitted while the view is just "fit")
+   #size #cut #book #book-off   open number pad / Math Book (history entries)
+   Board + view use replaceState (debounced); screens use pushState. `from` is untouched. */
+var playing = false, resetting = false, urlT = null;
+const MY_PARAMS = ['play', 't', 'v'];
+const encQ = t => encodeURIComponent(t).replace(/%2C/g, ',').replace(/%3A/g, ':').replace(/%3B/g, ';')
+  .replace(/%40/g, '@').replace(/%7B/g, '{').replace(/%7D/g, '}');
+const n2 = x => String(parseFloat(x.toFixed(2)));
+function serTree() {
+  const root = scales.find(s => !s.parentId);
+  if (!root) return '';
+  const node = (s, isRoot) => {
+    let o = n2(s.len);
+    if (!isRoot) o += s.remainder ? 'r' : s.partial ? 'p' : '';
+    if (s.rows.length) o += '{' + s.rows.map(row).join(';') + '}';
+    if (!isRoot && (s.off.dx || s.off.dy)) o += `@${parseFloat((s.off.dx / CM).toFixed(3))}~${Math.round(s.off.dy)}`;
+    return o;
+  };
+  const row = r => (r.split && r.length === 2 ? 's:' : `c${n2(Math.max(2, r.n || r.length))}:`) + r.map(k => node(k, false)).join(',');
+  return node(root, true);
+}
+function serView() {
+  const t = fitTarget();
+  if (!t) return '';
+  if (Math.abs(view.k / t.k - 1) < .01 && Math.abs(view.tx - t.tx) < 3 && Math.abs(view.ty - t.ty) < 3) return '';
+  const cx = (innerWidth / 2 - view.tx) / view.k, cy = (innerHeight / 2 - view.ty) / view.k;
+  return [(cx / CM).toFixed(4), cy.toFixed(3), (view.k * CM).toPrecision(5)].map(x => String(parseFloat(x))).join(',');
+}
+function keptParams() {
+  return location.search.slice(1).split('&').filter(p => p && !MY_PARAMS.includes(p.split('=')[0]));
+}
+function buildUrl(hash) {
+  const keep = keptParams();
+  if (playing) {
+    keep.push('play=1');
+    if (scales.length && !resetting) {
+      const t = serTree(); if (t !== '100') keep.push('t=' + encQ(t));
+      const v = serView(); if (v) keep.push('v=' + v);
+    }
+  }
+  return location.pathname + (keep.length ? '?' + keep.join('&') : '') + (hash ? '#' + hash : '');
+}
+function urlSync() {
+  clearTimeout(urlT);
+  urlT = setTimeout(() => {
+    if (!playing || resetting || !scales.length) return;
+    const u = buildUrl(location.hash.slice(1));
+    if (u !== location.pathname + location.search + location.hash) {
+      try { history.replaceState(history.state, '', u); } catch (_) {}
+    }
+  }, 350);
+}
+const curUi = () => location.hash.slice(1);
+function uiOpen(name) {
+  if (curUi() === name) return;
+  try { history.pushState({ ui: name }, '', buildUrl(name)); } catch (_) {}
+}
+function uiClose(names) {      // close via Back when we pushed the entry, else just strip the hash
+  const c = curUi();
+  if (!names.includes(c)) return;
+  if (history.state && history.state.ui === c) history.back();
+  else { try { history.replaceState(null, '', buildUrl('')); } catch (_) {} }
+}
+function cleanUrl() {          // stale / garbage params → plain intro, `from` kept
+  const keep = keptParams();
+  try { history.replaceState(null, '', location.pathname + (keep.length ? '?' + keep.join('&') : '')); } catch (_) {}
+}
+
+function parseTree(str) {
+  let i = 0, count = 0;
+  const bad = () => { throw new Error('bad tree'); };
+  const num = () => { const m = /^-?\d+(\.\d+)?/.exec(str.slice(i)); if (!m) bad(); i += m[0].length; return parseFloat(m[0]); };
+  function node(depth, isRoot) {
+    if (depth > 8 || ++count > 500) bad();
+    const len = num();
+    if (!(len >= (isRoot ? 1 : .05) && len <= 500)) bad();
+    const nd = { len, rows: [], remainder: false, partial: false, dx: 0, dy: 0 };
+    if (!isRoot) { if (str[i] === 'p') { nd.partial = true; i++; } else if (str[i] === 'r') { nd.remainder = true; i++; } }
+    if (str[i] === '{') {
+      i++;
+      do { nd.rows.push(row(depth)); } while (str[i] === ';' && ++i);
+      if (str[i++] !== '}') bad();
+    }
+    if (!isRoot && str[i] === '@') {
+      i++; nd.dx = num(); if (str[i++] !== '~') bad(); nd.dy = num();
+      if (Math.abs(nd.dx) > 2000 || Math.abs(nd.dy) > 20000) bad();
+    }
+    return nd;
+  }
+  function row(depth) {
+    const kind = str[i++]; let n = 0;
+    if (kind === 'c') { n = num(); if (!(n >= 2 && n <= 12)) bad(); } else if (kind !== 's') bad();
+    if (str[i++] !== ':') bad();
+    const pieces = [];
+    do { pieces.push(node(depth + 1, false)); } while (str[i] === ',' && ++i);
+    if (pieces.length > 14 || (kind === 's' && pieces.length !== 2)) bad();
+    return { kind, n, pieces };
+  }
+  const root = node(0, true);
+  if (i !== str.length) bad();
+  return root;
+}
+function parseView(str) {
+  const p = str.split(',').map(Number);
+  if (p.length !== 3 || p.some(x => !isFinite(x)) || Math.abs(p[0]) > 1e5 || Math.abs(p[1]) > 1e6 || !(p[2] > 0 && p[2] < 1e6)) throw new Error('bad view');
+  return p;
+}
+// rebuild the ruler tree (and its Math Book cards) from a parsed tree
+function buildTree(rootNode) {
+  const root = initWorld(false, rootNode.len);
+  (function add(parent, nd) {
+    nd.rows.forEach(r => {
+      const row = [];
+      r.pieces.forEach(pc => {
+        const k = makeScale(pc.len, pc.remainder ? GRAY : COLORS[colorIdx++ % COLORS.length],
+          { remainder: pc.remainder, partial: pc.partial });
+        k.parentId = parent.id; k.off = { dx: pc.dx * CM, dy: pc.dy }; k.nd = pc;
+        row.push(k);
+      });
+      if (r.kind === 's') row.split = true; else row.n = r.n;
+      parent.rows.push(row);
+      if (r.kind === 's') addSplitCard({ L: parent.len, a: row[0].len, b: row[1].len });
+      else addCard({ L: parent.len, n: r.n, q: row[0].len });
+      row.forEach(k => add(k, k.nd));
+    });
+  })(root, rootNode);
+  layout(); reposition(false);
+  return root;
+}
+// open the game straight from a link — silent (browsers only allow sound after a tap)
+function startFromUrl(tree, vw, hash) {
+  started = true;
+  introEl.style.transition = 'none'; hideIntro();
+  requestAnimationFrame(() => requestAnimationFrame(() => { introEl.style.transition = ''; }));
+  if (hash === 'book' && isMobile()) $('#book').classList.add('open');
+  if (hash === 'book-off' && !isMobile()) document.body.classList.add('bookOff');
+  const root = tree ? buildTree(tree) : initWorld(false);
+  if (vw) {
+    const k = clamp(vw[2] / CM, MINK, MAXK);
+    view = { k, tx: innerWidth / 2 - vw[0] * CM * k, ty: innerHeight / 2 - vw[1] * k };
+    applyView();
+  } else fitView(false);
+  selId = root.id; scales.forEach(place);
+  setHint('Tap ✂️ to split equally — or HOLD a ruler to cut it anywhere!');
+  if (hash === 'size') openSizePad(true);
+  else if (hash === 'cut') openCutPad(true);
+  else if (hash && hash !== 'book' && hash !== 'book-off') uiClose([hash]);
+  syncZoomBtns();
+}
+function bootFromUrl() {
+  const q = new URLSearchParams(location.search);
+  const hash = curUi();
+  if (q.get('play') !== '1') {
+    if (MY_PARAMS.some(k => q.has(k)) || hash) cleanUrl();
+    return;
+  }
+  let tree = null, vw = null;
+  try {
+    if (q.has('t')) tree = parseTree(q.get('t'));
+    if (q.has('v')) vw = parseView(q.get('v'));
+  } catch (_) { cleanUrl(); return; }
+  startFromUrl(tree, vw, hash);
+}
+addEventListener('popstate', () => {
+  const q = new URLSearchParams(location.search);
+  const h = curUi();
+  if (q.get('play') !== '1') {               // back to the intro
+    closePadVisual(); $('#book').classList.remove('open');
+    showIntro();
+    return;
+  }
+  if (!started) { bootFromUrl(); return; }
+  if (introShown()) hideIntro();
+  if (padCtx && padCtx.ui !== h) closePadVisual();
+  if (h === '' || h === 'book' || h === 'book-off') {
+    if (isMobile()) $('#book').classList.toggle('open', h === 'book');
+    else if (document.body.classList.contains('bookOff') !== (h === 'book-off')) bookOff(h === 'book-off', true);
+  }
+});
+
+/* ---------- copy link ---------- */
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch (_) {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = t; ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  } catch (_) { return false; }
+}
+$('#tLink').addEventListener('click', async () => {
+  const url = location.origin + buildUrl('');
+  const ok = await copyText(url);
+  blip();
+  toast(ok ? 'Link copied! 🔗 Share it!' : 'Could not copy the link 😕');
+});
+
 /* ---------- misc ---------- */
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closePad(); cancelPreview(); hidePieceBar(); }
+  if (e.key === 'Escape') { closePad(); closeBookSheet(); cancelPreview(); hidePieceBar(); }
 });
 document.addEventListener('gesturestart', e => e.preventDefault()); // stop iOS page zoom
 svg.addEventListener('contextmenu', e => e.preventDefault());       // no long-press menu
@@ -1311,7 +1540,8 @@ svg.addEventListener('contextmenu', e => e.preventDefault());       // no long-p
 // The back target is computed from this page's own path, so it works no matter
 // which directory the game is served from (/games/math/ inside the app, / here).
 {
-  const q = location.search;
+  const kp = keptParams();            // only the app context — never the board (play/t/v)
+  const q = kp.length ? '?' + kp.join('&') : '';
   const base = location.pathname.replace(/division\.html$/, "");
   const b = document.getElementById('backBtn');
   if (b) b.href = base + 'index.html' + q;
@@ -1319,3 +1549,5 @@ svg.addEventListener('contextmenu', e => e.preventDefault());       // no long-p
   if (ib) ib.href = base + 'index.html' + q;
 }
 addEventListener('resize', applyView);
+
+bootFromUrl();
